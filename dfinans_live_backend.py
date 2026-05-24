@@ -16,11 +16,11 @@ Kurulum:
 Çalıştırma:
     export BINANCE_LIVE_API_KEY="BURAYA_API_KEY"
     export BINANCE_LIVE_SECRET_KEY="BURAYA_SECRET_KEY"
-    export LIVE_TRADING="false"
+    export BINANCE_LIVE_TRADING="false"
     python3 dfinans_live_backend.py
 
-Telefon/Mac aynı Wi-Fi ağındaysa Swift tarafında baseURL'i şöyle yap:
-    http://MAC_IP_ADRESIN:5055
+Railway için Procfile:
+    web: gunicorn dfinans_live_backend:app --bind 0.0.0.0:$PORT
 """
 
 from __future__ import annotations
@@ -45,12 +45,16 @@ APP_NAME = "D-finans Live Backend"
 HOST = "0.0.0.0"
 PORT = int(os.getenv("DFINANS_BACKEND_PORT", "5055"))
 
-BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", "")
-BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", "")
-LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
+BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY", ""))
+BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
+LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
 
-SPOT_BASE = "https://api.binance.com"
-FUTURES_BASE = "https://fapi.binance.com"
+# Railway / cloud IP bloklarında Binance bazen ana endpoint'i 451 ile engelleyebiliyor.
+# Bu yüzden varsayılanı api1/fapi1 yaptık ve public/signed isteklerde fallback endpoint listesi kullanıyoruz.
+SPOT_BASE = os.getenv("BINANCE_SPOT_BASE", "https://api1.binance.com")
+FUTURES_BASE = os.getenv("BINANCE_FUTURES_BASE", "https://fapi1.binance.com")
+SPOT_BASES = [SPOT_BASE, "https://api.binance.com", "https://api2.binance.com", "https://api3.binance.com"]
+FUTURES_BASES = [FUTURES_BASE, "https://fapi.binance.com", "https://fapi2.binance.com", "https://fapi3.binance.com"]
 
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT"]
 
@@ -92,37 +96,71 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def unique_bases(bases: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for base in bases:
+        if base and base not in seen:
+            seen.add(base)
+            out.append(base.rstrip("/"))
+    return out
+
+
+def base_candidates(base: str) -> List[str]:
+    if "fapi" in base:
+        return unique_bases(FUTURES_BASES)
+    return unique_bases(SPOT_BASES)
+
+
+def short_binance_error(text: str) -> str:
+    # Binance 451 / restricted location hatasını kullanıcı ekranına teknik JSON olarak taşımamak için sadeleştirir.
+    if "restricted location" in text.lower() or "eligibility" in text.lower() or "451" in text:
+        return "Binance verisi bölgesel erişim nedeniyle alınamadı. Farklı endpoint/VPS bölgesi denenmeli."
+    return text
+
+
 def signed_request(method: str, base: str, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
-        raise RuntimeError("Binance API anahtarı eksik. Environment variable olarak girilmeli.")
+        raise RuntimeError("Binance API anahtarı eksik. Railway Variables içinde BINANCE_LIVE_API_KEY ve BINANCE_LIVE_SECRET_KEY girilmeli.")
 
-    params = params or {}
-    params["timestamp"] = int(time.time() * 1000)
-    query = urlencode(params, doseq=True)
-    signature = hmac.new(BINANCE_SECRET_KEY.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
-    url = f"{base}{path}?{query}&signature={signature}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+    last_error = ""
+    for try_base in base_candidates(base):
+        params2 = dict(params or {})
+        params2["timestamp"] = int(time.time() * 1000)
+        query = urlencode(params2, doseq=True)
+        signature = hmac.new(BINANCE_SECRET_KEY.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
+        url = f"{try_base}{path}?{query}&signature={signature}"
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
 
-    if method.upper() == "GET":
-        r = requests.get(url, headers=headers, timeout=12)
-    elif method.upper() == "POST":
-        r = requests.post(url, headers=headers, timeout=12)
-    elif method.upper() == "DELETE":
-        r = requests.delete(url, headers=headers, timeout=12)
-    else:
-        raise ValueError("Desteklenmeyen HTTP metodu")
+        try:
+            if method.upper() == "GET":
+                r = requests.get(url, headers=headers, timeout=12)
+            elif method.upper() == "POST":
+                r = requests.post(url, headers=headers, timeout=12)
+            elif method.upper() == "DELETE":
+                r = requests.delete(url, headers=headers, timeout=12)
+            else:
+                raise ValueError("Desteklenmeyen HTTP metodu")
 
-    if r.status_code >= 400:
-        raise RuntimeError(f"Binance hata: {r.status_code} - {r.text}")
-    return r.json()
+            if r.status_code < 400:
+                return r.json()
+            last_error = f"{r.status_code} - {short_binance_error(r.text)}"
+        except Exception as e:
+            last_error = str(e)
 
+    raise RuntimeError(f"Binance hata: {last_error}")
 
 def public_get(base: str, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    r = requests.get(f"{base}{path}", params=params or {}, timeout=12)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Public veri hatası: {r.status_code} - {r.text}")
-    return r.json()
-
+    last_error = ""
+    for try_base in base_candidates(base):
+        try:
+            r = requests.get(f"{try_base}{path}", params=params or {}, timeout=12)
+            if r.status_code < 400:
+                return r.json()
+            last_error = f"{r.status_code} - {short_binance_error(r.text)}"
+        except Exception as e:
+            last_error = str(e)
+    raise RuntimeError(f"Public veri hatası: {last_error}")
 
 def get_price(symbol: str, market: str) -> float:
     base = FUTURES_BASE if market.upper() == "FUTURES" else SPOT_BASE
@@ -459,5 +497,5 @@ if __name__ == "__main__":
     print(f"\n{APP_NAME} çalışıyor")
     print(f"Adres: http://127.0.0.1:{PORT}")
     print(f"Canlı emir modu: {LIVE_TRADING}")
-    print("Telefon için Mac IP adresini kullan: http://MAC_IP:5055\n")
+    print("Railway/Cloud için /health endpointini kontrol et.\n")
     app.run(host=HOST, port=PORT, debug=False)
