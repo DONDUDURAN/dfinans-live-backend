@@ -1,7 +1,7 @@
 {
-  "base_url": "http://192.168.1.36:5055",
+  "base_url": "https://dfinans-live-backend-production-b43e.up.railway.app",
   "fallback_urls": [
-    "https://dfinans-live-backend-production.up.railway.app",
-    "http://192.168.1.36:5055"
+    "https://dfinans-live-backend-production-b43e.up.railway.app",
+    "https://dfinans-live-backend-production.up.railway.app"
   ]
 }
