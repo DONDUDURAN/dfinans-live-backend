@@ -16,7 +16,7 @@ from flask_cors import CORS
 
 APP_NAME = "D-finans Live Backend"
 HOST = "0.0.0.0"
-PORT = int(os.getenv("DFINANS_BACKEND_PORT", "5055"))
+PORT = int(os.getenv("PORT", os.getenv("DFINANS_BACKEND_PORT", "5055")))
 
 BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY", ""))
 BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
