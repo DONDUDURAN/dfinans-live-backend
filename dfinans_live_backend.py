@@ -1796,6 +1796,7 @@ def trade_journal():
         }), 500
 
 
+init_runtime_db()
 start_background_workers_once()
 
 
