@@ -160,10 +160,20 @@ IBKR_RUNTIME: Dict[str, Any] = {
     "last_ok": "",
     "last_error": "",
     "reconnect_count": 0,
+    "failed_attempts": 0,
+    "last_fail_time": 0,
+    "circuit_breaker_open": False,
 }
 IBKR_LOCK = threading.Lock()
 KEEPALIVE_THREAD_STARTED = False
 AUTO_THREAD_STARTED = False
+
+# Risk management state
+DAILY_REALIZED_PNL = 0.0
+MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "-500.0"))
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "5"))
+LAST_ORDER_TIME: Dict[str, float] = {}
+MIN_ORDER_COOLDOWN_SEC = float(os.getenv("MIN_ORDER_COOLDOWN_SEC", "2.0"))
 
 
 def now_text() -> str:
@@ -313,7 +323,15 @@ def db_recent_trade_journal(limit: int = 150) -> List[Dict[str, Any]]:
     return out
 
 
-def db_insert_auto_history(row: Dict[str, Any]) -> None:
+def db_insert_auto_history(
+    broker: str,
+    symbol: str,
+    action: str,
+    confidence: int,
+    price: float,
+    reason: str,
+    execution: Dict[str, Any],
+) -> None:
     with DB_LOCK:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
         try:
@@ -325,13 +343,13 @@ def db_insert_auto_history(row: Dict[str, Any]) -> None:
                 (
                     str(uuid.uuid4()),
                     now_text(),
-                    str(row.get("broker", "")),
-                    str(row.get("symbol", "")),
-                    str(row.get("action", "")),
-                    int(safe_float(row.get("confidence"), 0)),
-                    safe_float(row.get("price"), 0),
-                    str(row.get("reason", "")),
-                    json.dumps(row.get("execution", {}), ensure_ascii=False),
+                    str(broker),
+                    str(symbol),
+                    str(action),
+                    int(confidence),
+                    safe_float(price, 0),
+                    str(reason),
+                    json.dumps(execution, ensure_ascii=False),
                 ),
             )
             conn.commit()
@@ -496,8 +514,31 @@ def _ibkr_disconnect_locked() -> None:
     IBKR_RUNTIME["connected"] = False
 
 
+def _ibkr_circuit_breaker_check() -> None:
+    """Check if circuit breaker should be opened due to repeated failures."""
+    failed = int(IBKR_RUNTIME.get("failed_attempts", 0))
+    last_fail = float(IBKR_RUNTIME.get("last_fail_time", 0))
+    now = time.time()
+    
+    # Circuit breaker: if >3 failures in last 60 seconds, open breaker for 30 seconds
+    if failed >= 3 and (now - last_fail) < 60:
+        IBKR_RUNTIME["circuit_breaker_open"] = True
+        print(f"[IBKR] Circuit breaker OPEN after {failed} failures. Disabling orders for 30s.")
+    elif (now - last_fail) > 90:
+        # Reset after 90 seconds of no failures
+        IBKR_RUNTIME["failed_attempts"] = 0
+        IBKR_RUNTIME["circuit_breaker_open"] = False
+        print("[IBKR] Circuit breaker reset.")
+
+
 def ensure_ibkr_connection(force_reconnect: bool = False):
     require_ibkr_enabled()
+    
+    # Check circuit breaker
+    _ibkr_circuit_breaker_check()
+    if IBKR_RUNTIME.get("circuit_breaker_open"):
+        raise RuntimeError("IBKR circuit breaker OPEN. Too many failures. Retry in 30 seconds.")
+    
     with IBKR_LOCK:
         if force_reconnect:
             _ibkr_disconnect_locked()
@@ -505,20 +546,39 @@ def ensure_ibkr_connection(force_reconnect: bool = False):
         ibs = IBKR_RUNTIME.get("ibs")
         if ib and ib.isConnected() and not force_reconnect:
             return ib, ibs
+        
         if not ibs:
             ibs = load_ib_insync()
             IBKR_RUNTIME["ibs"] = ibs
-        ib = ibs.IB()
-        ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=8)
-        if not ib.isConnected():
-            IBKR_RUNTIME["last_error"] = "IBKR bağlantısı kurulamadı."
-            raise RuntimeError("IBKR bağlantısı kurulamadı.")
-        IBKR_RUNTIME["ib"] = ib
-        IBKR_RUNTIME["connected"] = True
-        IBKR_RUNTIME["last_ok"] = now_text()
-        IBKR_RUNTIME["last_error"] = ""
-        IBKR_RUNTIME["reconnect_count"] = int(IBKR_RUNTIME.get("reconnect_count", 0)) + 1
-        return ib, ibs
+        
+        # Exponential backoff: wait 0.5s, 1s, 2s, 4s, 8s based on reconnect count
+        reconnect_count = int(IBKR_RUNTIME.get("reconnect_count", 0))
+        backoff_sec = min(0.5 * (2 ** (reconnect_count % 5)), 10.0)
+        if reconnect_count > 0:
+            print(f"[IBKR] Reconnect attempt {reconnect_count+1}, backoff {backoff_sec:.1f}s")
+            time.sleep(backoff_sec)
+        
+        try:
+            ib = ibs.IB()
+            ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=8)
+            if not ib.isConnected():
+                raise RuntimeError("IBKR bağlantısı kurulamadı.")
+            
+            IBKR_RUNTIME["ib"] = ib
+            IBKR_RUNTIME["connected"] = True
+            IBKR_RUNTIME["last_ok"] = now_text()
+            IBKR_RUNTIME["last_error"] = ""
+            IBKR_RUNTIME["reconnect_count"] = reconnect_count + 1
+            IBKR_RUNTIME["failed_attempts"] = 0
+            print(f"[IBKR] Connected successfully at attempt {reconnect_count+1}")
+            return ib, ibs
+        except Exception as e:
+            IBKR_RUNTIME["failed_attempts"] = int(IBKR_RUNTIME.get("failed_attempts", 0)) + 1
+            IBKR_RUNTIME["last_fail_time"] = time.time()
+            IBKR_RUNTIME["connected"] = False
+            IBKR_RUNTIME["last_error"] = str(e)
+            _ibkr_disconnect_locked()
+            raise
 
 
 def ibkr_execute(action):
@@ -856,6 +916,17 @@ def auto_trader_cycle() -> None:
             },
         )
         del AUTO_HISTORY[300:]
+        
+        # Log to persistent DB
+        db_insert_auto_history(
+            broker=broker,
+            symbol=symbol,
+            action=action,
+            confidence=confidence,
+            price=price,
+            reason=reason,
+            execution=execution,
+        )
 
 
 def _ibkr_keepalive_loop():
@@ -1197,6 +1268,48 @@ def calculate_ai_signal(symbol: str, market: str) -> Dict[str, Any]:
 
 
 def place_futures_order(symbol: str, side: str, quantity: float, reduce_only: bool = False, order_type: str = "MARKET") -> Dict[str, Any]:
+    request_id = str(uuid.uuid4())
+    
+    # Risk check: max daily loss
+    if DAILY_REALIZED_PNL < MAX_DAILY_LOSS:
+        error = f"Max daily loss exceeded. Current PnL: {DAILY_REALIZED_PNL} < {MAX_DAILY_LOSS}"
+        db_insert_trade_journal(
+            broker="Binance",
+            channel="auto",
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            status="REJECTED",
+            simulated=False,
+            payload={"reason": "max_daily_loss"},
+            error_text=error,
+            request_id=request_id,
+        )
+        return {"error": error, "request_id": request_id, "simulated": False}
+    
+    # Risk check: cooldown
+    last_order_time = LAST_ORDER_TIME.get(symbol, 0)
+    if time.time() - last_order_time < MIN_ORDER_COOLDOWN_SEC:
+        error = f"Order cooldown in effect for {symbol}. Min wait: {MIN_ORDER_COOLDOWN_SEC}s"
+        db_insert_trade_journal(
+            broker="Binance",
+            channel="auto",
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            status="REJECTED",
+            simulated=False,
+            payload={"reason": "cooldown"},
+            error_text=error,
+            request_id=request_id,
+        )
+        return {"error": error, "request_id": request_id, "simulated": False}
+    
+    # Dedup check
+    if request_id_seen(request_id):
+        error = "Request already seen (duplicate)"
+        return {"error": error, "request_id": request_id, "simulated": False}
+    
     if not LIVE_TRADING:
         simulated = {
             "simulated": True,
@@ -1206,7 +1319,19 @@ def place_futures_order(symbol: str, side: str, quantity: float, reduce_only: bo
             "quantity": quantity,
             "reduceOnly": reduce_only,
             "time": now_text(),
+            "request_id": request_id,
         }
+        db_insert_trade_journal(
+            broker="Binance",
+            channel="auto",
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            status="SIMULATED",
+            simulated=True,
+            payload=simulated,
+            request_id=request_id,
+        )
         TRADE_LOG.insert(0, simulated)
         return simulated
 
@@ -1217,10 +1342,37 @@ def place_futures_order(symbol: str, side: str, quantity: float, reduce_only: bo
         "quantity": quantity,
         "reduceOnly": "true" if reduce_only else "false",
     }
-    data = signed_request("POST", FUTURES_BASE, "/fapi/v1/order", params)
-    log = {"simulated": False, "time": now_text(), "order": data}
-    TRADE_LOG.insert(0, log)
-    return log
+    try:
+        data = signed_request("POST", FUTURES_BASE, "/fapi/v1/order", params)
+        log = {"simulated": False, "time": now_text(), "order": data, "request_id": request_id}
+        db_insert_trade_journal(
+            broker="Binance",
+            channel="auto",
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            status="SENT",
+            simulated=False,
+            payload=data,
+            request_id=request_id,
+        )
+        TRADE_LOG.insert(0, log)
+        LAST_ORDER_TIME[symbol] = time.time()
+        return log
+    except Exception as e:
+        db_insert_trade_journal(
+            broker="Binance",
+            channel="auto",
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            status="FAILED",
+            simulated=False,
+            payload={},
+            error_text=str(e),
+            request_id=request_id,
+        )
+        raise
 
 
 @app.route("/health", methods=["GET"])
@@ -1513,8 +1665,30 @@ def auto_trader_status():
 
 @app.route("/auto-trader/history", methods=["GET"])
 def auto_trader_history():
-    with AUTO_LOCK:
-        return jsonify({"history": AUTO_HISTORY[:120], "last_update": now_text()})
+    """Return auto-trader signal history. Combines in-memory + persistent DB."""
+    try:
+        limit = max(1, min(int(request.args.get("limit", "120")), 500))
+        
+        # Get DB records (persistent)
+        db_records = db_recent_auto_history(limit)
+        
+        # Get in-memory records (for current session)
+        with AUTO_LOCK:
+            mem_records = AUTO_HISTORY[:limit]
+        
+        return jsonify({
+            "ok": True,
+            "persistent_records": len(db_records),
+            "session_records": len(mem_records),
+            "history": db_records,
+            "last_update": now_text(),
+        })
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+            "last_update": now_text(),
+        }), 500
 
 
 @app.route("/ai/learning-report", methods=["GET"])
@@ -1564,7 +1738,8 @@ def ibkr_manual_order():
     exchange = str(body.get("exchange", "SMART"))
     currency = str(body.get("currency", "USD"))
     try:
-        return jsonify(ibkr_place_market_order(symbol, side, quantity, asset_type, exchange, currency))
+        request_id = str(uuid.uuid4())
+        return jsonify(ibkr_place_market_order(symbol, side, quantity, asset_type, exchange, currency, request_id=request_id))
     except Exception as e:
         return jsonify({
             "broker": "IBKR",
@@ -1599,6 +1774,26 @@ def close_position():
 @app.route("/trade-log", methods=["GET"])
 def trade_log():
     return jsonify({"logs": TRADE_LOG[:100], "last_update": now_text()})
+
+
+@app.route("/trade-journal", methods=["GET"])
+def trade_journal():
+    """Return persistent trade journal from SQLite database."""
+    try:
+        limit = max(1, min(int(request.args.get("limit", "150")), 500))
+        records = db_recent_trade_journal(limit)
+        return jsonify({
+            "ok": True,
+            "total": len(records),
+            "records": records,
+            "last_update": now_text(),
+        })
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+            "last_update": now_text(),
+        }), 500
 
 
 start_background_workers_once()
