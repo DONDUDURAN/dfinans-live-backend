@@ -127,6 +127,9 @@ final class TradingCenterViewModel: ObservableObject {
     @Published var lastRefresh: Date = Date()
 
     private var timer: Timer?
+    private var isRefreshingNow: Bool = false
+    private var refreshTick: Int = 0
+    private let ibkrSymbols = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ", "BTCUSD", "ETHUSD"]
 
     func saveBaseURL() {
         UserDefaults.standard.set(baseURL, forKey: "dfinans_backend_base_url")
@@ -134,7 +137,7 @@ final class TradingCenterViewModel: ObservableObject {
 
     func startAutoRefresh() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
             Task { await self?.loadAll() }
         }
     }
@@ -145,13 +148,23 @@ final class TradingCenterViewModel: ObservableObject {
     }
 
     func loadAll() async {
+        if isRefreshingNow { return }
+        isRefreshingNow = true
+        defer { isRefreshingNow = false }
         isLoading = true
         saveBaseURL()
-        await loadHealth()
-        await loadSymbols()
-        await loadPortfolio()
-        await loadEngineStatus()
-        await loadMarketAndSignal()
+        refreshTick += 1
+
+        async let healthTask: Void = loadHealth()
+        async let engineTask: Void = loadEngineStatus()
+        async let marketTask: Void = loadMarketAndSignal()
+        if refreshTick % 3 == 1 {
+            async let symbolTask: Void = loadSymbols()
+            async let portfolioTask: Void = loadPortfolio()
+            _ = await (symbolTask, portfolioTask)
+        }
+        _ = await (healthTask, engineTask, marketTask)
+
         lastRefresh = Date()
         isLoading = false
     }
@@ -165,6 +178,13 @@ final class TradingCenterViewModel: ObservableObject {
     }
 
     func loadSymbols() async {
+        if selectedBroker == "IBKR" {
+            symbols = ibkrSymbols
+            if !symbols.contains(selectedSymbol) {
+                selectedSymbol = symbols.first ?? "AAPL"
+            }
+            return
+        }
         do {
             let response: TCSymbolsResponse = try await get("/symbols?market=\(selectedMarket)")
             if !response.symbols.isEmpty {
@@ -179,6 +199,16 @@ final class TradingCenterViewModel: ObservableObject {
     }
 
     func loadPortfolio() async {
+        if selectedBroker == "IBKR" {
+            do {
+                let response: TCPositionsResponse = try await get("/ibkr/positions")
+                positions = response.positions.filter { $0.symbol != "HATA" }
+                spotBalances = []
+            } catch {
+                statusText = "IBKR pozisyonları alınamadı: \(error.localizedDescription)"
+            }
+            return
+        }
         do {
             let response: TCPortfolioResponse = try await get("/portfolio")
             positions = response.futures_positions.filter { $0.symbol != "HATA" }
@@ -199,8 +229,14 @@ final class TradingCenterViewModel: ObservableObject {
     func loadMarketAndSignal() async {
         let safeSymbol = selectedSymbol.replacingOccurrences(of: "/", with: "")
         do {
-            marketSummary = try await get("/market-summary?symbol=\(safeSymbol)&market=\(selectedMarket)")
-            aiSignal = try await get("/ai-signal?symbol=\(safeSymbol)&market=\(selectedMarket)")
+            if selectedBroker == "IBKR" {
+                let assetType = ibkrAssetType(for: safeSymbol)
+                marketSummary = try await get("/ibkr/market-summary?symbol=\(safeSymbol)&asset_type=\(assetType)&exchange=SMART&currency=USD")
+                aiSignal = try await get("/ibkr/ai-signal?symbol=\(safeSymbol)&asset_type=\(assetType)&exchange=SMART&currency=USD")
+            } else {
+                marketSummary = try await get("/market-summary?symbol=\(safeSymbol)&market=\(selectedMarket)")
+                aiSignal = try await get("/ai-signal?symbol=\(safeSymbol)&market=\(selectedMarket)")
+            }
             statusText = "Canlı veri güncellendi."
         } catch {
             statusText = "Piyasa/AI verisi alınamadı: \(error.localizedDescription)"
@@ -224,16 +260,35 @@ final class TradingCenterViewModel: ObservableObject {
         let body: [String: Any] = [
             "symbol": selectedSymbol.replacingOccurrences(of: "/", with: ""),
             "side": side,
-            "quantity": quantity,
-            "reduceOnly": false
+            "quantity": quantity
         ]
         do {
-            let _: [String: JSONValue] = try await post("/manual-order", body: body)
+            if selectedBroker == "IBKR" {
+                let symbol = selectedSymbol.replacingOccurrences(of: "/", with: "")
+                let assetType = ibkrAssetType(for: symbol)
+                var ibkrBody = body
+                ibkrBody["asset_type"] = assetType
+                ibkrBody["exchange"] = "SMART"
+                ibkrBody["currency"] = "USD"
+                let _: [String: JSONValue] = try await post("/ibkr/manual-order", body: ibkrBody)
+            } else {
+                var binanceBody = body
+                binanceBody["reduceOnly"] = false
+                let _: [String: JSONValue] = try await post("/manual-order", body: binanceBody)
+            }
             statusText = "Manuel \(side) emri backend'e gönderildi."
             await loadAll()
         } catch {
             statusText = "Emir gönderilemedi: \(error.localizedDescription)"
         }
+    }
+
+    private func ibkrAssetType(for symbol: String) -> String {
+        let clean = symbol.uppercased().replacingOccurrences(of: "-", with: "").replacingOccurrences(of: "/", with: "")
+        if ["BTCUSD", "ETHUSD"].contains(clean) {
+            return "CRYPTO"
+        }
+        return "STK"
     }
 
     func closePosition(_ position: TCPosition) async {
@@ -399,6 +454,15 @@ struct TradingCenterView: View {
                     ForEach(brokers, id: \.self) { Text($0) }
                 }
                 .pickerStyle(.segmented)
+                .onChange(of: vm.selectedBroker) { newValue in
+                    if newValue == "IBKR" {
+                        vm.selectedMarket = "SPOT"
+                        if vm.selectedSymbol.hasSuffix("USDT") {
+                            vm.selectedSymbol = "AAPL"
+                        }
+                    }
+                    Task { await vm.loadAll() }
+                }
 
                 Picker("Piyasa", selection: $vm.selectedMarket) {
                     ForEach(markets, id: \.self) { Text($0) }
