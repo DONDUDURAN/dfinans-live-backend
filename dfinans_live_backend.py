@@ -26,6 +26,7 @@ Railway için Procfile:
 from __future__ import annotations
 
 import os
+import asyncio
 import hmac
 import time
 import json
@@ -490,6 +491,17 @@ def get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 1
     return r.json()
 
 
+def ensure_thread_event_loop() -> None:
+    """
+    Python 3.14 no longer auto-creates event loops in non-main threads.
+    ib_insync expects an event loop in the current thread.
+    """
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
 def load_ib_insync():
     try:
         import ib_insync
@@ -532,6 +544,7 @@ def _ibkr_circuit_breaker_check() -> None:
 
 
 def ensure_ibkr_connection(force_reconnect: bool = False):
+    ensure_thread_event_loop()
     require_ibkr_enabled()
     
     # Check circuit breaker
@@ -582,6 +595,7 @@ def ensure_ibkr_connection(force_reconnect: bool = False):
 
 
 def ibkr_execute(action):
+    ensure_thread_event_loop()
     last_error: Optional[Exception] = None
     for attempt in range(2):
         try:
