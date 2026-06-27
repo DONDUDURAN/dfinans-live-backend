@@ -190,6 +190,21 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def init_runtime_db() -> None:
     with DB_LOCK:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
@@ -906,8 +921,11 @@ def auto_trader_cycle() -> None:
                         "message": "Paper mode: Binance gerçek emir kapalı.",
                         "time": now_text(),
                     }
-            AUTO_TRADER.daily_trade_count += 1
-            queue_signal_for_learning(symbol, action, price, eval_window)
+            if execution.get("error"):
+                AUTO_TRADER.last_error = str(execution.get("error"))
+            else:
+                AUTO_TRADER.daily_trade_count += 1
+                queue_signal_for_learning(symbol, action, price, eval_window)
 
         AUTO_TRADER.last_action = action
         AUTO_TRADER.last_confidence = confidence
@@ -1198,11 +1216,20 @@ def get_portfolio() -> Dict[str, Any]:
     spot = get_spot_balances()
     futures_positions = get_futures_positions()
     total_unrealized_pnl = sum(safe_float(p.get("pnl")) for p in futures_positions if p.get("symbol") != "HATA")
+    ibkr_positions: List[Dict[str, Any]] = []
+    ibkr_error = ""
+    if IBKR_ENABLED:
+        try:
+            ibkr_positions = ibkr_positions_snapshot()
+        except Exception as e:
+            ibkr_error = str(e)
     return {
         "last_update": now_text(),
         "live_trading": LIVE_TRADING,
         "spot_balances": spot,
         "futures_positions": futures_positions,
+        "ibkr_positions": ibkr_positions,
+        "ibkr_error": ibkr_error,
         "total_unrealized_pnl": round(total_unrealized_pnl, 2),
     }
 
@@ -1281,15 +1308,23 @@ def calculate_ai_signal(symbol: str, market: str) -> Dict[str, Any]:
     return result
 
 
-def place_futures_order(symbol: str, side: str, quantity: float, reduce_only: bool = False, order_type: str = "MARKET") -> Dict[str, Any]:
-    request_id = str(uuid.uuid4())
+def place_futures_order(
+    symbol: str,
+    side: str,
+    quantity: float,
+    reduce_only: bool = False,
+    order_type: str = "MARKET",
+    request_id: Optional[str] = None,
+    channel: str = "auto",
+) -> Dict[str, Any]:
+    request_id = str(request_id or uuid.uuid4())
     
     # Risk check: max daily loss
     if DAILY_REALIZED_PNL < MAX_DAILY_LOSS:
         error = f"Max daily loss exceeded. Current PnL: {DAILY_REALIZED_PNL} < {MAX_DAILY_LOSS}"
         db_insert_trade_journal(
             broker="Binance",
-            channel="auto",
+            channel=channel,
             symbol=symbol,
             side=side,
             quantity=quantity,
@@ -1301,23 +1336,50 @@ def place_futures_order(symbol: str, side: str, quantity: float, reduce_only: bo
         )
         return {"error": error, "request_id": request_id, "simulated": False}
     
-    # Risk check: cooldown
-    last_order_time = LAST_ORDER_TIME.get(symbol, 0)
-    if time.time() - last_order_time < MIN_ORDER_COOLDOWN_SEC:
-        error = f"Order cooldown in effect for {symbol}. Min wait: {MIN_ORDER_COOLDOWN_SEC}s"
-        db_insert_trade_journal(
-            broker="Binance",
-            channel="auto",
-            symbol=symbol,
-            side=side,
-            quantity=quantity,
-            status="REJECTED",
-            simulated=False,
-            payload={"reason": "cooldown"},
-            error_text=error,
-            request_id=request_id,
-        )
-        return {"error": error, "request_id": request_id, "simulated": False}
+    if not reduce_only:
+        # Risk check: cooldown
+        last_order_time = LAST_ORDER_TIME.get(symbol, 0)
+        if time.time() - last_order_time < MIN_ORDER_COOLDOWN_SEC:
+            error = f"Order cooldown in effect for {symbol}. Min wait: {MIN_ORDER_COOLDOWN_SEC}s"
+            db_insert_trade_journal(
+                broker="Binance",
+                channel=channel,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                status="REJECTED",
+                simulated=False,
+                payload={"reason": "cooldown"},
+                error_text=error,
+                request_id=request_id,
+            )
+            return {"error": error, "request_id": request_id, "simulated": False}
+
+        # Risk check: max concurrent symbols
+        if MAX_CONCURRENT_POSITIONS > 0:
+            open_positions = [
+                p for p in get_futures_positions()
+                if p.get("id") != "error" and p.get("symbol")
+            ]
+            open_symbols = {str(p.get("symbol")) for p in open_positions}
+            if symbol not in open_symbols and len(open_symbols) >= MAX_CONCURRENT_POSITIONS:
+                error = (
+                    f"Max concurrent position limit reached ({len(open_symbols)}/{MAX_CONCURRENT_POSITIONS}). "
+                    f"New symbol {symbol} cannot be opened."
+                )
+                db_insert_trade_journal(
+                    broker="Binance",
+                    channel=channel,
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    status="REJECTED",
+                    simulated=False,
+                    payload={"reason": "max_concurrent_positions", "open_symbols": sorted(open_symbols)},
+                    error_text=error,
+                    request_id=request_id,
+                )
+                return {"error": error, "request_id": request_id, "simulated": False}
     
     # Dedup check
     if request_id_seen(request_id):
@@ -1337,7 +1399,7 @@ def place_futures_order(symbol: str, side: str, quantity: float, reduce_only: bo
         }
         db_insert_trade_journal(
             broker="Binance",
-            channel="auto",
+            channel=channel,
             symbol=symbol,
             side=side,
             quantity=quantity,
@@ -1361,7 +1423,7 @@ def place_futures_order(symbol: str, side: str, quantity: float, reduce_only: bo
         log = {"simulated": False, "time": now_text(), "order": data, "request_id": request_id}
         db_insert_trade_journal(
             broker="Binance",
-            channel="auto",
+            channel=channel,
             symbol=symbol,
             side=side,
             quantity=quantity,
@@ -1376,7 +1438,7 @@ def place_futures_order(symbol: str, side: str, quantity: float, reduce_only: bo
     except Exception as e:
         db_insert_trade_journal(
             broker="Binance",
-            channel="auto",
+            channel=channel,
             symbol=symbol,
             side=side,
             quantity=quantity,
@@ -1728,7 +1790,8 @@ def manual_order():
     symbol = str(body.get("symbol", "ETHUSDT")).upper().replace("/", "")
     side = str(body.get("side", "BUY")).upper()
     quantity = safe_float(body.get("quantity"), 0)
-    reduce_only = bool(body.get("reduceOnly", False))
+    reduce_only = safe_bool(body.get("reduceOnly", False), False)
+    request_id = str(body.get("request_id") or request.headers.get("X-Request-ID") or uuid.uuid4())
 
     if quantity <= 0:
         return jsonify({"error": "Miktar 0'dan büyük olmalı."}), 400
@@ -1736,7 +1799,16 @@ def manual_order():
         return jsonify({"error": "side BUY veya SELL olmalı."}), 400
 
     try:
-        result = place_futures_order(symbol, side, quantity, reduce_only=reduce_only)
+        result = place_futures_order(
+            symbol,
+            side,
+            quantity,
+            reduce_only=reduce_only,
+            request_id=request_id,
+            channel="manual",
+        )
+        if result.get("error"):
+            return jsonify(result), 400
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "time": now_text()}), 500
@@ -1779,7 +1851,17 @@ def close_position():
     size = abs(safe_float(target.get("size")))
     side = "SELL" if target.get("side") == "LONG" else "BUY"
     try:
-        result = place_futures_order(symbol, side, size, reduce_only=True)
+        request_id = str(body.get("request_id") or request.headers.get("X-Request-ID") or uuid.uuid4())
+        result = place_futures_order(
+            symbol,
+            side,
+            size,
+            reduce_only=True,
+            request_id=request_id,
+            channel="manual",
+        )
+        if result.get("error"):
+            return jsonify(result), 400
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "time": now_text()}), 500
