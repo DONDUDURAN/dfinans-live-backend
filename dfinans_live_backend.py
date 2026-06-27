@@ -64,6 +64,8 @@ RUNTIME_DB_PATH = os.getenv("DFINANS_RUNTIME_DB_PATH", "/tmp/dfinans_runtime.db"
 BINANCE_PROXY_BASE_URL = os.getenv("BINANCE_PROXY_BASE_URL", "").rstrip("/")
 BINANCE_PROXY_TOKEN = os.getenv("BINANCE_PROXY_TOKEN", "")
 BINANCE_PROXY_TIMEOUT = int(os.getenv("BINANCE_PROXY_TIMEOUT", "6"))
+PUBLIC_HTTP_TIMEOUT = int(os.getenv("PUBLIC_HTTP_TIMEOUT", "5"))
+SIGNED_HTTP_TIMEOUT = int(os.getenv("SIGNED_HTTP_TIMEOUT", "8"))
 
 # Railway / cloud IP bloklarında Binance bazen ana endpoint'i 451 ile engelleyebiliyor.
 # Bu yüzden varsayılanı api1/fapi1 yaptık ve public/signed isteklerde fallback endpoint listesi kullanıyoruz.
@@ -569,11 +571,11 @@ def signed_request(method: str, base: str, path: str, params: Optional[Dict[str,
 
         try:
             if method.upper() == "GET":
-                r = requests.get(url, headers=headers, timeout=12)
+                r = requests.get(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT)
             elif method.upper() == "POST":
-                r = requests.post(url, headers=headers, timeout=12)
+                r = requests.post(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT)
             elif method.upper() == "DELETE":
-                r = requests.delete(url, headers=headers, timeout=12)
+                r = requests.delete(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT)
             else:
                 raise ValueError("Desteklenmeyen HTTP metodu")
 
@@ -589,7 +591,7 @@ def public_get(base: str, path: str, params: Optional[Dict[str, Any]] = None) ->
     last_error = ""
     for try_base in base_candidates(base):
         try:
-            r = requests.get(f"{try_base}{path}", params=params or {}, timeout=12)
+            r = requests.get(f"{try_base}{path}", params=params or {}, timeout=PUBLIC_HTTP_TIMEOUT)
             if r.status_code < 400:
                 return r.json()
             last_error = f"{r.status_code} - {short_binance_error(r.text)}"
@@ -603,7 +605,7 @@ def get_price(symbol: str, market: str) -> float:
     return safe_float(data.get("price"))
 
 
-def get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 12) -> Dict[str, Any]:
+def get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = PUBLIC_HTTP_TIMEOUT) -> Dict[str, Any]:
     headers = {"User-Agent": "Mozilla/5.0 D-finans/1.0", "Accept": "application/json"}
     r = requests.get(url, params=params or {}, headers=headers, timeout=timeout)
     r.raise_for_status()
@@ -2021,14 +2023,29 @@ def market_intel():
 
 
 def compute_cross_asset_intel() -> Dict[str, Any]:
-    btc = get_market_snapshot("BTCUSDT", "FUTURES")
-    eth = get_market_snapshot("ETHUSDT", "FUTURES")
-    gold = get_market_snapshot("XAUUSD", "SPOT")
-    reit = get_market_snapshot("VNQ", "SPOT")
-    btc_change = safe_float(btc.get("change_24h"))
-    eth_change = safe_float(eth.get("change_24h"))
-    btc_buy = safe_float((btc.get("orderbook") or {}).get("buy_pressure"), 50.0)
-    eth_buy = safe_float((eth.get("orderbook") or {}).get("buy_pressure"), 50.0)
+    def quick_change(symbol: str, market: str = "FUTURES") -> float:
+        symbol = symbol.upper()
+        if symbol in {"XAUUSD", "VNQ"}:
+            y = try_yahoo_ticker(symbol)
+            if y:
+                return safe_float(y.get("change_24h"))
+            return 0.0
+        path = "/fapi/v1/ticker/24hr" if market.upper() == "FUTURES" else "/api/v3/ticker/24hr"
+        base = FUTURES_BASE if market.upper() == "FUTURES" else SPOT_BASE
+        try:
+            r = requests.get(f"{base}{path}", params={"symbol": symbol}, timeout=3)
+            if r.status_code < 400:
+                return safe_float((r.json() or {}).get("priceChangePercent"))
+        except Exception:
+            pass
+        return 0.0
+
+    btc_change = quick_change("BTCUSDT", "FUTURES")
+    eth_change = quick_change("ETHUSDT", "FUTURES")
+    gold_change = quick_change("XAUUSD", "SPOT")
+    reit_change = quick_change("VNQ", "SPOT")
+    btc_buy = safe_float(pressure_from_change(btc_change).get("buy_pressure"), 50.0)
+    eth_buy = safe_float(pressure_from_change(eth_change).get("buy_pressure"), 50.0)
     trend_score = (btc_change + eth_change) / 2.0
     risk_score = abs(trend_score) * 10 + abs(btc_buy - 50) + abs(eth_buy - 50)
     regime = "YATAY"
@@ -2048,11 +2065,11 @@ def compute_cross_asset_intel() -> Dict[str, Any]:
         "hedge_hint": hedge,
         "btc_buy_pressure": round(btc_buy, 2),
         "eth_buy_pressure": round(eth_buy, 2),
-        "gold_change_24h": round(safe_float(gold.get("change_24h")), 3),
-        "gold_source": str(gold.get("source", "unknown")),
-        "real_estate_proxy_change_24h": round(safe_float(reit.get("change_24h")), 3),
+        "gold_change_24h": round(gold_change, 3),
+        "gold_source": "yahoo",
+        "real_estate_proxy_change_24h": round(reit_change, 3),
         "real_estate_proxy_symbol": "VNQ",
-        "real_estate_source": str(reit.get("source", "unknown")),
+        "real_estate_source": "yahoo",
     }
 
 
