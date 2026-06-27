@@ -479,6 +479,27 @@ def _binance_proxy_request(method: str, path: str, params: Optional[Dict[str, An
         raise RuntimeError(f"Binance proxy hatası: {e}") from e
 
 
+def _binance_proxy_portfolio_payload() -> Dict[str, Any]:
+    data = _binance_proxy_request("GET", "/portfolio")
+    if not isinstance(data, dict):
+        raise RuntimeError("Proxy /portfolio beklenen JSON objesini döndürmedi.")
+    return data
+
+
+def _proxy_extract_positions_from_portfolio(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = payload.get("futures_positions", [])
+    if not isinstance(rows, list):
+        return []
+    return [x for x in rows if isinstance(x, dict)]
+
+
+def _proxy_extract_balances_from_portfolio(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = payload.get("spot_balances", [])
+    if not isinstance(rows, list):
+        return []
+    return [x for x in rows if isinstance(x, dict)]
+
+
 def signed_request(method: str, base: str, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
         raise RuntimeError("Binance API anahtarı eksik. Railway Variables içinde BINANCE_LIVE_API_KEY ve BINANCE_LIVE_SECRET_KEY girilmeli.")
@@ -1200,8 +1221,15 @@ def get_futures_positions() -> List[Dict[str, Any]]:
         try:
             data = _binance_proxy_request("GET", "/binance/private/futures-positions")
             return list(data.get("positions", []))
-        except Exception as e:
-            return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": str(e)}]
+        except Exception as e1:
+            try:
+                legacy = _binance_proxy_portfolio_payload()
+                rows = _proxy_extract_positions_from_portfolio(legacy)
+                if rows:
+                    return rows
+                raise RuntimeError("Proxy /portfolio içinde futures_positions bulunamadı.")
+            except Exception as e2:
+                return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": f"{e1} | legacy: {e2}"}]
     try:
         data = signed_request("GET", FUTURES_BASE, "/fapi/v2/positionRisk", {})
         positions = []
@@ -1235,8 +1263,15 @@ def get_spot_balances() -> List[Dict[str, Any]]:
         try:
             data = _binance_proxy_request("GET", "/binance/private/spot-balances")
             return list(data.get("balances", []))
-        except Exception as e:
-            return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": str(e)}]
+        except Exception as e1:
+            try:
+                legacy = _binance_proxy_portfolio_payload()
+                rows = _proxy_extract_balances_from_portfolio(legacy)
+                if rows:
+                    return rows
+                raise RuntimeError("Proxy /portfolio içinde spot_balances bulunamadı.")
+            except Exception as e2:
+                return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": f"{e1} | legacy: {e2}"}]
     try:
         account = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
         balances = []
@@ -1357,6 +1392,7 @@ def place_futures_order(
     order_type: str = "MARKET",
     request_id: Optional[str] = None,
     channel: str = "auto",
+    use_proxy: bool = True,
 ) -> Dict[str, Any]:
     request_id = str(request_id or uuid.uuid4())
     
@@ -1452,7 +1488,7 @@ def place_futures_order(
         TRADE_LOG.insert(0, simulated)
         return simulated
 
-    if BINANCE_PROXY_BASE_URL:
+    if BINANCE_PROXY_BASE_URL and use_proxy:
         payload = {
             "symbol": symbol,
             "side": side,
@@ -1480,20 +1516,52 @@ def place_futures_order(
             TRADE_LOG.insert(0, {"simulated": False, "time": now_text(), "order": result, "request_id": request_id})
             LAST_ORDER_TIME[symbol] = time.time()
             return result
-        except Exception as e:
-            db_insert_trade_journal(
-                broker="Binance",
-                channel=channel,
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-                status="FAILED",
-                simulated=False,
-                payload={},
-                error_text=str(e),
-                request_id=request_id,
-            )
-            raise
+        except Exception as e1:
+            try:
+                legacy = _binance_proxy_request(
+                    "POST",
+                    "/manual-order",
+                    json_body={
+                        "symbol": symbol,
+                        "side": side.upper(),
+                        "quantity": quantity,
+                        "reduceOnly": reduce_only,
+                        "request_id": request_id,
+                    },
+                )
+                result = dict(legacy)
+                result.setdefault("request_id", request_id)
+                db_insert_trade_journal(
+                    broker="Binance",
+                    channel=channel,
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    status=str(result.get("status") or ("FAILED" if result.get("error") else "SENT")),
+                    simulated=bool(result.get("simulated", False)),
+                    payload=result,
+                    error_text=str(result.get("error", "")),
+                    request_id=request_id,
+                )
+                if result.get("error"):
+                    raise RuntimeError(str(result.get("error")))
+                TRADE_LOG.insert(0, {"simulated": bool(result.get("simulated", False)), "time": now_text(), "order": result, "request_id": request_id})
+                LAST_ORDER_TIME[symbol] = time.time()
+                return result
+            except Exception as e2:
+                db_insert_trade_journal(
+                    broker="Binance",
+                    channel=channel,
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    status="FAILED",
+                    simulated=False,
+                    payload={},
+                    error_text=f"{e1} | legacy: {e2}",
+                    request_id=request_id,
+                )
+                raise RuntimeError(f"Proxy order başarısız: {e1} | legacy: {e2}") from e2
 
     params = {
         "symbol": symbol,
@@ -1544,6 +1612,7 @@ def health():
         "live_trading": LIVE_TRADING,
         "api_key_loaded": bool(BINANCE_API_KEY),
         "binance_proxy_mode": bool(BINANCE_PROXY_BASE_URL),
+        "binance_proxy_base_url": BINANCE_PROXY_BASE_URL,
         "ibkr_enabled": IBKR_ENABLED,
         "ibkr_connected": bool(IBKR_RUNTIME.get("connected")),
         "auto_trader_enabled": AUTO_TRADER.enabled,
@@ -1611,6 +1680,8 @@ def binance_health():
     return jsonify({
         "ok": True,
         "proxy_mode": bool(BINANCE_PROXY_BASE_URL),
+        "proxy_base_url": BINANCE_PROXY_BASE_URL,
+        "proxy_token_set": bool(BINANCE_PROXY_TOKEN),
         "last_update": now_text(),
     })
 
@@ -1680,6 +1751,7 @@ def binance_private_order():
             order_type=str(body.get("order_type", "MARKET")),
             request_id=str(body.get("request_id") or uuid.uuid4()),
             channel=str(body.get("channel", "proxy")),
+            use_proxy=False,
         )
         code = 200 if not result.get("error") else 400
         return jsonify({"ok": code == 200, "result": result, "last_update": now_text()}), code
