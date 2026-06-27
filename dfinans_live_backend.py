@@ -61,6 +61,9 @@ IBKR_LIVE_TRADING = os.getenv("IBKR_LIVE_TRADING", "false").lower() == "true"
 AUTO_TRADER_ENABLED = os.getenv("AUTO_TRADER_ENABLED", "false").lower() == "true"
 AUTO_TRADER_MODE = os.getenv("AUTO_TRADER_MODE", "paper").lower()
 RUNTIME_DB_PATH = os.getenv("DFINANS_RUNTIME_DB_PATH", "/tmp/dfinans_runtime.db")
+BINANCE_PROXY_BASE_URL = os.getenv("BINANCE_PROXY_BASE_URL", "").rstrip("/")
+BINANCE_PROXY_TOKEN = os.getenv("BINANCE_PROXY_TOKEN", "")
+BINANCE_PROXY_TIMEOUT = int(os.getenv("BINANCE_PROXY_TIMEOUT", "12"))
 
 # Railway / cloud IP bloklarında Binance bazen ana endpoint'i 451 ile engelleyebiliyor.
 # Bu yüzden varsayılanı api1/fapi1 yaptık ve public/signed isteklerde fallback endpoint listesi kullanıyoruz.
@@ -448,6 +451,32 @@ def short_binance_error(text: str) -> str:
     if "restricted location" in text.lower() or "eligibility" in text.lower() or "451" in text:
         return "Binance verisi bölgesel erişim nedeniyle alınamadı. Farklı endpoint/VPS bölgesi denenmeli."
     return text
+
+
+def _binance_proxy_headers() -> Dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if BINANCE_PROXY_TOKEN:
+        headers["X-Binance-Proxy-Token"] = BINANCE_PROXY_TOKEN
+    return headers
+
+
+def _binance_proxy_request(method: str, path: str, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Any:
+    if not BINANCE_PROXY_BASE_URL:
+        raise RuntimeError("Binance proxy base URL ayarlı değil.")
+    url = f"{BINANCE_PROXY_BASE_URL}{path}"
+    headers = _binance_proxy_headers()
+    try:
+        if method.upper() == "GET":
+            r = requests.get(url, params=params or {}, headers=headers, timeout=BINANCE_PROXY_TIMEOUT)
+        elif method.upper() == "POST":
+            r = requests.post(url, params=params or {}, json=json_body or {}, headers=headers, timeout=BINANCE_PROXY_TIMEOUT)
+        else:
+            raise ValueError("Desteklenmeyen HTTP metodu")
+        if r.status_code >= 400:
+            raise RuntimeError(f"{r.status_code} - {short_binance_error(r.text)}")
+        return r.json()
+    except Exception as e:
+        raise RuntimeError(f"Binance proxy hatası: {e}") from e
 
 
 def signed_request(method: str, base: str, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -1167,6 +1196,12 @@ def get_market_snapshot(symbol: str, market: str) -> Dict[str, Any]:
 
 
 def get_futures_positions() -> List[Dict[str, Any]]:
+    if BINANCE_PROXY_BASE_URL:
+        try:
+            data = _binance_proxy_request("GET", "/binance/private/futures-positions")
+            return list(data.get("positions", []))
+        except Exception as e:
+            return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": str(e)}]
     try:
         data = signed_request("GET", FUTURES_BASE, "/fapi/v2/positionRisk", {})
         positions = []
@@ -1196,6 +1231,12 @@ def get_futures_positions() -> List[Dict[str, Any]]:
 
 
 def get_spot_balances() -> List[Dict[str, Any]]:
+    if BINANCE_PROXY_BASE_URL:
+        try:
+            data = _binance_proxy_request("GET", "/binance/private/spot-balances")
+            return list(data.get("balances", []))
+        except Exception as e:
+            return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": str(e)}]
     try:
         account = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
         balances = []
@@ -1411,6 +1452,49 @@ def place_futures_order(
         TRADE_LOG.insert(0, simulated)
         return simulated
 
+    if BINANCE_PROXY_BASE_URL:
+        payload = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "reduce_only": reduce_only,
+            "order_type": order_type,
+            "request_id": request_id,
+            "channel": channel,
+        }
+        try:
+            data = _binance_proxy_request("POST", "/binance/private/order", json_body=payload)
+            result = dict(data.get("result", data))
+            result.setdefault("request_id", request_id)
+            db_insert_trade_journal(
+                broker="Binance",
+                channel=channel,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                status=str(result.get("status") or "SENT"),
+                simulated=False,
+                payload=result,
+                request_id=request_id,
+            )
+            TRADE_LOG.insert(0, {"simulated": False, "time": now_text(), "order": result, "request_id": request_id})
+            LAST_ORDER_TIME[symbol] = time.time()
+            return result
+        except Exception as e:
+            db_insert_trade_journal(
+                broker="Binance",
+                channel=channel,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                status="FAILED",
+                simulated=False,
+                payload={},
+                error_text=str(e),
+                request_id=request_id,
+            )
+            raise
+
     params = {
         "symbol": symbol,
         "side": side.upper(),
@@ -1459,6 +1543,7 @@ def health():
         "time": now_text(),
         "live_trading": LIVE_TRADING,
         "api_key_loaded": bool(BINANCE_API_KEY),
+        "binance_proxy_mode": bool(BINANCE_PROXY_BASE_URL),
         "ibkr_enabled": IBKR_ENABLED,
         "ibkr_connected": bool(IBKR_RUNTIME.get("connected")),
         "auto_trader_enabled": AUTO_TRADER.enabled,
@@ -1519,6 +1604,87 @@ def portfolio():
 @app.route("/positions", methods=["GET"])
 def positions():
     return jsonify({"positions": get_futures_positions(), "last_update": now_text()})
+
+
+@app.route("/binance/health", methods=["GET"])
+def binance_health():
+    return jsonify({
+        "ok": True,
+        "proxy_mode": bool(BINANCE_PROXY_BASE_URL),
+        "last_update": now_text(),
+    })
+
+
+@app.route("/binance/private/spot-balances", methods=["GET"])
+def binance_private_spot_balances():
+    if BINANCE_PROXY_TOKEN and request.headers.get("X-Binance-Proxy-Token", "") != BINANCE_PROXY_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    try:
+        balances = []
+        account = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
+        for b in account.get("balances", []):
+            free = safe_float(b.get("free"))
+            locked = safe_float(b.get("locked"))
+            total = free + locked
+            if total <= 0:
+                continue
+            balances.append({"asset": b.get("asset", ""), "free": free, "locked": locked, "total": total})
+        return jsonify({"ok": True, "balances": balances, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "balances": [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": str(e)}], "error": str(e), "last_update": now_text()}), 500
+
+
+@app.route("/binance/private/futures-positions", methods=["GET"])
+def binance_private_futures_positions():
+    if BINANCE_PROXY_TOKEN and request.headers.get("X-Binance-Proxy-Token", "") != BINANCE_PROXY_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    try:
+        positions = []
+        data = signed_request("GET", FUTURES_BASE, "/fapi/v2/positionRisk", {})
+        for p in data:
+            amt = safe_float(p.get("positionAmt"))
+            if abs(amt) <= 0:
+                continue
+            entry = safe_float(p.get("entryPrice"))
+            mark = safe_float(p.get("markPrice"))
+            pnl = safe_float(p.get("unRealizedProfit"))
+            side = "LONG" if amt > 0 else "SHORT"
+            positions.append({
+                "id": f"BINANCE-FUTURES-{p.get('symbol')}",
+                "broker": "Binance",
+                "market": "Futures",
+                "symbol": p.get("symbol", ""),
+                "side": side,
+                "size": abs(amt),
+                "entry_price": entry,
+                "mark_price": mark,
+                "pnl": pnl,
+                "leverage": p.get("leverage", ""),
+            })
+        return jsonify({"ok": True, "positions": positions, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "positions": [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": str(e)}], "error": str(e), "last_update": now_text()}), 500
+
+
+@app.route("/binance/private/order", methods=["POST"])
+def binance_private_order():
+    if BINANCE_PROXY_TOKEN and request.headers.get("X-Binance-Proxy-Token", "") != BINANCE_PROXY_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    body = request.get_json(force=True) or {}
+    try:
+        result = place_futures_order(
+            str(body.get("symbol", "ETHUSDT")).upper().replace("/", ""),
+            str(body.get("side", "BUY")).upper(),
+            safe_float(body.get("quantity"), 0),
+            reduce_only=safe_bool(body.get("reduce_only", False)),
+            order_type=str(body.get("order_type", "MARKET")),
+            request_id=str(body.get("request_id") or uuid.uuid4()),
+            channel=str(body.get("channel", "proxy")),
+        )
+        code = 200 if not result.get("error") else 400
+        return jsonify({"ok": code == 200, "result": result, "last_update": now_text()}), code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "last_update": now_text()}), 500
 
 
 @app.route("/ibkr/positions", methods=["GET"])
