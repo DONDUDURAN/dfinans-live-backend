@@ -500,6 +500,50 @@ def _proxy_extract_balances_from_portfolio(payload: Dict[str, Any]) -> List[Dict
     return [x for x in rows if isinstance(x, dict)]
 
 
+def _proxy_extract_positions_from_legacy_positions(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = payload.get("positions", [])
+    if not isinstance(rows, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for p in rows:
+        if not isinstance(p, dict):
+            continue
+        amount = abs(safe_float(p.get("amount")))
+        side = str(p.get("side", "-")).upper()
+        if side not in {"LONG", "SHORT"}:
+            side = "LONG" if safe_float(p.get("amount")) >= 0 else "SHORT"
+        out.append({
+            "id": f"BINANCE-FUTURES-{str(p.get('symbol', 'UNK')).upper()}",
+            "broker": "Binance",
+            "market": "Futures",
+            "symbol": str(p.get("symbol", "")).upper(),
+            "side": side,
+            "size": amount,
+            "entry_price": safe_float(p.get("entry")),
+            "mark_price": safe_float(p.get("markPrice")),
+            "pnl": safe_float(p.get("pnl")),
+            "leverage": str(p.get("leverage", "")),
+        })
+    return out
+
+
+def _proxy_extract_balances_from_legacy_portfolio(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        return []
+    spot_try = safe_float(data.get("spotTry"))
+    futures_try = safe_float(data.get("futuresTry"))
+    total_try = safe_float(data.get("binanceTry") or data.get("totalTry"))
+    rows: List[Dict[str, Any]] = []
+    if total_try > 0:
+        rows.append({"asset": "BINANCE_TRY_TOTAL", "free": total_try, "locked": 0.0, "total": total_try})
+    if spot_try > 0:
+        rows.append({"asset": "SPOT_TRY_EQUIV", "free": spot_try, "locked": 0.0, "total": spot_try})
+    if futures_try > 0:
+        rows.append({"asset": "FUTURES_TRY_EQUIV", "free": futures_try, "locked": 0.0, "total": futures_try})
+    return rows
+
+
 def signed_request(method: str, base: str, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
         raise RuntimeError("Binance API anahtarı eksik. Railway Variables içinde BINANCE_LIVE_API_KEY ve BINANCE_LIVE_SECRET_KEY girilmeli.")
@@ -1227,7 +1271,11 @@ def get_futures_positions() -> List[Dict[str, Any]]:
                 rows = _proxy_extract_positions_from_portfolio(legacy)
                 if rows:
                     return rows
-                raise RuntimeError("Proxy /portfolio içinde futures_positions bulunamadı.")
+                legacy_pos = _binance_proxy_request("GET", "/positions")
+                rows2 = _proxy_extract_positions_from_legacy_positions(legacy_pos)
+                if rows2:
+                    return rows2
+                raise RuntimeError("Proxy /portfolio ve /positions üzerinde futures veri bulunamadı.")
             except Exception as e2:
                 return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": f"{e1} | legacy: {e2}"}]
     try:
@@ -1269,7 +1317,10 @@ def get_spot_balances() -> List[Dict[str, Any]]:
                 rows = _proxy_extract_balances_from_portfolio(legacy)
                 if rows:
                     return rows
-                raise RuntimeError("Proxy /portfolio içinde spot_balances bulunamadı.")
+                rows2 = _proxy_extract_balances_from_legacy_portfolio(legacy)
+                if rows2:
+                    return rows2
+                raise RuntimeError("Proxy /portfolio içinde spot balance verisi bulunamadı.")
             except Exception as e2:
                 return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": f"{e1} | legacy: {e2}"}]
     try:
