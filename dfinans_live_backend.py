@@ -63,7 +63,7 @@ AUTO_TRADER_MODE = os.getenv("AUTO_TRADER_MODE", "paper").lower()
 RUNTIME_DB_PATH = os.getenv("DFINANS_RUNTIME_DB_PATH", "/tmp/dfinans_runtime.db")
 BINANCE_PROXY_BASE_URL = os.getenv("BINANCE_PROXY_BASE_URL", "").rstrip("/")
 BINANCE_PROXY_TOKEN = os.getenv("BINANCE_PROXY_TOKEN", "")
-BINANCE_PROXY_TIMEOUT = int(os.getenv("BINANCE_PROXY_TIMEOUT", "12"))
+BINANCE_PROXY_TIMEOUT = int(os.getenv("BINANCE_PROXY_TIMEOUT", "6"))
 
 # Railway / cloud IP bloklarında Binance bazen ana endpoint'i 451 ile engelleyebiliyor.
 # Bu yüzden varsayılanı api1/fapi1 yaptık ve public/signed isteklerde fallback endpoint listesi kullanıyoruz.
@@ -2020,6 +2020,42 @@ def market_intel():
         return jsonify({"error": str(e), "last_update": now_text()}), 500
 
 
+def compute_cross_asset_intel() -> Dict[str, Any]:
+    btc = get_market_snapshot("BTCUSDT", "FUTURES")
+    eth = get_market_snapshot("ETHUSDT", "FUTURES")
+    gold = get_market_snapshot("XAUUSD", "SPOT")
+    reit = get_market_snapshot("VNQ", "SPOT")
+    btc_change = safe_float(btc.get("change_24h"))
+    eth_change = safe_float(eth.get("change_24h"))
+    btc_buy = safe_float((btc.get("orderbook") or {}).get("buy_pressure"), 50.0)
+    eth_buy = safe_float((eth.get("orderbook") or {}).get("buy_pressure"), 50.0)
+    trend_score = (btc_change + eth_change) / 2.0
+    risk_score = abs(trend_score) * 10 + abs(btc_buy - 50) + abs(eth_buy - 50)
+    regime = "YATAY"
+    if trend_score >= 1.2:
+        regime = "RISK_ON"
+    elif trend_score <= -1.2:
+        regime = "RISK_OFF"
+    hedge = "Düşük hedge"
+    if risk_score > 35:
+        hedge = "Orta hedge"
+    if risk_score > 50:
+        hedge = "Yüksek hedge"
+    return {
+        "regime": regime,
+        "trend_score": round(trend_score, 2),
+        "risk_score": round(risk_score, 2),
+        "hedge_hint": hedge,
+        "btc_buy_pressure": round(btc_buy, 2),
+        "eth_buy_pressure": round(eth_buy, 2),
+        "gold_change_24h": round(safe_float(gold.get("change_24h")), 3),
+        "gold_source": str(gold.get("source", "unknown")),
+        "real_estate_proxy_change_24h": round(safe_float(reit.get("change_24h")), 3),
+        "real_estate_proxy_symbol": "VNQ",
+        "real_estate_source": str(reit.get("source", "unknown")),
+    }
+
+
 @app.route("/ai/investment-plan", methods=["GET"])
 def ai_investment_plan():
     """
@@ -2027,11 +2063,11 @@ def ai_investment_plan():
     Bu bir yatırım tavsiyesi değildir; karar destek çıktısıdır.
     """
     try:
-        intel = market_intel().get_json()
+        intel = compute_cross_asset_intel()
         risk_score = safe_float(intel.get("risk_score"))
         trend_score = safe_float(intel.get("trend_score"))
-        gold_change = safe_float((intel.get("cross_asset") or {}).get("gold_change_24h"))
-        reit_change = safe_float((intel.get("cross_asset") or {}).get("real_estate_proxy_change_24h"))
+        gold_change = safe_float(intel.get("gold_change_24h"))
+        reit_change = safe_float(intel.get("real_estate_proxy_change_24h"))
 
         # Basit, yorumlanabilir puanlama
         crypto_weight = 45.0 if trend_score > 0 else 30.0
@@ -2092,7 +2128,7 @@ def ai_investment_plan():
 @app.route("/economy-radar", methods=["GET"])
 def economy_radar():
     try:
-        intel = market_intel().get_json()
+        intel = compute_cross_asset_intel()
         plan = ai_investment_plan().get_json()
         return jsonify({
             "ok": True,
