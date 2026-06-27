@@ -7,6 +7,8 @@ struct TCHealth: Codable {
     let time: String
     let live_trading: Bool
     let api_key_loaded: Bool
+    let binance_proxy_mode: Bool?
+    let ibkr_connected: Bool?
 }
 
 struct TCSymbolsResponse: Codable {
@@ -85,6 +87,8 @@ struct TCPortfolioResponse: Codable {
     let spot_balances: [TCSpotBalance]
     let futures_positions: [TCPosition]
     let total_unrealized_pnl: Double
+    let ibkr_connected: Bool?
+    let ibkr_error: String?
 }
 
 struct TCEngineStatus: Codable {
@@ -101,13 +105,29 @@ struct TCEngineStatus: Codable {
     let live_trading: Bool
 }
 
+struct TCInvestmentPlan: Codable {
+    let crypto_pct: Double
+    let gold_pct: Double
+    let real_estate_pct: Double
+    let cash_pct: Double
+}
+
+struct TCInvestmentAdviceResponse: Codable {
+    let ok: Bool
+    let plan: TCInvestmentPlan?
+    let rationale: [String]?
+    let disclaimer: String?
+    let last_update: String?
+    let error: String?
+}
+
 // MARK: - ViewModel
 
 @MainActor
 final class TradingCenterViewModel: ObservableObject {
     // Mac IP adresini burada değiştir.
     // Örnek: http://192.168.1.40:5055
-    @Published var baseURL: String = UserDefaults.standard.string(forKey: "dfinans_backend_base_url") ?? "http://127.0.0.1:5055"
+    @Published var baseURL: String = UserDefaults.standard.string(forKey: "dfinans_backend_base_url") ?? "https://dfinans-live-backend-production-b43e.up.railway.app"
 
     @Published var selectedBroker: String = "Binance"
     @Published var selectedMarket: String = "FUTURES"
@@ -118,6 +138,7 @@ final class TradingCenterViewModel: ObservableObject {
     @Published var marketSummary: TCMarketSummary?
     @Published var aiSignal: TCAISignal?
     @Published var engineStatus: TCEngineStatus?
+    @Published var investmentAdvice: TCInvestmentAdviceResponse?
     @Published var positions: [TCPosition] = []
     @Published var spotBalances: [TCSpotBalance] = []
 
@@ -130,6 +151,14 @@ final class TradingCenterViewModel: ObservableObject {
     private var isRefreshingNow: Bool = false
     private var refreshTick: Int = 0
     private let ibkrSymbols = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ", "BTCUSD", "ETHUSD"]
+    private lazy var session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 8
+        config.timeoutIntervalForResource = 12
+        config.waitsForConnectivity = false
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
 
     func saveBaseURL() {
         UserDefaults.standard.set(baseURL, forKey: "dfinans_backend_base_url")
@@ -137,7 +166,7 @@ final class TradingCenterViewModel: ObservableObject {
 
     func startAutoRefresh() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { await self?.loadAll() }
         }
     }
@@ -158,12 +187,12 @@ final class TradingCenterViewModel: ObservableObject {
         async let healthTask: Void = loadHealth()
         async let engineTask: Void = loadEngineStatus()
         async let marketTask: Void = loadMarketAndSignal()
+        async let adviceTask: Void = loadInvestmentAdvice()
         if refreshTick % 3 == 1 {
-            async let symbolTask: Void = loadSymbols()
-            async let portfolioTask: Void = loadPortfolio()
-            _ = await (symbolTask, portfolioTask)
+            Task { await self.loadSymbols() }
+            Task { await self.loadPortfolio() }
         }
-        _ = await (healthTask, engineTask, marketTask)
+        _ = await (healthTask, engineTask, marketTask, adviceTask)
 
         lastRefresh = Date()
         isLoading = false
@@ -213,6 +242,9 @@ final class TradingCenterViewModel: ObservableObject {
             let response: TCPortfolioResponse = try await get("/portfolio")
             positions = response.futures_positions.filter { $0.symbol != "HATA" }
             spotBalances = response.spot_balances.filter { $0.asset != "HATA" }
+            if response.ibkr_connected == false, let ibkrErr = response.ibkr_error, !ibkrErr.isEmpty {
+                statusText = "Portföy güncellendi (IBKR: \(ibkrErr))"
+            }
         } catch {
             statusText = "Portföy alınamadı: \(error.localizedDescription)"
         }
@@ -240,6 +272,14 @@ final class TradingCenterViewModel: ObservableObject {
             statusText = "Canlı veri güncellendi."
         } catch {
             statusText = "Piyasa/AI verisi alınamadı: \(error.localizedDescription)"
+        }
+    }
+
+    func loadInvestmentAdvice() async {
+        do {
+            investmentAdvice = try await get("/ai/investment-plan")
+        } catch {
+            // Tavsiye endpoint'i kritik değil; ana akışı bozmasın.
         }
     }
 
@@ -309,7 +349,7 @@ final class TradingCenterViewModel: ObservableObject {
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
         let url = try makeURL(path)
-        let (data, response) = try await URLSession.shared.data(from: url)
+        let (data, response) = try await session.data(from: url)
         try validate(response, data: data)
         return try JSONDecoder().decode(T.self, from: data)
     }
@@ -320,7 +360,7 @@ final class TradingCenterViewModel: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         try validate(response, data: data)
         return try JSONDecoder().decode(T.self, from: data)
     }
@@ -359,6 +399,7 @@ struct TradingCenterView: View {
                     backendCard
                     selectorCard
                     aiDecisionCard
+                    investmentAdviceCard
                     marketCard
                     manualOrderCard
                     positionsCard
@@ -564,6 +605,44 @@ struct TradingCenterView: View {
         }
     }
 
+    private var investmentAdviceCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Bugün Yatırım Önerisi")
+                        .font(.headline)
+                    Spacer()
+                    Text(investmentAdviceTime)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.60))
+                }
+
+                if let plan = vm.investmentAdvice?.plan {
+                    HStack(spacing: 10) {
+                        bigMetric(title: "Kripto", value: "%\(String(format: "%.0f", plan.crypto_pct))")
+                        bigMetric(title: "Altın", value: "%\(String(format: "%.0f", plan.gold_pct))")
+                        bigMetric(title: "Arsa/REIT", value: "%\(String(format: "%.0f", plan.real_estate_pct))")
+                        bigMetric(title: "Nakit", value: "%\(String(format: "%.0f", plan.cash_pct))")
+                    }
+                }
+
+                let reasons = vm.investmentAdvice?.rationale ?? []
+                if reasons.isEmpty {
+                    Text("AI yatırım önerisi yükleniyor.")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.75))
+                } else {
+                    ForEach(Array(reasons.prefix(3).enumerated()), id: \.offset) { _, reason in
+                        Text("• \(reason)")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
     private var manualOrderCard: some View {
         card {
             VStack(alignment: .leading, spacing: 12) {
@@ -762,6 +841,10 @@ struct TradingCenterView: View {
         case "WATCH_SELL": return "SAT İzle"
         default: return "Bekle"
         }
+    }
+
+    private var investmentAdviceTime: String {
+        vm.investmentAdvice?.last_update ?? "-"
     }
 
     private func formatPrice(_ value: Double?) -> String {

@@ -96,10 +96,20 @@ YAHOO_MAP = {
     "BNBUSDT": "BNB-USD",
     "XRPUSDT": "XRP-USD",
     "ADAUSDT": "ADA-USD",
+    "XAUUSD": "GC=F",
+    "VNQ": "VNQ",
 }
 
 app = Flask(__name__)
 CORS(app)
+
+
+@app.after_request
+def apply_no_cache_headers(response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 state_lock = threading.Lock()
 
@@ -1339,23 +1349,58 @@ def get_spot_balances() -> List[Dict[str, Any]]:
         return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": str(e)}]
 
 
+def build_binance_summary(spot_balances: List[Dict[str, Any]], futures_positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    summary = {
+        "currency": "USD_ESTIMATE",
+        "spot_total": 0.0,
+        "futures_total": 0.0,
+        "binance_total": 0.0,
+        "unrealized_pnl": 0.0,
+    }
+    if any(str(x.get("asset")) == "BINANCE_TRY_TOTAL" for x in spot_balances):
+        summary["currency"] = "TRY_EQUIV"
+        summary["spot_total"] = safe_float(next((x.get("total") for x in spot_balances if str(x.get("asset")) == "SPOT_TRY_EQUIV"), 0.0))
+        summary["futures_total"] = safe_float(next((x.get("total") for x in spot_balances if str(x.get("asset")) == "FUTURES_TRY_EQUIV"), 0.0))
+        summary["binance_total"] = safe_float(next((x.get("total") for x in spot_balances if str(x.get("asset")) == "BINANCE_TRY_TOTAL"), 0.0))
+    else:
+        spot_usd = 0.0
+        for x in spot_balances:
+            asset = str(x.get("asset", "")).upper()
+            total = safe_float(x.get("total"))
+            if asset in {"USDT", "USDC", "BUSD", "FDUSD"}:
+                spot_usd += total
+        futures_notional = sum(abs(safe_float(x.get("mark_price")) * safe_float(x.get("size"))) for x in futures_positions if x.get("symbol") != "HATA")
+        summary["spot_total"] = round(spot_usd, 4)
+        summary["futures_total"] = round(futures_notional, 4)
+        summary["binance_total"] = round(spot_usd + futures_notional, 4)
+    summary["unrealized_pnl"] = round(sum(safe_float(x.get("pnl")) for x in futures_positions if x.get("symbol") != "HATA"), 4)
+    return summary
+
+
 def get_portfolio() -> Dict[str, Any]:
     spot = get_spot_balances()
     futures_positions = get_futures_positions()
     total_unrealized_pnl = sum(safe_float(p.get("pnl")) for p in futures_positions if p.get("symbol") != "HATA")
+    binance_summary = build_binance_summary(spot, futures_positions)
     ibkr_positions: List[Dict[str, Any]] = []
     ibkr_error = ""
+    ibkr_connected = bool(IBKR_RUNTIME.get("connected"))
     if IBKR_ENABLED:
-        try:
-            ibkr_positions = ibkr_positions_snapshot()
-        except Exception as e:
-            ibkr_error = str(e)
+        if ibkr_connected:
+            try:
+                ibkr_positions = ibkr_positions_snapshot()
+            except Exception as e:
+                ibkr_error = str(e)
+        else:
+            ibkr_error = str(IBKR_RUNTIME.get("last_error", "") or "IBKR bağlı değil.")
     return {
         "last_update": now_text(),
         "live_trading": LIVE_TRADING,
         "spot_balances": spot,
         "futures_positions": futures_positions,
+        "binance_summary": binance_summary,
         "ibkr_positions": ibkr_positions,
+        "ibkr_connected": ibkr_connected,
         "ibkr_error": ibkr_error,
         "total_unrealized_pnl": round(total_unrealized_pnl, 2),
     }
@@ -1923,6 +1968,8 @@ def market_intel():
     try:
         btc = get_market_snapshot("BTCUSDT", "FUTURES")
         eth = get_market_snapshot("ETHUSDT", "FUTURES")
+        gold = get_market_snapshot("XAUUSD", "SPOT")
+        reit = get_market_snapshot("VNQ", "SPOT")
         btc_change = safe_float(btc.get("change_24h"))
         eth_change = safe_float(eth.get("change_24h"))
         btc_buy = safe_float((btc.get("orderbook") or {}).get("buy_pressure"), 50.0)
@@ -1959,11 +2006,103 @@ def market_intel():
                 "eth_buy_pressure": round(eth_buy, 2),
                 "comment": "Emir defteri baskısı anlık whale izleme göstergesi olarak kullanılıyor.",
             },
+            "cross_asset": {
+                "gold_change_24h": round(safe_float(gold.get("change_24h")), 3),
+                "gold_source": str(gold.get("source", "unknown")),
+                "real_estate_proxy_change_24h": round(safe_float(reit.get("change_24h")), 3),
+                "real_estate_proxy_symbol": "VNQ",
+                "real_estate_source": str(reit.get("source", "unknown")),
+            },
             "macro_note": "Bu çıktı yatırım tavsiyesi değildir; küresel makro koşullar için ek veri kaynağıyla birlikte değerlendirilmelidir.",
             "last_update": now_text(),
         })
     except Exception as e:
         return jsonify({"error": str(e), "last_update": now_text()}), 500
+
+
+@app.route("/ai/investment-plan", methods=["GET"])
+def ai_investment_plan():
+    """
+    Güncel veriyle bugün için gerekçeli varlık dağılım önerisi üretir.
+    Bu bir yatırım tavsiyesi değildir; karar destek çıktısıdır.
+    """
+    try:
+        intel = market_intel().get_json()
+        risk_score = safe_float(intel.get("risk_score"))
+        trend_score = safe_float(intel.get("trend_score"))
+        gold_change = safe_float((intel.get("cross_asset") or {}).get("gold_change_24h"))
+        reit_change = safe_float((intel.get("cross_asset") or {}).get("real_estate_proxy_change_24h"))
+
+        # Basit, yorumlanabilir puanlama
+        crypto_weight = 45.0 if trend_score > 0 else 30.0
+        gold_weight = 25.0
+        cash_weight = 20.0
+        real_estate_weight = 10.0
+        if risk_score >= 45:
+            crypto_weight = 25.0
+            gold_weight = 35.0
+            cash_weight = 30.0
+            real_estate_weight = 10.0
+        elif risk_score <= 25 and trend_score > 0.8:
+            crypto_weight = 50.0
+            gold_weight = 20.0
+            cash_weight = 20.0
+            real_estate_weight = 10.0
+
+        if gold_change > 0.8:
+            gold_weight += 5.0
+            cash_weight -= 5.0
+        if reit_change < -0.8:
+            real_estate_weight -= 3.0
+            cash_weight += 3.0
+
+        total = crypto_weight + gold_weight + cash_weight + real_estate_weight
+        if total != 100:
+            cash_weight += 100 - total
+
+        rationale = [
+            f"Piyasa rejimi: {intel.get('regime', 'YATAY')}, risk skoru: {round(risk_score, 2)}.",
+            f"Kripto trend skoru {round(trend_score, 2)} olduğundan kripto ağırlığı %{round(crypto_weight,1)}.",
+            f"Altın 24s değişimi %{round(gold_change,2)}; portföyde koruma amacıyla altın %{round(gold_weight,1)}.",
+            f"Gayrimenkul proxy (VNQ) 24s %{round(reit_change,2)}; temkinli pay %{round(real_estate_weight,1)}.",
+            f"Nakit payı %{round(cash_weight,1)} ile kısa vadeli belirsizlik tamponu korunuyor.",
+        ]
+
+        return jsonify({
+            "ok": True,
+            "plan": {
+                "crypto_pct": round(crypto_weight, 1),
+                "gold_pct": round(gold_weight, 1),
+                "real_estate_pct": round(real_estate_weight, 1),
+                "cash_pct": round(cash_weight, 1),
+            },
+            "rationale": rationale,
+            "risk_context": {
+                "risk_score": round(risk_score, 2),
+                "trend_score": round(trend_score, 2),
+                "hedge_hint": intel.get("hedge_hint", ""),
+            },
+            "disclaimer": "Bu çıktı yatırım tavsiyesi değildir; kendi risk profilin ve vade planınla birlikte değerlendirilmelidir.",
+            "last_update": now_text(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "last_update": now_text()}), 500
+
+
+@app.route("/economy-radar", methods=["GET"])
+def economy_radar():
+    try:
+        intel = market_intel().get_json()
+        plan = ai_investment_plan().get_json()
+        return jsonify({
+            "ok": True,
+            "intel": intel,
+            "today_plan": plan.get("plan", {}),
+            "today_rationale": plan.get("rationale", []),
+            "last_update": now_text(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "last_update": now_text()}), 500
 
 
 @app.route("/ai-engine/on", methods=["POST"])
