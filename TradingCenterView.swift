@@ -81,11 +81,20 @@ struct TCSpotBalance: Codable, Identifiable {
     let error: String?
 }
 
+struct TCBinanceSummary: Codable {
+    let currency: String
+    let spot_total: Double
+    let futures_total: Double
+    let binance_total: Double
+    let unrealized_pnl: Double
+}
+
 struct TCPortfolioResponse: Codable {
     let last_update: String
     let live_trading: Bool
     let spot_balances: [TCSpotBalance]
     let futures_positions: [TCPosition]
+    let binance_summary: TCBinanceSummary?
     let total_unrealized_pnl: Double
     let ibkr_connected: Bool?
     let ibkr_error: String?
@@ -125,9 +134,10 @@ struct TCInvestmentAdviceResponse: Codable {
 
 @MainActor
 final class TradingCenterViewModel: ObservableObject {
+    private let forcedBackendURL = "https://dfinans-live-backend-production-b43e.up.railway.app"
     // Mac IP adresini burada değiştir.
     // Örnek: http://192.168.1.40:5055
-    @Published var baseURL: String = UserDefaults.standard.string(forKey: "dfinans_backend_base_url") ?? "https://dfinans-live-backend-production-b43e.up.railway.app"
+    @Published var baseURL: String = "https://dfinans-live-backend-production-b43e.up.railway.app"
 
     @Published var selectedBroker: String = "Binance"
     @Published var selectedMarket: String = "FUTURES"
@@ -141,6 +151,7 @@ final class TradingCenterViewModel: ObservableObject {
     @Published var investmentAdvice: TCInvestmentAdviceResponse?
     @Published var positions: [TCPosition] = []
     @Published var spotBalances: [TCSpotBalance] = []
+    @Published var binanceSummary: TCBinanceSummary?
 
     @Published var quantityText: String = "0.01"
     @Published var statusText: String = "Backend bağlantısı bekleniyor."
@@ -161,7 +172,8 @@ final class TradingCenterViewModel: ObservableObject {
     }()
 
     func saveBaseURL() {
-        UserDefaults.standard.set(baseURL, forKey: "dfinans_backend_base_url")
+        baseURL = forcedBackendURL
+        UserDefaults.standard.set(forcedBackendURL, forKey: "dfinans_backend_base_url")
     }
 
     func startAutoRefresh() {
@@ -233,6 +245,7 @@ final class TradingCenterViewModel: ObservableObject {
                 let response: TCPositionsResponse = try await get("/ibkr/positions")
                 positions = response.positions.filter { $0.symbol != "HATA" }
                 spotBalances = []
+                binanceSummary = nil
             } catch {
                 statusText = "IBKR pozisyonları alınamadı: \(error.localizedDescription)"
             }
@@ -242,6 +255,7 @@ final class TradingCenterViewModel: ObservableObject {
             let response: TCPortfolioResponse = try await get("/portfolio")
             positions = response.futures_positions.filter { $0.symbol != "HATA" }
             spotBalances = response.spot_balances.filter { $0.asset != "HATA" }
+            binanceSummary = response.binance_summary
             if response.ibkr_connected == false, let ibkrErr = response.ibkr_error, !ibkrErr.isEmpty {
                 statusText = "Portföy güncellendi (IBKR: \(ibkrErr))"
             }
@@ -402,6 +416,7 @@ struct TradingCenterView: View {
                     investmentAdviceCard
                     marketCard
                     manualOrderCard
+                    balanceSummaryCard
                     positionsCard
                     spotBalancesCard
                     statusCard
@@ -671,6 +686,31 @@ struct TradingCenterView: View {
                 Text("Gerçek emir için backend tarafında LIVE_TRADING=true olmalı. Kapalıysa emir simülasyon loguna düşer.")
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.60))
+            }
+        }
+
+        private var balanceSummaryCard: some View {
+            card {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Binance Toplam")
+                        .font(.headline)
+
+                    if let summary = vm.binanceSummary {
+                        HStack(spacing: 10) {
+                            bigMetric(title: "Toplam", value: "\(formatNumber(summary.binance_total)) \(summary.currency)")
+                            bigMetric(title: "Spot", value: "\(formatNumber(summary.spot_total)) \(summary.currency)")
+                            bigMetric(title: "Futures", value: "\(formatNumber(summary.futures_total)) \(summary.currency)")
+                        }
+                    } else {
+                        let fallbackTotal = vm.spotBalances.first(where: { $0.asset == "BINANCE_TRY_TOTAL" })?.total
+                        if let fallbackTotal {
+                            Text("\(formatNumber(fallbackTotal)) TRY_EQUIV")
+                                .font(.title3.monospacedDigit().bold())
+                        } else {
+                            emptyText("Toplam bakiye henüz alınamadı.")
+                        }
+                    }
+                }
             }
         }
     }

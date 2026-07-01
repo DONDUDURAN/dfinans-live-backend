@@ -1395,12 +1395,30 @@ def get_portfolio() -> Dict[str, Any]:
                 ibkr_error = str(e)
         else:
             ibkr_error = str(IBKR_RUNTIME.get("last_error", "") or "IBKR bağlı değil.")
+    spot_try = safe_float(next((x.get("total") for x in spot if str(x.get("asset")) == "SPOT_TRY_EQUIV"), 0.0))
+    futures_try = safe_float(next((x.get("total") for x in spot if str(x.get("asset")) == "FUTURES_TRY_EQUIV"), 0.0))
+    total_try = safe_float(next((x.get("total") for x in spot if str(x.get("asset")) == "BINANCE_TRY_TOTAL"), 0.0))
+    if total_try <= 0 and safe_float(binance_summary.get("binance_total")) > 0:
+        total_try = safe_float(binance_summary.get("binance_total"))
+        spot_try = safe_float(binance_summary.get("spot_total"))
+        futures_try = safe_float(binance_summary.get("futures_total"))
     return {
         "last_update": now_text(),
         "live_trading": LIVE_TRADING,
         "spot_balances": spot,
         "futures_positions": futures_positions,
         "binance_summary": binance_summary,
+        # Legacy mobile clients read these fields directly from /portfolio.
+        "data": {
+            "binanceTry": round(total_try, 2),
+            "totalTry": round(total_try, 2),
+            "spotTry": round(spot_try, 2),
+            "futuresTry": round(futures_try, 2),
+            "cashTry": 0.0,
+            "fundingTry": 0.0,
+            "goldFxTry": 0.0,
+            "ibkrTry": 0.0,
+        },
         "ibkr_positions": ibkr_positions,
         "ibkr_connected": ibkr_connected,
         "ibkr_error": ibkr_error,
