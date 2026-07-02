@@ -1361,11 +1361,19 @@ def get_futures_positions() -> List[Dict[str, Any]]:
 def binance_position_profit_pct(position: Dict[str, Any]) -> float:
     entry = safe_float(position.get("entry_price"))
     mark = safe_float(position.get("mark_price"))
+    pnl = safe_float(position.get("pnl"))
+    size = abs(safe_float(position.get("size")))
+    leverage = max(1.0, safe_float(position.get("leverage"), 1.0))
     if entry <= 0 or mark <= 0:
         return 0.0
+    if pnl != 0 and size > 0:
+        initial_margin = (entry * size) / leverage
+        if initial_margin > 0:
+            return (pnl / initial_margin) * 100.0
     side = str(position.get("side", "")).upper()
     raw_pct = ((mark - entry) / entry) * 100.0
-    return raw_pct if side == "LONG" else -raw_pct
+    directional_pct = raw_pct if side == "LONG" else -raw_pct
+    return directional_pct * leverage
 
 
 def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any]]:
@@ -1393,7 +1401,7 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
             request_id=request_id,
             channel=channel,
         )
-        result["trigger"] = "take_profit_pct"
+        result["trigger"] = "take_profit_roi_pct"
         result["trigger_pct"] = round(profit_pct, 4)
         result["target_pct"] = BINANCE_TAKE_PROFIT_PCT
         return result
