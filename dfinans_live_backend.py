@@ -1724,6 +1724,34 @@ def place_futures_order(
             return result
         except Exception as e1:
             try:
+                if reduce_only:
+                    legacy_close = _binance_proxy_request(
+                        "POST",
+                        "/close-position",
+                        json_body={
+                            "symbol": symbol,
+                            "request_id": request_id,
+                        },
+                    )
+                    result = dict(legacy_close)
+                    result.setdefault("request_id", request_id)
+                    db_insert_trade_journal(
+                        broker="Binance",
+                        channel=channel,
+                        symbol=symbol,
+                        side=side,
+                        quantity=quantity,
+                        status=str(result.get("status") or ("FAILED" if result.get("error") else "SENT")),
+                        simulated=bool(result.get("simulated", False)),
+                        payload=result,
+                        error_text=str(result.get("error", "")),
+                        request_id=request_id,
+                    )
+                    if result.get("error"):
+                        raise RuntimeError(str(result.get("error")))
+                    TRADE_LOG.insert(0, {"simulated": bool(result.get("simulated", False)), "time": now_text(), "order": result, "request_id": request_id})
+                    LAST_ORDER_TIME[symbol] = time.time()
+                    return result
                 legacy = _binance_proxy_request(
                     "POST",
                     "/manual-order",
