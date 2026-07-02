@@ -190,6 +190,7 @@ MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "-500.0"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "5"))
 LAST_ORDER_TIME: Dict[str, float] = {}
 MIN_ORDER_COOLDOWN_SEC = float(os.getenv("MIN_ORDER_COOLDOWN_SEC", "2.0"))
+BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "5.0"))
 
 
 def now_text() -> str:
@@ -971,6 +972,45 @@ def auto_trader_cycle() -> None:
     price = 0.0
     execution: Dict[str, Any] = {"simulated": True, "message": "Emir yok"}
 
+    if broker == "BINANCE":
+        tp_execution = enforce_binance_take_profit(channel="auto_take_profit")
+        if tp_execution:
+            with AUTO_LOCK:
+                AUTO_TRADER.last_action = "TAKE_PROFIT"
+                AUTO_TRADER.last_confidence = 100
+                AUTO_TRADER.last_reason = (
+                    f"{tp_execution.get('symbol', symbol)} için %"
+                    f"{tp_execution.get('target_pct', BINANCE_TAKE_PROFIT_PCT)} kâr hedefi tetiklendi."
+                )
+                AUTO_TRADER.last_price = 0.0
+                AUTO_TRADER.last_update = now_text()
+                AUTO_TRADER.last_error = str(tp_execution.get("error", "") or "")
+                AUTO_TRADER.updated_at_epoch = time.time()
+                AUTO_HISTORY.insert(
+                    0,
+                    {
+                        "time": AUTO_TRADER.last_update,
+                        "broker": broker,
+                        "symbol": tp_execution.get("symbol", symbol),
+                        "action": "TAKE_PROFIT",
+                        "confidence": 100,
+                        "price": 0.0,
+                        "reason": AUTO_TRADER.last_reason,
+                        "execution": tp_execution,
+                    },
+                )
+                del AUTO_HISTORY[300:]
+                db_insert_auto_history(
+                    broker=broker,
+                    symbol=str(tp_execution.get("symbol", symbol)),
+                    action="TAKE_PROFIT",
+                    confidence=100,
+                    price=0.0,
+                    reason=AUTO_TRADER.last_reason,
+                    execution=tp_execution,
+                )
+            return
+
     if broker == "IBKR":
         snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency)
         price = safe_float(snap.get("price"))
@@ -1316,6 +1356,48 @@ def get_futures_positions() -> List[Dict[str, Any]]:
         return positions
     except Exception as e:
         return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": str(e)}]
+
+
+def binance_position_profit_pct(position: Dict[str, Any]) -> float:
+    entry = safe_float(position.get("entry_price"))
+    mark = safe_float(position.get("mark_price"))
+    if entry <= 0 or mark <= 0:
+        return 0.0
+    side = str(position.get("side", "")).upper()
+    raw_pct = ((mark - entry) / entry) * 100.0
+    return raw_pct if side == "LONG" else -raw_pct
+
+
+def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any]]:
+    if BINANCE_TAKE_PROFIT_PCT <= 0:
+        return None
+    positions = [
+        p for p in get_futures_positions()
+        if p.get("id") != "error" and str(p.get("symbol", "")).upper() != "HATA"
+    ]
+    for position in positions:
+        profit_pct = binance_position_profit_pct(position)
+        if profit_pct < BINANCE_TAKE_PROFIT_PCT:
+            continue
+        symbol = str(position.get("symbol", "")).upper()
+        size = abs(safe_float(position.get("size")))
+        if not symbol or size <= 0:
+            continue
+        close_side = "SELL" if str(position.get("side", "")).upper() == "LONG" else "BUY"
+        request_id = f"tp-{symbol}-{int(time.time())}"
+        result = place_futures_order(
+            symbol,
+            close_side,
+            size,
+            reduce_only=True,
+            request_id=request_id,
+            channel=channel,
+        )
+        result["trigger"] = "take_profit_pct"
+        result["trigger_pct"] = round(profit_pct, 4)
+        result["target_pct"] = BINANCE_TAKE_PROFIT_PCT
+        return result
+    return None
 
 
 def get_spot_balances() -> List[Dict[str, Any]]:
