@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "dockerfile",
+    "buildCommand": "docker build -f ibgateway.Dockerfile -t ibkr-gateway ."
+  },
+  "deploy": {
+    "startCommand": "echo 'IBKR Gateway running'",
+    "restartPolicyMaxRetries": 5,
+    "restartPolicyWindowMs": 60000
+  }
+}

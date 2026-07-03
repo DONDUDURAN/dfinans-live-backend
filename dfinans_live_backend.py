@@ -51,7 +51,7 @@ PORT = int(os.getenv("PORT", os.getenv("DFINANS_BACKEND_PORT", "5055")))
 BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY", ""))
 BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
 LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
-IBKR_ENABLED = os.getenv("IBKR_ENABLED", "false").lower() == "true"
+IBKR_ENABLED = os.getenv("IBKR_ENABLED", "false").lower() == "true"  # Disabled by default; VPS connectivity issues
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = int(os.getenv("IBKR_PORT", "7497"))
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "21"))
