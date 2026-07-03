@@ -1315,21 +1315,29 @@ def get_market_snapshot(symbol: str, market: str) -> Dict[str, Any]:
 def get_futures_positions() -> List[Dict[str, Any]]:
     if BINANCE_PROXY_BASE_URL:
         try:
+            # Try direct /positions endpoint first
+            legacy_pos = _binance_proxy_request("GET", "/positions")
+            rows = _proxy_extract_positions_from_legacy_positions(legacy_pos)
+            if rows:
+                return rows
+        except Exception:
+            pass
+        
+        try:
+            # Try /binance/private/futures-positions
             data = _binance_proxy_request("GET", "/binance/private/futures-positions")
             return list(data.get("positions", []))
-        except Exception as e1:
-            try:
-                legacy = _binance_proxy_portfolio_payload()
-                rows = _proxy_extract_positions_from_portfolio(legacy)
-                if rows:
-                    return rows
-                legacy_pos = _binance_proxy_request("GET", "/positions")
-                rows2 = _proxy_extract_positions_from_legacy_positions(legacy_pos)
-                if rows2:
-                    return rows2
-                raise RuntimeError("Proxy /portfolio ve /positions üzerinde futures veri bulunamadı.")
-            except Exception as e2:
-                return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": f"{e1} | legacy: {e2}"}]
+        except Exception:
+            pass
+        
+        try:
+            # Try legacy /portfolio parse
+            legacy = _binance_proxy_portfolio_payload()
+            rows = _proxy_extract_positions_from_portfolio(legacy)
+            if rows:
+                return rows
+        except Exception as e:
+            return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": f"Proxy: {str(e)}"}]
     try:
         data = signed_request("GET", FUTURES_BASE, "/fapi/v2/positionRisk", {})
         positions = []
