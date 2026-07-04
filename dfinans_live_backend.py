@@ -1315,27 +1315,17 @@ def get_market_snapshot(symbol: str, market: str) -> Dict[str, Any]:
 def get_futures_positions() -> List[Dict[str, Any]]:
     if BINANCE_PROXY_BASE_URL:
         try:
-            # Try direct /positions endpoint first
+            # Try direct /positions endpoint first (VPS proxy has this)
             legacy_pos = _binance_proxy_request("GET", "/positions")
             rows = _proxy_extract_positions_from_legacy_positions(legacy_pos)
             if rows:
                 return rows
-        except Exception:
-            pass
-        
-        try:
-            # Try /binance/private/futures-positions
-            data = _binance_proxy_request("GET", "/binance/private/futures-positions")
-            return list(data.get("positions", []))
-        except Exception:
-            pass
-        
-        try:
-            # Try legacy /portfolio parse
+            # If empty, try /portfolio fallback
             legacy = _binance_proxy_portfolio_payload()
             rows = _proxy_extract_positions_from_portfolio(legacy)
             if rows:
                 return rows
+            raise RuntimeError("Proxy /positions veya /portfolio'dan futures position bulunamadı.")
         except Exception as e:
             return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": f"Proxy: {str(e)}"}]
     try:
@@ -1418,21 +1408,23 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
 
 def get_spot_balances() -> List[Dict[str, Any]]:
     if BINANCE_PROXY_BASE_URL:
+        # VPS proxy /portfolio endpoint döndürüyor {"data": {"spotTry": ..., ...}, "ok": true}
+        # Bundan spot balances generate etmeli
         try:
-            data = _binance_proxy_request("GET", "/binance/private/spot-balances")
-            return list(data.get("balances", []))
-        except Exception as e1:
-            try:
-                legacy = _binance_proxy_portfolio_payload()
-                rows = _proxy_extract_balances_from_portfolio(legacy)
-                if rows:
-                    return rows
-                rows2 = _proxy_extract_balances_from_legacy_portfolio(legacy)
-                if rows2:
-                    return rows2
-                raise RuntimeError("Proxy /portfolio içinde spot balance verisi bulunamadı.")
-            except Exception as e2:
-                return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": f"{e1} | legacy: {e2}"}]
+            legacy = _binance_proxy_portfolio_payload()
+            rows = _proxy_extract_balances_from_portfolio(legacy)
+            if rows:
+                return rows
+            rows2 = _proxy_extract_balances_from_legacy_portfolio(legacy)
+            if rows2:
+                return rows2
+            # Fallback: /portfolio'dan "spotTry" verisinden synthetic balance oluştur
+            spot_try = safe_float(legacy.get("data", {}).get("spotTry", 0.0))
+            if spot_try > 0:
+                return [{"asset": "USDT", "free": spot_try, "locked": 0, "total": spot_try}]
+            raise RuntimeError("Proxy /portfolio içinde spot balance verisi bulunamadı.")
+        except Exception as e:
+            return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": f"Proxy spot error: {str(e)}"}]
     try:
         account = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
         balances = []
