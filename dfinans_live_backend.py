@@ -90,11 +90,15 @@ def set_cached_portfolio(data: Dict[str, Any], ttl_seconds: int = 60):
         _portfolio_cache["expires_at"] = time.time() + ttl_seconds
 
 # Railway / cloud IP bloklarında Binance bazen ana endpoint'i 451 ile engelleyebiliyor.
-# Bu yüzden varsayılanı api1/fapi1 yaptık ve public/signed isteklerde fallback endpoint listesi kullanıyoruz.
-SPOT_BASE = os.getenv("BINANCE_SPOT_BASE", "https://api1.binance.com")
-FUTURES_BASE = os.getenv("BINANCE_FUTURES_BASE", "https://fapi1.binance.com")
-SPOT_BASES = [SPOT_BASE, "https://api.binance.com", "https://api2.binance.com", "https://api3.binance.com"]
-FUTURES_BASES = [FUTURES_BASE, "https://fapi.binance.com", "https://fapi2.binance.com", "https://fapi3.binance.com"]
+# Not: api1/fapi1/api2/fapi2/api3/fapi3 gibi numaralı mirror'lar bazı VPS IP'lerinden
+# POST (emir) isteklerinde 302 redirect (www.binance.com'a) dönebiliyor; bu durumda
+# requests kütüphanesi redirect'i otomatik takip edip boş/HTML gövdeli 2xx sonuç
+# üretiyor ve bu yanlışlıkla "başarı" sanılabiliyor. Bu yüzden resmi (numarasız)
+# endpoint'i öncelikli yapıyoruz, numaralı mirror'ları sadece fallback olarak tutuyoruz.
+SPOT_BASE = os.getenv("BINANCE_SPOT_BASE", "https://api.binance.com")
+FUTURES_BASE = os.getenv("BINANCE_FUTURES_BASE", "https://fapi.binance.com")
+SPOT_BASES = [SPOT_BASE, "https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com"]
+FUTURES_BASES = [FUTURES_BASE, "https://fapi1.binance.com", "https://fapi2.binance.com", "https://fapi3.binance.com"]
 
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT"]
 COINBASE_MAP = {
@@ -597,17 +601,36 @@ def signed_request(method: str, base: str, path: str, params: Optional[Dict[str,
 
         try:
             if method.upper() == "GET":
-                r = requests.get(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT)
+                r = requests.get(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT, allow_redirects=False)
             elif method.upper() == "POST":
-                r = requests.post(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT)
+                r = requests.post(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT, allow_redirects=False)
             elif method.upper() == "DELETE":
-                r = requests.delete(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT)
+                r = requests.delete(url, headers=headers, timeout=SIGNED_HTTP_TIMEOUT, allow_redirects=False)
             else:
                 raise ValueError("Desteklenmeyen HTTP metodu")
 
+            # Bazı numaralı mirror'lar (fapi1/fapi2/fapi3/api1/api2/api3) bu VPS IP'sinden
+            # gelen POST/emir isteklerini 3xx ile www.binance.com'a yönlendirebiliyor.
+            # allow_redirects=False ile bunu redirect olarak yakalayıp bozuk mirror
+            # sayıp bir sonraki adaya geçiyoruz (aksi halde requests redirect'i otomatik
+            # takip edip boş/HTML gövdeli bir 2xx üretiyor ve bu JSON parse hatasına yol açıyordu).
+            if r.is_redirect or r.is_permanent_redirect or 300 <= r.status_code < 400:
+                last_error = f"{r.status_code} - mirror redirect ({try_base})"
+                continue
+
             if r.status_code < 400:
                 return r.json()
+
+            if r.status_code < 500:
+                # Binance'tan gelen gerçek (4xx) JSON hata yanıtı otoritatif kabul edilir
+                # (örn. yanlış miktar, yetersiz bakiye, imza hatası); bir sonraki mirror'un
+                # daha az bilgilendirici bir hatasıyla ezilmemesi için hemen fırlatılır.
+                raise RuntimeError(f"{r.status_code} - {short_binance_error(r.text)}")
+
+            # 5xx sunucu hatası: geçici olabilir, bir sonraki mirror'u dene.
             last_error = f"{r.status_code} - {short_binance_error(r.text)}"
+        except RuntimeError:
+            raise
         except Exception as e:
             last_error = str(e)
 
