@@ -969,6 +969,35 @@ def _cache_get_or_fetch(key: str, ttl_seconds: int, fetch_fn):
     return data
 
 
+def get_whale_positioning(symbol: str) -> Dict[str, Any]:
+    """Binance Futures 'top trader' (buyuk hesap) long/short pozisyon orani.
+    Whale Alert/Etherscan gibi zincir-ustu (on-chain) servisler API anahtari
+    gerektirdigi icin, borsa-ici gercek buyuk hesap pozisyonlama verisini
+    (anahtar gerektirmez, herkese acik) kullaniyoruz. Asiri tek yonlu yigilma
+    (long veya short) tarihsel olarak ters yonde (contrarian) sinyal tasir."""
+    def _fetch():
+        base = FUTURES_BASE
+        data = public_get(base, "/futures/data/topLongShortPositionRatio", {"symbol": symbol, "period": "1h", "limit": 2})
+        if not isinstance(data, list) or not data:
+            raise RuntimeError("Top trader pozisyon verisi bos döndü.")
+        row = data[-1]
+        ratio = safe_float(row.get("longShortRatio"))
+        long_acc = safe_float(row.get("longAccount")) * 100
+        short_acc = safe_float(row.get("shortAccount")) * 100
+        return {
+            "symbol": symbol,
+            "long_short_ratio": round(ratio, 3),
+            "long_account_pct": round(long_acc, 1),
+            "short_account_pct": round(short_acc, 1),
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"whale_pos:{symbol}", 900, _fetch)
+
+
+WHALE_RATIO_EXTREME_HIGH = float(os.getenv("WHALE_RATIO_EXTREME_HIGH", "2.5"))
+WHALE_RATIO_EXTREME_LOW = float(os.getenv("WHALE_RATIO_EXTREME_LOW", "0.5"))
+
+
 def get_funding_rate(symbol: str) -> Dict[str, Any]:
     """Binance Futures fonlama orani (premiumIndex). Pozitif -> long'lar short'lara odeme yapiyor
     (piyasa asiri iyimser/kalabalik long); negatif -> tam tersi (asiri kotumser/kalabalik short).
@@ -1061,6 +1090,24 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
             else:
                 bias -= 5
                 notes.append(f"Makro rejim RISK-OFF: borsa/dolar baskısı var, yeni alım riskli olabilir.")
+
+    whale = get_whale_positioning(symbol)
+    if not whale.get("error"):
+        ratio = safe_float(whale.get("long_short_ratio"))
+        if ratio >= WHALE_RATIO_EXTREME_HIGH:
+            if action == "BUY":
+                bias -= 5
+                notes.append(f"Büyük hesaplar aşırı LONG yığılmış (oran {ratio:.2f}): yeni alım riskli, tasfiye riski var.")
+            else:
+                bias += 3
+                notes.append(f"Büyük hesaplar aşırı LONG yığılmış (oran {ratio:.2f}): olası long tasfiyesi SELL'i destekler.")
+        elif ratio > 0 and ratio <= WHALE_RATIO_EXTREME_LOW:
+            if action == "SELL":
+                bias -= 5
+                notes.append(f"Büyük hesaplar aşırı SHORT yığılmış (oran {ratio:.2f}): yeni satış riskli, short squeeze riski var.")
+            else:
+                bias += 3
+                notes.append(f"Büyük hesaplar aşırı SHORT yığılmış (oran {ratio:.2f}): olası short squeeze BUY'ı destekler.")
 
     return {"bias": max(-10, min(10, bias)), "notes": notes}
 
@@ -2615,11 +2662,16 @@ def market_signals_external():
         macro_regime = get_macro_regime()
     except Exception as e:
         macro_regime = {"error": str(e)}
+    try:
+        whale_positioning = get_whale_positioning(symbol)
+    except Exception as e:
+        whale_positioning = {"error": str(e)}
     return jsonify({
         "symbol": symbol,
         "funding_rate": funding,
         "fear_greed_index": fear_greed,
         "macro_regime": macro_regime,
+        "whale_positioning": whale_positioning,
         "buy_bias": get_external_signal_bias(symbol, "BUY"),
         "sell_bias": get_external_signal_bias(symbol, "SELL"),
         "time": now_text(),
