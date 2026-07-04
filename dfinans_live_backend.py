@@ -510,9 +510,11 @@ def _binance_proxy_request(method: str, path: str, params: Optional[Dict[str, An
 
 
 def _binance_proxy_portfolio_payload() -> Dict[str, Any]:
-    data = _binance_proxy_request("GET", "/portfolio")
+    # VPS'teki gerçek TRY donusumu /account-summary route'unda yapiliyor;
+    # /portfolio route'u VPS backend'inde mevcut degil (404).
+    data = _binance_proxy_request("GET", "/account-summary")
     if not isinstance(data, dict):
-        raise RuntimeError("Proxy /portfolio beklenen JSON objesini döndürmedi.")
+        raise RuntimeError("Proxy /account-summary beklenen JSON objesini döndürmedi.")
     return data
 
 
@@ -1486,6 +1488,20 @@ def build_binance_summary(spot_balances: List[Dict[str, Any]], futures_positions
     return summary
 
 
+def get_ibkr_try_from_proxy() -> float:
+    """VPS proxy'nin /account-summary endpoint'i gercek IBKR net likidasyon degerini
+    (TRY'ye cevrilmis) zaten hesaplayip donduruyor. Railway'den IBKR'a dogrudan
+    soket baglantisi kurulamadigi icin (circuit breaker acik) bu deger fallback
+    olarak kullanilir."""
+    if not BINANCE_PROXY_BASE_URL:
+        return 0.0
+    try:
+        legacy = _binance_proxy_portfolio_payload()
+        return safe_float(legacy.get("data", {}).get("ibkrTry", 0.0))
+    except Exception:
+        return 0.0
+
+
 def get_portfolio() -> Dict[str, Any]:
     # Try cache first (60 second TTL)
     cached = get_cached_portfolio()
@@ -1499,6 +1515,7 @@ def get_portfolio() -> Dict[str, Any]:
     ibkr_positions: List[Dict[str, Any]] = []
     ibkr_error = ""
     ibkr_connected = bool(IBKR_RUNTIME.get("connected"))
+    ibkr_try = 0.0
     if IBKR_ENABLED:
         if ibkr_connected:
             try:
@@ -1507,6 +1524,9 @@ def get_portfolio() -> Dict[str, Any]:
                 ibkr_error = str(e)
         else:
             ibkr_error = str(IBKR_RUNTIME.get("last_error", "") or "IBKR bağlı değil.")
+            # Dogrudan IBKR baglantisi yoksa (Railway -> IBKR Gateway soket erisimi
+            # calismiyorsa), VPS proxy'sinden gercek IBKR bakiyesini almayi dene.
+            ibkr_try = get_ibkr_try_from_proxy()
     spot_try = safe_float(next((x.get("total") for x in spot if str(x.get("asset")) == "SPOT_TRY_EQUIV"), 0.0))
     futures_try = safe_float(next((x.get("total") for x in spot if str(x.get("asset")) == "FUTURES_TRY_EQUIV"), 0.0))
     total_try = safe_float(next((x.get("total") for x in spot if str(x.get("asset")) == "BINANCE_TRY_TOTAL"), 0.0))
@@ -1524,13 +1544,13 @@ def get_portfolio() -> Dict[str, Any]:
         # Legacy mobile clients read these fields directly from /portfolio.
         "data": {
             "binanceTry": round(total_try, 2),
-            "totalTry": round(total_try, 2),
+            "totalTry": round(total_try + ibkr_try, 2),
             "spotTry": round(spot_try, 2),
             "futuresTry": round(futures_try, 2),
             "cashTry": 0.0,
             "fundingTry": 0.0,
             "goldFxTry": 0.0,
-            "ibkrTry": 0.0,
+            "ibkrTry": round(ibkr_try, 2),
         },
         "ibkr_positions": ibkr_positions,
         "ibkr_connected": ibkr_connected,
