@@ -6,3 +6,4 @@ gunicorn
 ib-insync
 yfinance
 pandas
+pytrends

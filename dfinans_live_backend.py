@@ -1067,6 +1067,78 @@ def get_regulatory_activity_signal(keywords: str = "bitcoin OR cryptocurrency OR
     return _cache_get_or_fetch("sec_regulatory_activity", 10800, _fetch)
 
 
+NEWS_POSITIVE_KEYWORDS = [
+    "surge", "rally", "jump", "soar", "record high", "all-time high", "approve", "approval",
+    "bullish", "adopt", "adoption", "gain", "breakout", "inflow", "etf launch", "upgrade",
+    "partnership", "buy the dip", "recovery", "rebound",
+]
+NEWS_NEGATIVE_KEYWORDS = [
+    "crash", "plunge", "hack", "hacked", "exploit", "ban", "banned", "lawsuit", "sues", "sec sues",
+    "bearish", "dump", "liquidation", "liquidated", "fraud", "collapse", "bankrupt", "bankruptcy",
+    "outflow", "delist", "scam", "investigation", "fine", "penalty", "sell-off", "selloff",
+]
+
+
+def get_news_sentiment_signal() -> Dict[str, Any]:
+    """CoinDesk RSS besleme (ucretsiz, anahtar gerekmez) uzerinden son basliklarda basit
+    anahtar kelime tabanli sentiment skoru hesaplar. CryptoPanic gibi servisler API anahtari
+    gerektirdigi icin bu anahtarsiz alternatif kullanildi. Net sentiment pozitifse haber akisi
+    BUY'i, negatifse SELL'i destekler (contrarian degil, dogrudan yon takibi)."""
+    def _fetch():
+        import xml.etree.ElementTree as ET
+        r = requests.get(
+            "https://www.coindesk.com/arc/outboundfeeds/rss/",
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (dfinans-live-backend)"},
+        )
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        titles = [item.findtext("title", "") for item in root.findall(".//item")][:20]
+        if not titles:
+            raise RuntimeError("RSS verisi bos döndü.")
+        pos = neg = 0
+        for t in titles:
+            low = t.lower()
+            pos += sum(1 for k in NEWS_POSITIVE_KEYWORDS if k in low)
+            neg += sum(1 for k in NEWS_NEGATIVE_KEYWORDS if k in low)
+        total = pos + neg
+        net_score = (pos - neg) / total if total > 0 else 0.0
+        return {
+            "headlines_scanned": len(titles),
+            "positive_hits": pos,
+            "negative_hits": neg,
+            "net_sentiment": round(net_score, 2),
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch("news_sentiment", 1800, _fetch)
+
+
+def get_google_trends_signal(keyword: str = "bitcoin") -> Dict[str, Any]:
+    """Google Trends (pytrends, resmi olmayan/gayri-resmi kutuphane) uzerinden ani arama
+    ilgisi artisini tespit eder. Bu servis resmi API olmadigi ve sunucu ortamlarinda siklikla
+    hiz siniri/engellemeye takildigi icin TAMAMEN best-effort'tur; basarisiz olursa sessizce
+    norotr doner ve auto-trader'i hicbir sekilde etkilemez (fail-open)."""
+    def _fetch():
+        from pytrends.request import TrendReq
+        pytrends = TrendReq(hl="en-US", tz=360, timeout=(5, 10))
+        pytrends.build_payload([keyword], timeframe="now 7-d")
+        df = pytrends.interest_over_time()
+        if df is None or df.empty:
+            raise RuntimeError("Google Trends verisi bos döndü.")
+        recent_avg = df[keyword].iloc[-6:-1].mean() if len(df) >= 6 else df[keyword].mean()
+        latest = df[keyword].iloc[-1]
+        spike_ratio = float(latest / recent_avg) if recent_avg > 0 else 1.0
+        return {
+            "keyword": keyword,
+            "latest_interest": int(latest),
+            "recent_avg_interest": round(float(recent_avg), 1),
+            "spike_ratio": round(spike_ratio, 2),
+            "spike_detected": spike_ratio >= 1.8,
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"google_trends:{keyword}", 3600, _fetch)
+
+
 def get_funding_rate(symbol: str) -> Dict[str, Any]:
     """Binance Futures fonlama orani (premiumIndex). Pozitif -> long'lar short'lara odeme yapiyor
     (piyasa asiri iyimser/kalabalik long); negatif -> tam tersi (asiri kotumser/kalabalik short).
@@ -1194,7 +1266,32 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
         bias -= 3
         notes.append(f"Kripto ile ilgili SEC 8-K dosyalama hacminde sıçrama var (son 24s: {reg['filings_last_24h']}, ort: {reg['baseline_daily_avg']}): yön belirsiz, temkinli olunmalı.")
 
-    return {"bias": max(-14, min(14, bias)), "notes": notes}
+    news = get_news_sentiment_signal()
+    if not news.get("error"):
+        net = safe_float(news.get("net_sentiment"))
+        if net >= 0.4:
+            if action == "BUY":
+                bias += 3
+                notes.append(f"Haber akışı net pozitif (skor {net:+.2f}): BUY'ı destekler.")
+            else:
+                bias -= 2
+                notes.append(f"Haber akışı net pozitif (skor {net:+.2f}): SELL için olumsuz.")
+        elif net <= -0.4:
+            if action == "SELL":
+                bias += 3
+                notes.append(f"Haber akışı net negatif (skor {net:+.2f}): SELL'i destekler.")
+            else:
+                bias -= 2
+                notes.append(f"Haber akışı net negatif (skor {net:+.2f}): BUY için olumsuz.")
+
+    trends = get_google_trends_signal()
+    if not trends.get("error") and trends.get("spike_detected"):
+        # Yon belirsiz (ani ilgi artisi hem FOMO/rally hem panik/crash haberinden kaynaklanabilir);
+        # sadece "dikkat, oynaklik artabilir" seklinde hafif bir temkin sinyali ekler.
+        bias -= 1
+        notes.append(f"Google Trends'te '{trends['keyword']}' aramalarında ani artış (x{trends['spike_ratio']:.1f}): olası yüksek oynaklık, dikkatli olunmalı.")
+
+    return {"bias": max(-16, min(16, bias)), "notes": notes}
 
 
 def get_macro_regime() -> Dict[str, Any]:
@@ -2759,6 +2856,14 @@ def market_signals_external():
         regulatory_activity = get_regulatory_activity_signal()
     except Exception as e:
         regulatory_activity = {"error": str(e)}
+    try:
+        news_sentiment = get_news_sentiment_signal()
+    except Exception as e:
+        news_sentiment = {"error": str(e)}
+    try:
+        google_trends = get_google_trends_signal()
+    except Exception as e:
+        google_trends = {"error": str(e)}
     return jsonify({
         "symbol": symbol,
         "funding_rate": funding,
@@ -2767,6 +2872,8 @@ def market_signals_external():
         "whale_positioning": whale_positioning,
         "geopolitical_risk": geopolitical_risk,
         "regulatory_activity": regulatory_activity,
+        "news_sentiment": news_sentiment,
+        "google_trends": google_trends,
         "buy_bias": get_external_signal_bias(symbol, "BUY"),
         "sell_bias": get_external_signal_bias(symbol, "SELL"),
         "time": now_text(),
