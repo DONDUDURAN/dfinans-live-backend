@@ -206,7 +206,7 @@ IBKR_RUNTIME: Dict[str, Any] = {
     "last_fail_time": 0,
     "circuit_breaker_open": False,
 }
-IBKR_LOCK = threading.Lock()
+IBKR_LOCK = threading.RLock()  # RLock: ibkr_execute + ensure_ibkr_connection ayni thread'de ic ice kilit alabiliyor
 KEEPALIVE_THREAD_STARTED = False
 AUTO_THREAD_STARTED = False
 
@@ -773,9 +773,14 @@ def ibkr_execute(action):
     last_error: Optional[Exception] = None
     for attempt in range(2):
         try:
-            ib, ibs = ensure_ibkr_connection(force_reconnect=(attempt == 1))
-            result = action(ib, ibs)
+            # Ayni ib_insync IB client'i (ve onun event loop'unu) ayni anda birden
+            # fazla thread'in (gunicorn istek thread'i, keepalive arka plan thread'i,
+            # auto-trader dongusu) kullanmasi ciddi kilitlenmelere/timeout'lara yol
+            # aciyordu. Tum baglanti + istek akisini tek bir lock altinda serilestirerek
+            # bu race condition'i onluyoruz.
             with IBKR_LOCK:
+                ib, ibs = ensure_ibkr_connection(force_reconnect=(attempt == 1))
+                result = action(ib, ibs)
                 IBKR_RUNTIME["connected"] = bool(ib.isConnected())
                 IBKR_RUNTIME["last_ok"] = now_text()
                 IBKR_RUNTIME["last_error"] = ""
