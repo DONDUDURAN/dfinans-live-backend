@@ -1370,26 +1370,7 @@ def get_futures_positions() -> List[Dict[str, Any]]:
             })
         return positions
     except Exception as e:
-        # If all API methods fail, return mock data as ultimate fallback
-        return get_mock_futures_positions()
-
-
-def get_mock_futures_positions() -> List[Dict[str, Any]]:
-    """Mock data fallback when API calls fail"""
-    return [
-       {
-           "id": "BINANCE-FUTURES-ETHUSDT",
-           "broker": "Binance",
-           "market": "Futures",
-           "symbol": "ETHUSDT",
-           "side": "LONG",
-           "size": 0.014,
-           "entry_price": 1701.82,
-           "mark_price": 1752.50,
-           "pnl": 0.71,
-           "leverage": "1",
-       }
-    ]
+        return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": str(e)}]
 
 
 def binance_position_profit_pct(position: Dict[str, Any]) -> float:
@@ -1474,7 +1455,7 @@ def get_spot_balances() -> List[Dict[str, Any]]:
             balances.append({"asset": asset, "free": free, "locked": locked, "total": total})
         return balances
     except Exception as e:
-        return [{"asset": "USDT", "free": 100.0, "locked": 0, "total": 100.0}]
+        return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": str(e)}]
 
 
 def build_binance_summary(spot_balances: List[Dict[str, Any]], futures_positions: List[Dict[str, Any]]) -> Dict[str, Any]:
