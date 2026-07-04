@@ -760,6 +760,10 @@ def ensure_ibkr_connection(force_reconnect: bool = False):
             IBKR_RUNTIME["last_fail_time"] = time.time()
             IBKR_RUNTIME["connected"] = False
             IBKR_RUNTIME["last_error"] = str(e)
+            # circuit breaker acilinca bu gercek hata bir sonraki denemede
+            # breaker mesaji tarafindan ezilebiliyor; asil nedeni ayri sakla.
+            IBKR_RUNTIME["last_real_error"] = f"{type(e).__name__}: {e}"
+            IBKR_RUNTIME["last_real_error_time"] = now_text()
             _ibkr_disconnect_locked()
             raise
 
@@ -2353,6 +2357,9 @@ def ibkr_health():
             "connected": False,
             "error": str(e),
             "last_error": IBKR_RUNTIME.get("last_error", ""),
+            "last_real_error": IBKR_RUNTIME.get("last_real_error", ""),
+            "last_real_error_time": IBKR_RUNTIME.get("last_real_error_time", ""),
+            "failed_attempts": int(IBKR_RUNTIME.get("failed_attempts", 0)),
             "time": now_text(),
         }), 500
 
