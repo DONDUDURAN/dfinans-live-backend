@@ -2341,32 +2341,39 @@ def health():
 
 @app.route("/ibkr/health", methods=["GET"])
 def ibkr_health():
-    try:
-        ibkr_ping()
-        return jsonify({
-            "ok": True,
-            "broker": "IBKR",
-            "host": IBKR_HOST,
-            "port": IBKR_PORT,
-            "client_id": IBKR_CLIENT_ID,
-            "account": IBKR_ACCOUNT,
-            "connected": bool(IBKR_RUNTIME.get("connected")),
-            "last_ok": IBKR_RUNTIME.get("last_ok", ""),
-            "reconnect_count": int(IBKR_RUNTIME.get("reconnect_count", 0)),
-            "time": now_text(),
-        })
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "broker": "IBKR",
-            "connected": False,
-            "error": str(e),
-            "last_error": IBKR_RUNTIME.get("last_error", ""),
-            "last_real_error": IBKR_RUNTIME.get("last_real_error", ""),
-            "last_real_error_time": IBKR_RUNTIME.get("last_real_error_time", ""),
-            "failed_attempts": int(IBKR_RUNTIME.get("failed_attempts", 0)),
-            "time": now_text(),
-        }), 500
+    # NOT: burada canli bir ibkr_ping() cagrisi YAPMIYORUZ. ib_insync'in IB client'i
+    # hangi thread'in event loop'unda connect edildiyse ona bagli kaliyor; bu endpoint'i
+    # farkli bir gunicorn istek thread'inden tetiklemek, keepalive arka plan thread'i ile
+    # cakisip gunicorn worker'ini timeout ile cokertebiliyordu. Bunun yerine keepalive
+    # dongusunun zaten surekli guncelledigi IBKR_RUNTIME onbellegini donduruyoruz;
+    # gercek zamanli olarak ayni bilgiyi, worker'i riske atmadan saglar.
+    with IBKR_LOCK:
+        connected = bool(IBKR_RUNTIME.get("connected"))
+        last_ok = IBKR_RUNTIME.get("last_ok", "")
+        last_error = IBKR_RUNTIME.get("last_error", "")
+        last_real_error = IBKR_RUNTIME.get("last_real_error", "")
+        last_real_error_time = IBKR_RUNTIME.get("last_real_error_time", "")
+        reconnect_count = int(IBKR_RUNTIME.get("reconnect_count", 0))
+        failed_attempts = int(IBKR_RUNTIME.get("failed_attempts", 0))
+        circuit_breaker_open = bool(IBKR_RUNTIME.get("circuit_breaker_open"))
+    payload = {
+        "ok": connected,
+        "broker": "IBKR",
+        "host": IBKR_HOST,
+        "port": IBKR_PORT,
+        "client_id": IBKR_CLIENT_ID,
+        "account": IBKR_ACCOUNT,
+        "connected": connected,
+        "last_ok": last_ok,
+        "last_error": last_error,
+        "last_real_error": last_real_error,
+        "last_real_error_time": last_real_error_time,
+        "reconnect_count": reconnect_count,
+        "failed_attempts": failed_attempts,
+        "circuit_breaker_open": circuit_breaker_open,
+        "time": now_text(),
+    }
+    return jsonify(payload), (200 if connected else 503)
 
 
 @app.route("/symbols", methods=["GET"])
