@@ -1007,7 +1007,7 @@ def get_geopolitical_risk_signal() -> Dict[str, Any]:
         r = requests.get(
             "https://api.gdeltproject.org/api/v2/doc/doc",
             params={
-                "query": "war OR invasion OR conflict OR sanctions",
+                "query": "(war OR invasion OR conflict OR sanctions)",
                 "mode": "timelinetone",
                 "format": "json",
                 "timespan": "2d",
