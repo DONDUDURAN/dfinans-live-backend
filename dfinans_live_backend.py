@@ -1495,6 +1495,11 @@ def auto_trader_cycle() -> None:
                         "time": now_text(),
                     }
             else:
+                min_notional = 21.0  # Binance min 20 USD + güvenlik payı
+                if price > 0 and qty * price < min_notional:
+                    adj_qty = math.ceil((min_notional / price) * 1000) / 1000.0
+                    reason = (reason + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: min. işlem tutarı {min_notional}$ altında kalıyordu.)").strip()
+                    qty = adj_qty
                 if do_live:
                     execution = place_futures_order(symbol, action, qty, reduce_only=False)
                 else:
