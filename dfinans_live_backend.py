@@ -63,6 +63,11 @@ AUTO_TRADER_MODE = os.getenv("AUTO_TRADER_MODE", "paper").lower()
 RUNTIME_DB_PATH = os.getenv("DFINANS_RUNTIME_DB_PATH", "/tmp/dfinans_runtime.db")
 BINANCE_PROXY_BASE_URL = os.getenv("BINANCE_PROXY_BASE_URL", "").rstrip("/")
 BINANCE_PROXY_TOKEN = os.getenv("BINANCE_PROXY_TOKEN", "")
+# Emir (order) islemleri icin ayri bir proxy hedefi tanimlanabilir. VPS'teki bazi
+# proxy servisleri sadece okuma (balance/positions) route'larina sahipken, emir
+# gonderme route'lari (/binance/private/order, /manual-order, /close-position)
+# baska bir instance'da olabilir. Ayarlanmazsa BINANCE_PROXY_BASE_URL kullanilir.
+BINANCE_ORDER_PROXY_BASE_URL = os.getenv("BINANCE_ORDER_PROXY_BASE_URL", "").rstrip("/") or BINANCE_PROXY_BASE_URL
 BINANCE_PROXY_TIMEOUT = int(os.getenv("BINANCE_PROXY_TIMEOUT", "12"))
 PUBLIC_HTTP_TIMEOUT = int(os.getenv("PUBLIC_HTTP_TIMEOUT", "5"))
 SIGNED_HTTP_TIMEOUT = int(os.getenv("SIGNED_HTTP_TIMEOUT", "8"))
@@ -490,10 +495,11 @@ def _binance_proxy_headers() -> Dict[str, str]:
     return headers
 
 
-def _binance_proxy_request(method: str, path: str, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Any:
-    if not BINANCE_PROXY_BASE_URL:
+def _binance_proxy_request(method: str, path: str, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None, base_url: Optional[str] = None) -> Any:
+    target_base = (base_url or BINANCE_PROXY_BASE_URL).rstrip("/")
+    if not target_base:
         raise RuntimeError("Binance proxy base URL ayarlı değil.")
-    url = f"{BINANCE_PROXY_BASE_URL}{path}"
+    url = f"{target_base}{path}"
     headers = _binance_proxy_headers()
     try:
         if method.upper() == "GET":
@@ -1743,7 +1749,7 @@ def place_futures_order(
         TRADE_LOG.insert(0, simulated)
         return simulated
 
-    if BINANCE_PROXY_BASE_URL and use_proxy:
+    if BINANCE_ORDER_PROXY_BASE_URL and use_proxy:
         payload = {
             "symbol": symbol,
             "side": side,
@@ -1754,7 +1760,7 @@ def place_futures_order(
             "channel": channel,
         }
         try:
-            data = _binance_proxy_request("POST", "/binance/private/order", json_body=payload)
+            data = _binance_proxy_request("POST", "/binance/private/order", json_body=payload, base_url=BINANCE_ORDER_PROXY_BASE_URL)
             result = dict(data.get("result", data))
             result.setdefault("request_id", request_id)
             db_insert_trade_journal(
@@ -1781,6 +1787,7 @@ def place_futures_order(
                             "symbol": symbol,
                             "request_id": request_id,
                         },
+                        base_url=BINANCE_ORDER_PROXY_BASE_URL,
                     )
                     result = dict(legacy_close)
                     result.setdefault("request_id", request_id)
@@ -1811,6 +1818,7 @@ def place_futures_order(
                         "reduceOnly": reduce_only,
                         "request_id": request_id,
                     },
+                    base_url=BINANCE_ORDER_PROXY_BASE_URL,
                 )
                 result = dict(legacy)
                 result.setdefault("request_id", request_id)
