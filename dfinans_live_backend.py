@@ -1326,8 +1326,8 @@ def get_futures_positions() -> List[Dict[str, Any]]:
             if rows:
                 return rows
             raise RuntimeError("Proxy /positions veya /portfolio'dan futures position bulunamadı.")
-        except Exception as e:
-            return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": f"Proxy: {str(e)}"}]
+        except Exception as proxy_err:
+            pass
     try:
         data = signed_request("GET", FUTURES_BASE, "/fapi/v2/positionRisk", {})
         positions = []
@@ -1423,8 +1423,8 @@ def get_spot_balances() -> List[Dict[str, Any]]:
             if spot_try > 0:
                 return [{"asset": "USDT", "free": spot_try, "locked": 0, "total": spot_try}]
             raise RuntimeError("Proxy /portfolio içinde spot balance verisi bulunamadı.")
-        except Exception as e:
-            return [{"asset": "HATA", "free": 0, "locked": 0, "total": 0, "error": f"Proxy spot error: {str(e)}"}]
+        except Exception as proxy_err:
+            pass
     try:
         account = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
         balances = []
