@@ -4,3 +4,5 @@ requests
 websockets
 gunicorn
 ib-insync
+yfinance
+pandas

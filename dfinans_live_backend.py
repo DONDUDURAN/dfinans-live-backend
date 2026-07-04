@@ -939,6 +939,163 @@ def ibkr_ping() -> bool:
     return bool(ibkr_execute(_run))
 
 
+# ============================================================
+# HARICI PIYASA SINYALLERI (Funding Rate + Fear & Greed Index)
+# Auto-trader confidence hesaplamasina ek "makro/duygu" filtresi
+# olarak katkida bulunur. Herhangi bir kaynak basarisiz olursa
+# sessizce norotr (bias=0) doner; auto-trader hicbir zaman bu
+# yuzden calismayi durdurmaz (fail-open).
+# ============================================================
+FUNDING_RATE_EXTREME = float(os.getenv("FUNDING_RATE_EXTREME_PCT", "0.05")) / 100.0  # %0.05 varsayilan
+FEAR_GREED_EXTREME_LOW = int(os.getenv("FEAR_GREED_EXTREME_LOW", "25"))
+FEAR_GREED_EXTREME_HIGH = int(os.getenv("FEAR_GREED_EXTREME_HIGH", "75"))
+EXTERNAL_SIGNALS_ENABLED = os.getenv("EXTERNAL_SIGNALS_ENABLED", "true").lower() == "true"
+
+_external_signal_cache: Dict[str, Dict[str, Any]] = {}
+_external_signal_lock = threading.Lock()
+
+
+def _cache_get_or_fetch(key: str, ttl_seconds: int, fetch_fn):
+    with _external_signal_lock:
+        entry = _external_signal_cache.get(key)
+        if entry and time.time() < entry.get("expires_at", 0):
+            return entry.get("data")
+    try:
+        data = fetch_fn()
+    except Exception as e:
+        data = {"error": str(e)}
+    with _external_signal_lock:
+        _external_signal_cache[key] = {"data": data, "expires_at": time.time() + ttl_seconds}
+    return data
+
+
+def get_funding_rate(symbol: str) -> Dict[str, Any]:
+    """Binance Futures fonlama orani (premiumIndex). Pozitif -> long'lar short'lara odeme yapiyor
+    (piyasa asiri iyimser/kalabalik long); negatif -> tam tersi (asiri kotumser/kalabalik short).
+    Asiri degerler genelde kisa vadeli TERS (contrarian) sinyal tasir."""
+    def _fetch():
+        base = FUTURES_BASE
+        data = public_get(base, "/fapi/v1/premiumIndex", {"symbol": symbol})
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        rate = safe_float(data.get("lastFundingRate"))
+        return {"symbol": symbol, "funding_rate": rate, "funding_rate_pct": round(rate * 100, 4), "time": now_text()}
+    return _cache_get_or_fetch(f"funding:{symbol}", 300, _fetch)
+
+
+def get_fear_greed_index() -> Dict[str, Any]:
+    """alternative.me Crypto Fear & Greed Index (ucretsiz, anahtar gerekmez).
+    0-25: Aşırı Korku (genelde dip bolgesi/contrarian AL), 75-100: Aşırı Açgözlülük (genelde tepe/contrarian SAT)."""
+    def _fetch():
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=8)
+        r.raise_for_status()
+        js = r.json()
+        row = (js.get("data") or [{}])[0]
+        value = int(safe_float(row.get("value")))
+        classification = str(row.get("value_classification", ""))
+        return {"value": value, "classification": classification, "time": now_text()}
+    return _cache_get_or_fetch("fear_greed", 1800, _fetch)
+
+
+def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
+    """Funding rate + Fear&Greed Index'i birlestirip verilen islem yonune (BUY/SELL)
+    confidence puanina eklenecek/cikarilacak bir bias ve aciklama uretir."""
+    if not EXTERNAL_SIGNALS_ENABLED or action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+
+    bias = 0
+    notes: List[str] = []
+
+    fr = get_funding_rate(symbol)
+    if not fr.get("error"):
+        rate = safe_float(fr.get("funding_rate"))
+        if rate >= FUNDING_RATE_EXTREME:
+            # Asiri pozitif funding: piyasa kalabalik LONG -> yukselise (BUY) karsi temkinli ol,
+            # dususe (SELL) hafif destek ver (contrarian).
+            if action == "BUY":
+                bias -= 6
+                notes.append(f"Funding rate aşırı pozitif (%{fr['funding_rate_pct']:.3f}): piyasa kalabalık LONG, yeni alım riskli.")
+            else:
+                bias += 4
+                notes.append(f"Funding rate aşırı pozitif (%{fr['funding_rate_pct']:.3f}): kalabalık long tasfiyesi SELL sinyalini destekliyor.")
+        elif rate <= -FUNDING_RATE_EXTREME:
+            if action == "SELL":
+                bias -= 6
+                notes.append(f"Funding rate aşırı negatif (%{fr['funding_rate_pct']:.3f}): piyasa kalabalık SHORT, yeni satış riskli.")
+            else:
+                bias += 4
+                notes.append(f"Funding rate aşırı negatif (%{fr['funding_rate_pct']:.3f}): kalabalık short tasfiyesi BUY sinyalini destekliyor.")
+
+    fg = get_fear_greed_index()
+    if not fg.get("error"):
+        value = int(fg.get("value", 50))
+        if value <= FEAR_GREED_EXTREME_LOW:
+            if action == "BUY":
+                bias += 4
+                notes.append(f"Fear & Greed Index aşırı korku ({value}): tarihsel olarak dip bölgesi, BUY'ı destekler.")
+            else:
+                bias -= 4
+                notes.append(f"Fear & Greed Index aşırı korku ({value}): panik satışına katılmak riskli olabilir.")
+        elif value >= FEAR_GREED_EXTREME_HIGH:
+            if action == "SELL":
+                bias += 4
+                notes.append(f"Fear & Greed Index aşırı açgözlülük ({value}): tarihsel olarak tepe bölgesi, SELL'i destekler.")
+            else:
+                bias -= 4
+                notes.append(f"Fear & Greed Index aşırı açgözlülük ({value}): FOMO ile alım riskli olabilir.")
+
+    macro = get_macro_regime()
+    if not macro.get("error"):
+        regime = macro.get("regime")
+        if regime == "RISK_ON":
+            if action == "BUY":
+                bias += 5
+                notes.append(f"Makro rejim RISK-ON (SP500 5g %{macro['sp500_5d_pct']:+.1f}, DXY %{macro['dxy_5d_pct']:+.1f}): BUY'ı destekler.")
+            else:
+                bias -= 5
+                notes.append(f"Makro rejim RISK-ON: borsa güçlü, short açmak tarihsel olarak zayıf performans gösterir.")
+        elif regime == "RISK_OFF":
+            if action == "SELL":
+                bias += 5
+                notes.append(f"Makro rejim RISK-OFF (SP500 5g %{macro['sp500_5d_pct']:+.1f}, DXY %{macro['dxy_5d_pct']:+.1f}): SELL'i destekler.")
+            else:
+                bias -= 5
+                notes.append(f"Makro rejim RISK-OFF: borsa/dolar baskısı var, yeni alım riskli olabilir.")
+
+    return {"bias": max(-10, min(10, bias)), "notes": notes}
+
+
+def get_macro_regime() -> Dict[str, Any]:
+    """SP500 ve Dolar Endeksi'nin son 5 islem gunu momentumuna gore 'risk rejimi' belirler.
+    Tarihsel analize gore (bkz. 5 yillik senaryo calismasi):
+      - Borsa YUKARI + Dolar ASAGI/notr  -> RISK_ON  (BTC ort. +1.20%/gun)
+      - Borsa ASAGI  + Dolar YUKARI      -> RISK_OFF (BTC ort. -1.13%/gun)
+      - Digerleri -> NOTR
+    yfinance Yahoo Finance'tan veri cektigi icin agir/yavas olabilir; bu yuzden sonuc
+    uzun sureli (4 saat) cache'lenir ve hata durumunda sessizce NOTR'e duser (fail-open)."""
+    def _fetch():
+        import yfinance as yf
+        data = yf.download(["^GSPC", "DX-Y.NYB"], period="15d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"].dropna()
+        if len(close) < 6:
+            raise RuntimeError("Yetersiz makro veri")
+        sp500_5d = (close["^GSPC"].iloc[-1] / close["^GSPC"].iloc[-6] - 1.0) * 100.0
+        dxy_5d = (close["DX-Y.NYB"].iloc[-1] / close["DX-Y.NYB"].iloc[-6] - 1.0) * 100.0
+        if sp500_5d > 0 and dxy_5d <= 0:
+            regime = "RISK_ON"
+        elif sp500_5d < 0 and dxy_5d > 0:
+            regime = "RISK_OFF"
+        else:
+            regime = "NEUTRAL"
+        return {
+            "sp500_5d_pct": round(float(sp500_5d), 2),
+            "dxy_5d_pct": round(float(dxy_5d), 2),
+            "regime": regime,
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch("macro_regime", 14400, _fetch)
+
+
 def learning_bias(signal: str) -> int:
     side = signal.upper()
     if side not in ["BUY", "SELL"]:
@@ -1078,6 +1235,12 @@ def auto_trader_cycle() -> None:
 
     if action in ["BUY", "SELL"]:
         confidence = max(0, min(95, confidence + learning_bias(action)))
+        if broker != "IBKR":
+            ext = get_external_signal_bias(symbol, action)
+            if ext["bias"] != 0:
+                confidence = max(0, min(95, confidence + ext["bias"]))
+            if ext["notes"]:
+                reason = (reason + " " + " ".join(ext["notes"])).strip()
     resolve_learning(symbol, price)
 
     with AUTO_LOCK:
@@ -2434,6 +2597,33 @@ def auto_trader_status():
         payload["learning"] = LEARNING_STATS
         payload["ibkr_connected"] = bool(IBKR_RUNTIME.get("connected"))
     return jsonify(payload)
+
+
+@app.route("/market-signals/external", methods=["GET"])
+def market_signals_external():
+    """Funding rate + Fear&Greed Index gibi harici piyasa sinyallerini gosterir (sadece bilgi amaçlı)."""
+    symbol = normalize_symbol(request.args.get("symbol", AUTO_TRADER.symbol))
+    try:
+        funding = get_funding_rate(symbol)
+    except Exception as e:
+        funding = {"error": str(e)}
+    try:
+        fear_greed = get_fear_greed_index()
+    except Exception as e:
+        fear_greed = {"error": str(e)}
+    try:
+        macro_regime = get_macro_regime()
+    except Exception as e:
+        macro_regime = {"error": str(e)}
+    return jsonify({
+        "symbol": symbol,
+        "funding_rate": funding,
+        "fear_greed_index": fear_greed,
+        "macro_regime": macro_regime,
+        "buy_bias": get_external_signal_bias(symbol, "BUY"),
+        "sell_bias": get_external_signal_bias(symbol, "SELL"),
+        "time": now_text(),
+    })
 
 
 @app.route("/auto-trader/history", methods=["GET"])
