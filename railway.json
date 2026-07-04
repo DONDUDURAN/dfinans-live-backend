@@ -1,11 +1,7 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
-  "build": {
-    "builder": "dockerfile",
-    "buildCommand": "docker build -f ibgateway.Dockerfile -t ibkr-gateway ."
-  },
   "deploy": {
-    "startCommand": "echo 'IBKR Gateway running'",
+    "startCommand": "gunicorn dfinans_live_backend:app --bind 0.0.0.0:$PORT",
     "restartPolicyMaxRetries": 5,
     "restartPolicyWindowMs": 60000
   }
