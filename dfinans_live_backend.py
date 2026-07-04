@@ -36,7 +36,7 @@ import sqlite3
 import hashlib
 import threading
 from dataclasses import dataclass, asdict, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -998,6 +998,75 @@ WHALE_RATIO_EXTREME_HIGH = float(os.getenv("WHALE_RATIO_EXTREME_HIGH", "2.5"))
 WHALE_RATIO_EXTREME_LOW = float(os.getenv("WHALE_RATIO_EXTREME_LOW", "0.5"))
 
 
+def get_geopolitical_risk_signal() -> Dict[str, Any]:
+    """GDELT Project (ucretsiz, anahtar gerekmez) uzerinden savas/jeopolitik gerginlik
+    haberlerinin hacim ve ton (tone) ortalamasini olcer. Cok negatif ton + yuksek hacim
+    'risk-off' (guvenli limana kacis) egilimini gucllendirir; bu genelde kriptoyu de
+    olumsuz etkiler (bkz. makro RISK_OFF rejimi ile ayni mantik)."""
+    def _fetch():
+        r = requests.get(
+            "https://api.gdeltproject.org/api/v2/doc/doc",
+            params={
+                "query": "war OR invasion OR conflict OR sanctions",
+                "mode": "timelinetone",
+                "format": "json",
+                "timespan": "2d",
+            },
+            timeout=10,
+            headers={"User-Agent": "dfinans-live-backend/1.0"},
+        )
+        r.raise_for_status()
+        js = r.json()
+        series = (js.get("timeline") or [{}])[0].get("data", [])
+        if not series:
+            raise RuntimeError("GDELT verisi bos döndü.")
+        avg_tone = sum(safe_float(pt.get("value")) for pt in series) / len(series)
+        level = "YUKSEK_GERGINLIK" if avg_tone <= -4 else ("DUSUK_GERGINLIK" if avg_tone >= -1 else "NORMAL")
+        return {"avg_tone": round(avg_tone, 2), "level": level, "time": now_text()}
+    return _cache_get_or_fetch("geopolitical_risk", 7200, _fetch)
+
+
+def get_regulatory_activity_signal(keywords: str = "bitcoin OR cryptocurrency OR digital asset") -> Dict[str, Any]:
+    """SEC EDGAR tam metin arama API'si (ucretsiz, anahtar gerekmez, sadece User-Agent
+    kimligi istiyor) uzerinden son 24 saatte kripto ile ilgili 8-K/kurumsal dosyalama
+    hacmini onceki gunlerle karsilastirir. Ani bir sicrama, piyasayi etkileyebilecek
+    onemli bir duzenleyici/kurumsal aciklama olabilecegini isaret eder (yon belirsiz,
+    bu yuzden yalnizca temkin/oynaklik uyarisi olarak kullanilir, yonlu bias vermez)."""
+    def _fetch():
+        headers = {"User-Agent": "dfinans-live-backend research contact@dfinans.example"}
+        today = datetime.now()
+        def count_for_range(start, end):
+            r = requests.get(
+                "https://efts.sec.gov/LATEST/search-index",
+                params={
+                    "q": keywords,
+                    "forms": "8-K",
+                    "dateRange": "custom",
+                    "startdt": start.strftime("%Y-%m-%d"),
+                    "enddt": end.strftime("%Y-%m-%d"),
+                },
+                headers=headers,
+                timeout=10,
+            )
+            r.raise_for_status()
+            js = r.json()
+            return int(((js.get("hits") or {}).get("total") or {}).get("value", 0))
+
+        today_count = count_for_range(today - timedelta(days=1), today)
+        baseline_count = count_for_range(today - timedelta(days=8), today - timedelta(days=1))
+        baseline_daily_avg = max(1.0, baseline_count / 7.0)
+        spike_ratio = today_count / baseline_daily_avg
+        spike = spike_ratio >= 2.5 and today_count >= 5
+        return {
+            "filings_last_24h": today_count,
+            "baseline_daily_avg": round(baseline_daily_avg, 1),
+            "spike_ratio": round(spike_ratio, 2),
+            "spike_detected": spike,
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch("sec_regulatory_activity", 10800, _fetch)
+
+
 def get_funding_rate(symbol: str) -> Dict[str, Any]:
     """Binance Futures fonlama orani (premiumIndex). Pozitif -> long'lar short'lara odeme yapiyor
     (piyasa asiri iyimser/kalabalik long); negatif -> tam tersi (asiri kotumser/kalabalik short).
@@ -1109,7 +1178,23 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
                 bias += 3
                 notes.append(f"Büyük hesaplar aşırı SHORT yığılmış (oran {ratio:.2f}): olası short squeeze BUY'ı destekler.")
 
-    return {"bias": max(-10, min(10, bias)), "notes": notes}
+    geo = get_geopolitical_risk_signal()
+    if not geo.get("error"):
+        level = geo.get("level")
+        if level == "YUKSEK_GERGINLIK":
+            if action == "BUY":
+                bias -= 4
+                notes.append(f"Jeopolitik gerginlik yüksek (GDELT ton {geo['avg_tone']:.1f}): risk-off ortamı, alım riskli olabilir.")
+            else:
+                bias += 2
+                notes.append(f"Jeopolitik gerginlik yüksek (GDELT ton {geo['avg_tone']:.1f}): risk-off ortamı SELL'i hafif destekler.")
+
+    reg = get_regulatory_activity_signal()
+    if not reg.get("error") and reg.get("spike_detected"):
+        bias -= 3
+        notes.append(f"Kripto ile ilgili SEC 8-K dosyalama hacminde sıçrama var (son 24s: {reg['filings_last_24h']}, ort: {reg['baseline_daily_avg']}): yön belirsiz, temkinli olunmalı.")
+
+    return {"bias": max(-14, min(14, bias)), "notes": notes}
 
 
 def get_macro_regime() -> Dict[str, Any]:
@@ -2666,12 +2751,22 @@ def market_signals_external():
         whale_positioning = get_whale_positioning(symbol)
     except Exception as e:
         whale_positioning = {"error": str(e)}
+    try:
+        geopolitical_risk = get_geopolitical_risk_signal()
+    except Exception as e:
+        geopolitical_risk = {"error": str(e)}
+    try:
+        regulatory_activity = get_regulatory_activity_signal()
+    except Exception as e:
+        regulatory_activity = {"error": str(e)}
     return jsonify({
         "symbol": symbol,
         "funding_rate": funding,
         "fear_greed_index": fear_greed,
         "macro_regime": macro_regime,
         "whale_positioning": whale_positioning,
+        "geopolitical_risk": geopolitical_risk,
+        "regulatory_activity": regulatory_activity,
         "buy_bias": get_external_signal_bias(symbol, "BUY"),
         "sell_bias": get_external_signal_bias(symbol, "SELL"),
         "time": now_text(),
