@@ -218,6 +218,24 @@ LAST_ORDER_TIME: Dict[str, float] = {}
 MIN_ORDER_COOLDOWN_SEC = float(os.getenv("MIN_ORDER_COOLDOWN_SEC", "2.0"))
 BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "5.0"))
 
+# Varlik bazli pozisyon boyutlandirma: her BUY/SELL sinyalinde sabit miktar yerine,
+# bosta bekleyen (available) Binance futures USDT bakiyesinin belirli bir yuzdesi
+# kadar pozisyon acilir. BTC icin %25, ETH icin %20, diger tum varliklar icin %10
+# (hepsi Railway degiskeni ile ayarlanabilir).
+AUTO_TRADER_SIZE_PCT_BTC = float(os.getenv("AUTO_TRADER_SIZE_PCT_BTC", "25.0")) / 100.0
+AUTO_TRADER_SIZE_PCT_ETH = float(os.getenv("AUTO_TRADER_SIZE_PCT_ETH", "20.0")) / 100.0
+AUTO_TRADER_SIZE_PCT_DEFAULT = float(os.getenv("AUTO_TRADER_SIZE_PCT_DEFAULT", "10.0")) / 100.0
+
+
+def asset_size_pct(symbol: str) -> float:
+    """Sembolun baz varligina gore (BTC/ETH/diger) kullanilacak bakiye yuzdesini dondurur."""
+    sym = str(symbol or "").upper()
+    if sym.startswith("BTC"):
+        return AUTO_TRADER_SIZE_PCT_BTC
+    if sym.startswith("ETH"):
+        return AUTO_TRADER_SIZE_PCT_ETH
+    return AUTO_TRADER_SIZE_PCT_DEFAULT
+
 
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1504,6 +1522,20 @@ def auto_trader_cycle() -> None:
                         "time": now_text(),
                     }
             else:
+                # Varlik bazli pozisyon boyutlandirma: sabit miktar yerine, bosta bekleyen
+                # futures USDT bakiyesinin belirli bir yuzdesi kadar pozisyon acilir
+                # (BTC %25, ETH %20, diger varliklar %10 - varsayilan, env ile ayarlanabilir).
+                if price > 0:
+                    available_usdt = get_futures_available_usdt()
+                    if available_usdt > 0:
+                        pct = asset_size_pct(symbol)
+                        sized_qty = round((available_usdt * pct) / price, 3)
+                        if sized_qty > 0:
+                            reason = (
+                                reason
+                                + f" (Pozisyon buyuklugu: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i -> {sized_qty:.6f} {symbol}.)"
+                            ).strip()
+                            qty = sized_qty
                 min_notional = 21.0  # Binance min 20 USD + güvenlik payı
                 if price > 0 and qty * price < min_notional:
                     adj_qty = math.ceil((min_notional / price) * 1000) / 1000.0
@@ -1858,6 +1890,20 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
         result["target_pct"] = BINANCE_TAKE_PROFIT_PCT
         return result
     return None
+
+
+def get_futures_available_usdt() -> float:
+    """Binance futures cuzdanindaki kullanilabilir (bosta bekleyen) USDT bakiyesini dondurur.
+    Yeni pozisyon boyutlandirma (varlik basina %) bu deger uzerinden hesaplanir.
+    Basarisiz olursa 0.0 doner; cagiran taraf bu durumda AUTO_TRADER.quantity'e (sabit miktar) geri duser."""
+    try:
+        data = signed_request("GET", FUTURES_BASE, "/fapi/v2/balance", {})
+        for b in data:
+            if str(b.get("asset", "")).upper() == "USDT":
+                return safe_float(b.get("availableBalance"))
+        return 0.0
+    except Exception:
+        return 0.0
 
 
 def get_spot_balances() -> List[Dict[str, Any]]:
