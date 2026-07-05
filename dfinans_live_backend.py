@@ -226,12 +226,14 @@ AUTO_TRADER_SIZE_PCT_BTC = float(os.getenv("AUTO_TRADER_SIZE_PCT_BTC", "25.0")) 
 AUTO_TRADER_SIZE_PCT_ETH = float(os.getenv("AUTO_TRADER_SIZE_PCT_ETH", "20.0")) / 100.0
 AUTO_TRADER_SIZE_PCT_DEFAULT = float(os.getenv("AUTO_TRADER_SIZE_PCT_DEFAULT", "10.0")) / 100.0
 
-# Varlik bazli kaldirac: BTC icin 3x (ayni teminatla 3 kat buyuk pozisyon acilir).
-# Diger varliklar varsayilan olarak 1x (kaldiracsiz) kalir; hepsi Railway
-# degiskeni ile ayarlanabilir.
-AUTO_TRADER_LEVERAGE_BTC = max(1, int(os.getenv("AUTO_TRADER_LEVERAGE_BTC", "3")))
-AUTO_TRADER_LEVERAGE_ETH = max(1, int(os.getenv("AUTO_TRADER_LEVERAGE_ETH", "1")))
-AUTO_TRADER_LEVERAGE_DEFAULT = max(1, int(os.getenv("AUTO_TRADER_LEVERAGE_DEFAULT", "1")))
+# Sinyal gucune (confidence) gore kaldirac: kaldirac artik sabit varlik bazli
+# degil, her islemin AI/sinyal guveninе gore kademeli belirlenir. Max kaldirac
+# 3x ile sinirlandirilmistir (ayarlanabilir); cogu islem "orta-guclu" bandina
+# (>= AUTO_TRADER_LEVERAGE_TIER_CONF) dustugu icin pratikte agirlikli olarak
+# 3x kullanilir, zayif sinyallerde 2x'e duser.
+AUTO_TRADER_LEVERAGE_MAX = max(1, int(os.getenv("AUTO_TRADER_LEVERAGE_MAX", "3")))
+AUTO_TRADER_LEVERAGE_MIN = max(1, int(os.getenv("AUTO_TRADER_LEVERAGE_MIN", "2")))
+AUTO_TRADER_LEVERAGE_TIER_CONF = float(os.getenv("AUTO_TRADER_LEVERAGE_TIER_CONF", "75"))
 
 
 def asset_size_pct(symbol: str) -> float:
@@ -244,14 +246,15 @@ def asset_size_pct(symbol: str) -> float:
     return AUTO_TRADER_SIZE_PCT_DEFAULT
 
 
-def asset_leverage(symbol: str) -> int:
-    """Sembolun baz varligina gore kullanilacak kaldirac (leverage) katsayisini dondurur."""
-    sym = str(symbol or "").upper()
-    if sym.startswith("BTC"):
-        return AUTO_TRADER_LEVERAGE_BTC
-    if sym.startswith("ETH"):
-        return AUTO_TRADER_LEVERAGE_ETH
-    return AUTO_TRADER_LEVERAGE_DEFAULT
+def signal_leverage(confidence: float) -> int:
+    """Sinyal guvenine (confidence, 0-100) gore kullanilacak kaldiraci dondurur.
+    confidence >= AUTO_TRADER_LEVERAGE_TIER_CONF (varsayilan 75) ise max kaldirac (3x),
+    aksi halde min kaldirac (2x) uygulanir. Max kaldirac AUTO_TRADER_LEVERAGE_MAX ile
+    siniirlidir, hicbir zaman asilmaz."""
+    if confidence >= AUTO_TRADER_LEVERAGE_TIER_CONF:
+        return AUTO_TRADER_LEVERAGE_MAX
+    return min(AUTO_TRADER_LEVERAGE_MIN, AUTO_TRADER_LEVERAGE_MAX)
+
 
 
 def now_text() -> str:
@@ -1542,9 +1545,10 @@ def auto_trader_cycle() -> None:
                 # Varlik bazli pozisyon boyutlandirma: sabit miktar yerine, bosta bekleyen
                 # futures USDT bakiyesinin belirli bir yuzdesi kadar pozisyon acilir
                 # (BTC %25, ETH %20, diger varliklar %10 - varsayilan, env ile ayarlanabilir).
-                # Kaldirac (leverage) ile bu teminat uzerinden daha buyuk bir pozisyon
-                # acilabilir (orn. BTC icin varsayilan 3x: ayni teminatla 3 kat buyuk pozisyon).
-                leverage = asset_leverage(symbol)
+                # Kaldirac (leverage) artik sinyal gucune (confidence) gore belirlenir:
+                # guclu sinyallerde max kaldirac (varsayilan 3x), zayif sinyallerde min
+                # kaldirac (varsayilan 2x) kullanilir - max kaldirac hicbir zaman asilmaz.
+                leverage = signal_leverage(confidence)
                 if price > 0:
                     available_usdt = get_futures_available_usdt()
                     if available_usdt > 0:
@@ -1553,7 +1557,7 @@ def auto_trader_cycle() -> None:
                         if sized_qty > 0:
                             reason = (
                                 reason
-                                + f" (Pozisyon buyuklugu: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i x{leverage} kaldirac -> {sized_qty:.6f} {symbol}.)"
+                                + f" (Pozisyon buyuklugu: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i x{leverage} kaldirac (guven %{confidence}) -> {sized_qty:.6f} {symbol}.)"
                             ).strip()
                             qty = sized_qty
                 min_notional = 21.0  # Binance min 20 USD + güvenlik payı
