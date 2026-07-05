@@ -226,6 +226,13 @@ AUTO_TRADER_SIZE_PCT_BTC = float(os.getenv("AUTO_TRADER_SIZE_PCT_BTC", "25.0")) 
 AUTO_TRADER_SIZE_PCT_ETH = float(os.getenv("AUTO_TRADER_SIZE_PCT_ETH", "20.0")) / 100.0
 AUTO_TRADER_SIZE_PCT_DEFAULT = float(os.getenv("AUTO_TRADER_SIZE_PCT_DEFAULT", "10.0")) / 100.0
 
+# Varlik bazli kaldirac: BTC icin 3x (ayni teminatla 3 kat buyuk pozisyon acilir).
+# Diger varliklar varsayilan olarak 1x (kaldiracsiz) kalir; hepsi Railway
+# degiskeni ile ayarlanabilir.
+AUTO_TRADER_LEVERAGE_BTC = max(1, int(os.getenv("AUTO_TRADER_LEVERAGE_BTC", "3")))
+AUTO_TRADER_LEVERAGE_ETH = max(1, int(os.getenv("AUTO_TRADER_LEVERAGE_ETH", "1")))
+AUTO_TRADER_LEVERAGE_DEFAULT = max(1, int(os.getenv("AUTO_TRADER_LEVERAGE_DEFAULT", "1")))
+
 
 def asset_size_pct(symbol: str) -> float:
     """Sembolun baz varligina gore (BTC/ETH/diger) kullanilacak bakiye yuzdesini dondurur."""
@@ -235,6 +242,16 @@ def asset_size_pct(symbol: str) -> float:
     if sym.startswith("ETH"):
         return AUTO_TRADER_SIZE_PCT_ETH
     return AUTO_TRADER_SIZE_PCT_DEFAULT
+
+
+def asset_leverage(symbol: str) -> int:
+    """Sembolun baz varligina gore kullanilacak kaldirac (leverage) katsayisini dondurur."""
+    sym = str(symbol or "").upper()
+    if sym.startswith("BTC"):
+        return AUTO_TRADER_LEVERAGE_BTC
+    if sym.startswith("ETH"):
+        return AUTO_TRADER_LEVERAGE_ETH
+    return AUTO_TRADER_LEVERAGE_DEFAULT
 
 
 def now_text() -> str:
@@ -1525,15 +1542,18 @@ def auto_trader_cycle() -> None:
                 # Varlik bazli pozisyon boyutlandirma: sabit miktar yerine, bosta bekleyen
                 # futures USDT bakiyesinin belirli bir yuzdesi kadar pozisyon acilir
                 # (BTC %25, ETH %20, diger varliklar %10 - varsayilan, env ile ayarlanabilir).
+                # Kaldirac (leverage) ile bu teminat uzerinden daha buyuk bir pozisyon
+                # acilabilir (orn. BTC icin varsayilan 3x: ayni teminatla 3 kat buyuk pozisyon).
+                leverage = asset_leverage(symbol)
                 if price > 0:
                     available_usdt = get_futures_available_usdt()
                     if available_usdt > 0:
                         pct = asset_size_pct(symbol)
-                        sized_qty = round((available_usdt * pct) / price, 3)
+                        sized_qty = round((available_usdt * pct * leverage) / price, 3)
                         if sized_qty > 0:
                             reason = (
                                 reason
-                                + f" (Pozisyon buyuklugu: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i -> {sized_qty:.6f} {symbol}.)"
+                                + f" (Pozisyon buyuklugu: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i x{leverage} kaldirac -> {sized_qty:.6f} {symbol}.)"
                             ).strip()
                             qty = sized_qty
                 min_notional = 21.0  # Binance min 20 USD + güvenlik payı
@@ -1542,6 +1562,7 @@ def auto_trader_cycle() -> None:
                     reason = (reason + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: min. işlem tutarı {min_notional}$ altında kalıyordu.)").strip()
                     qty = adj_qty
                 if do_live:
+                    ensure_binance_leverage(symbol, leverage)
                     execution = place_futures_order(symbol, action, qty, reduce_only=False)
                 else:
                     execution = {
@@ -1904,6 +1925,28 @@ def get_futures_available_usdt() -> float:
         return 0.0
     except Exception:
         return 0.0
+
+
+_LEVERAGE_APPLIED_CACHE: Dict[str, int] = {}
+_LEVERAGE_LOCK = threading.Lock()
+
+
+def ensure_binance_leverage(symbol: str, leverage: int) -> None:
+    """Binance futures'ta ilgili sembol icin istenen kaldiraci ayarlar (POST /fapi/v1/leverage).
+    Ayni deger zaten uygulanmissa (bu process icinde) tekrar cagirmaz. Hata durumunda
+    sessizce gecer; asil emir Binance'in kendi hata mesajiyla (yetersiz kaldirac vb.)
+    reddedilirse bu execution.error olarak zaten raporlanir."""
+    if leverage <= 1:
+        return
+    with _LEVERAGE_LOCK:
+        if _LEVERAGE_APPLIED_CACHE.get(symbol) == leverage:
+            return
+    try:
+        signed_request("POST", FUTURES_BASE, "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
+        with _LEVERAGE_LOCK:
+            _LEVERAGE_APPLIED_CACHE[symbol] = leverage
+    except Exception:
+        pass
 
 
 def get_spot_balances() -> List[Dict[str, Any]]:
