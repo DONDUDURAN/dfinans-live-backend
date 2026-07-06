@@ -937,6 +937,26 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
     return ibkr_execute(_run)
 
 
+def ibkr_account_summary_snapshot() -> List[Dict[str, Any]]:
+    """IBKR hesap ozet degerlerini (NetLiquidation, CashBalance, ExchangeRate vb.)
+    tag/currency/value satirlari olarak dondurur. Mobil uygulama /account-summary
+    endpoint'inden bu formati (data: [{tag, currency, value, account}]) bekliyor."""
+    def _run(ib, _):
+        rows = []
+        values = ib.accountValues(IBKR_ACCOUNT or "")
+        for v in values:
+            if IBKR_ACCOUNT and v.account != IBKR_ACCOUNT:
+                continue
+            rows.append({
+                "tag": v.tag,
+                "currency": v.currency,
+                "value": v.value,
+                "account": v.account,
+            })
+        return rows
+    return ibkr_execute(_run)
+
+
 def ibkr_place_market_order(
     symbol: str,
     side: str,
@@ -2634,6 +2654,52 @@ def ibkr_positions():
         return jsonify({"positions": ibkr_positions_snapshot(), "last_update": now_text(), "broker": "IBKR"})
     except Exception as e:
         return jsonify({"positions": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
+
+
+@app.route("/ibkr-positions", methods=["GET"])
+def ibkr_positions_alias():
+    # Mobil uygulama bu path'i cagiriyor; /ibkr/positions ile ayni veriyi dondurur.
+    try:
+        return jsonify({"positions": ibkr_positions_snapshot(), "last_update": now_text(), "broker": "IBKR"})
+    except Exception as e:
+        return jsonify({"positions": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
+
+
+@app.route("/spot-balances", methods=["GET"])
+def spot_balances_proxy_alias():
+    # Mobil uygulamanin dogrudan cagirdigi path. Railway'in IP'si Binance'de
+    # whitelist'li olmadigi icin VPS proxy'sinden (5055) gecirilir.
+    try:
+        data = _binance_proxy_request("GET", "/spot-balances")
+        if isinstance(data, dict):
+            data.setdefault("last_update", now_text())
+            return jsonify(data)
+        return jsonify({"ok": True, "balances": data, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "balances": [], "error": str(e), "last_update": now_text()}), 200
+
+
+@app.route("/futures-balances", methods=["GET"])
+def futures_balances_proxy_alias():
+    try:
+        data = _binance_proxy_request("GET", "/futures-balances")
+        if isinstance(data, dict):
+            data.setdefault("last_update", now_text())
+            return jsonify(data)
+        return jsonify({"ok": True, "balances": data, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "balances": [], "error": str(e), "last_update": now_text()}), 200
+
+
+@app.route("/account-summary", methods=["GET"])
+def account_summary_alias():
+    # Mobil uygulama burada IBKR hesap ozet satirlarini (tag/currency/value) bekliyor
+    # (Binance TRY toplami zaten /portfolio ve /spot-balances+/futures-balances'tan geliyor).
+    try:
+        rows = ibkr_account_summary_snapshot()
+        return jsonify({"ok": True, "data": rows, "broker": "IBKR", "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "data": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 200
 
 
 @app.route("/market-summary", methods=["GET"])
