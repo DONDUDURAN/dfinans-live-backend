@@ -1582,12 +1582,16 @@ def auto_trader_cycle() -> None:
 
     if action in ["BUY", "SELL"]:
         confidence = max(0, min(95, confidence + learning_bias(action)))
-        if broker != "IBKR":
-            ext = get_external_signal_bias(symbol, action)
-            if ext["bias"] != 0:
-                confidence = max(0, min(95, confidence + ext["bias"]))
-            if ext["notes"]:
-                reason = (reason + " " + " ".join(ext["notes"])).strip()
+        # Dis sinyaller (SEC dosyalama sicramasi, haber sentiment'i, Fear&Greed, makro
+        # rejim, jeopolitik risk) artik IBKR (hisse) icin de uygulaniyor - bunlar zaten
+        # var olan genel/makro gostergeler. Funding rate ve whale long/short orani gibi
+        # sadece Binance Futures'a ozgu olanlar IBKR sembolleri icin otomatik "error"
+        # donup sessizce atlanir, IBKR'a zarar vermez.
+        ext = get_external_signal_bias(symbol, action)
+        if ext["bias"] != 0:
+            confidence = max(0, min(95, confidence + ext["bias"]))
+        if ext["notes"]:
+            reason = (reason + " " + " ".join(ext["notes"])).strip()
     resolve_learning(symbol, price)
 
     with AUTO_LOCK:
