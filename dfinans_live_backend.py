@@ -1310,6 +1310,24 @@ def ibkr_account_summary_snapshot() -> List[Dict[str, Any]]:
     return ibkr_execute(_run)
 
 
+def get_ibkr_available_funds() -> float:
+    """IBKR hesabindaki kullanilabilir alim gucunu (AvailableFunds) USD olarak dondurur.
+    Auto-trader IBKR icin sabit miktarli (ör. 1 hisse) emir gonderdiginde, hesaptaki
+    diger pozisyonlarin (NVDA/AMD/IBKR) marjini yuzunden 'Available Funds insufficient
+    to cover margin requirement' hatasiyla emir iptal ediliyordu - emir hic tutmuyordu.
+    Bu fonksiyon otomatik pozisyon boyutlandirmasinda kullanilir."""
+    def _fetch():
+        try:
+            rows = ibkr_account_summary_snapshot()
+        except Exception:
+            return 0.0
+        for r in rows:
+            if str(r.get("tag", "")) == "AvailableFunds":
+                return safe_float(r.get("value"))
+        return 0.0
+    return _cache_get_or_fetch("ibkr_available_funds", 20, _fetch)
+
+
 def ibkr_place_market_order(
     symbol: str,
     side: str,
@@ -2130,7 +2148,41 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
         if allow_trade:
             if broker == "IBKR":
                 if do_live:
-                    execution = ibkr_place_market_order(symbol, action, qty, asset_type, exchange, currency)
+                    # Sabit miktarli (ör. 1 hisse) emir, hesaptaki diger pozisyonlarin
+                    # (NVDA/AMD/IBKR) kullandigi marj yuzunden 'Available Funds
+                    # insufficient' hatasiyla iptal edilebiliyordu (gercek IBKR hatasi:
+                    # Error 201 Order rejected - margin requirement). Emir gondermeden
+                    # once kullanilabilir fonu kontrol edip, gerekirse islem tarafinda
+                    # BUY icin miktari guvenli bir seviyeye (kullanilabilir fonun %80'i)
+                    # dusuruyoruz; hala 0'dan kucukse islem hic gonderilmiyor.
+                    if action == "BUY" and price > 0:
+                        available_funds = get_ibkr_available_funds()
+                        needed = qty * price
+                        safe_budget = available_funds * 0.8
+                        if available_funds > 0 and needed > safe_budget:
+                            affordable_qty = math.floor(safe_budget / price)
+                            if affordable_qty <= 0:
+                                execution = {
+                                    "simulated": False,
+                                    "broker": "IBKR",
+                                    "symbol": symbol,
+                                    "side": action,
+                                    "quantity": 0,
+                                    "error": (
+                                        f"Yetersiz alım gücü: kullanılabilir fon {available_funds:.2f} USD, "
+                                        f"1 {symbol} hissesi ~{price:.2f} USD tutuyor. Emir gönderilmedi."
+                                    ),
+                                    "time": now_text(),
+                                }
+                                qty = 0
+                            else:
+                                reason = (
+                                    reason
+                                    + f" (Miktar {qty} -> {affordable_qty} olarak düşürüldü: kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
+                                ).strip()
+                                qty = affordable_qty
+                    if qty > 0 and "error" not in execution:
+                        execution = ibkr_place_market_order(symbol, action, qty, asset_type, exchange, currency)
                 else:
                     execution = {
                         "simulated": True,
