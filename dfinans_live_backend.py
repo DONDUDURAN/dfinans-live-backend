@@ -61,7 +61,7 @@ IBKR_KEEPALIVE_SEC = int(os.getenv("IBKR_KEEPALIVE_SEC", "20"))
 IBKR_LIVE_TRADING = os.getenv("IBKR_LIVE_TRADING", "false").lower() == "true"
 AUTO_TRADER_ENABLED = os.getenv("AUTO_TRADER_ENABLED", "false").lower() == "true"
 AUTO_TRADER_MODE = os.getenv("AUTO_TRADER_MODE", "paper").lower()
-RUNTIME_DB_PATH = os.getenv("DFINANS_RUNTIME_DB_PATH", "/tmp/dfinans_runtime.db")
+RUNTIME_DB_PATH = os.getenv("DFINANS_RUNTIME_DB_PATH", "/data/dfinans_runtime.db" if os.path.isdir("/data") else "/tmp/dfinans_runtime.db")
 BINANCE_PROXY_BASE_URL = os.getenv("BINANCE_PROXY_BASE_URL", "").rstrip("/")
 BINANCE_PROXY_TOKEN = os.getenv("BINANCE_PROXY_TOKEN", "")
 # Emir (order) islemleri icin ayri bir proxy hedefi tanimlanabilir. VPS'teki bazi
@@ -957,6 +957,122 @@ def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, curren
 _IBKR_SNAPSHOT_CACHE: Dict[str, Any] = {}
 _IBKR_SNAPSHOT_CACHE_TTL_SEC = 4.0
 
+# --- Toplu (batched) fiyat sorgulama ---
+# Mobil uygulama ayni anda (Piyasalar ekrani, Islem merkezi, Ekonomi Radari vb.)
+# 5-10 farkli sembol icin fiyat istiyor. IBKR erisimi tek adanmis worker thread
+# uzerinden serilestirildigi icin (bkz. ibkr_execute), her sembolu ayri ayri
+# istemek N sembol x 2.5sn = cok yavas bir toplam sure demek ve istemci
+# tarafinda zaman asimina (timeout) yol aciyordu. Bunun yerine kisa bir
+# "toplama penceresi" (150ms) icinde gelen tum istekler tek bir IBKR
+# round-trip'inde (tek reqMktData turu + tek sleep) toplanip cevaplanir.
+_IBKR_BATCH_LOCK = threading.Lock()
+_IBKR_PENDING_BATCH: List[Dict[str, Any]] = []
+_IBKR_BATCH_OWNER_ACTIVE = False
+_IBKR_BATCH_DEBOUNCE_SEC = 0.15
+_IBKR_BATCH_MAX_WAIT_SEC = 20.0
+
+
+def _clean_float(v: Any) -> float:
+    f = safe_float(v)
+    return f if f == f and f not in (float("inf"), float("-inf")) else 0.0
+
+
+def _build_snapshot_from_ticker(ticker, symbol: str, asset_type: str, exchange: str, currency: str) -> Dict[str, Any]:
+    price = _clean_float(ticker.marketPrice())
+    last_price = _clean_float(getattr(ticker, "last", 0))
+    close_price = _clean_float(getattr(ticker, "close", 0))
+    if price <= 0:
+        price = last_price if last_price > 0 else close_price
+    if price <= 0:
+        raise RuntimeError("IBKR canlı fiyat alınamadı.")
+    prev = close_price if close_price > 0 else price
+    change_24h = ((price - prev) / prev) * 100.0 if prev > 0 else 0.0
+    # Ikinci, bagimsiz sinyal: emir defteri (bid/ask) buyuklugu dengesizligi.
+    bid_size = safe_float(getattr(ticker, "bidSize", 0))
+    ask_size = safe_float(getattr(ticker, "askSize", 0))
+    order_flow_signal = "NEUTRAL"
+    if bid_size > 0 or ask_size > 0:
+        total_size = bid_size + ask_size
+        if total_size > 0:
+            bid_ratio = bid_size / total_size
+            if bid_ratio > 0.58:
+                order_flow_signal = "BUY"
+            elif bid_ratio < 0.42:
+                order_flow_signal = "SELL"
+    return {
+        "symbol": normalize_symbol(symbol),
+        "asset_type": str(asset_type or "STK").upper(),
+        "exchange": exchange,
+        "currency": currency,
+        "data_source": "ibkr",
+        "price": round(price, 6),
+        "change_24h": round(change_24h, 4),
+        "prev_close": round(prev, 6),
+        "bid_size": bid_size,
+        "ask_size": ask_size,
+        "order_flow_signal": order_flow_signal,
+        "last_update": now_text(),
+    }
+
+
+def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
+    """Tek bir IBKR round-trip'inde birden fazla sembolu birlikte sorgular ve
+    sonuclari her istemcinin kendi threading.Event'ine dagitir."""
+    def _run(ib, ibs):
+        try:
+            ib.reqMarketDataType(3)
+        except Exception:
+            pass
+        # Ayni contract'i (symbol/asset_type/exchange/currency) birden fazla
+        # istemci istemis olabilir - IBKR'a sadece bir kez sormak yeterli.
+        unique_contracts: Dict[str, Any] = {}
+        tickers: Dict[str, Any] = {}
+        for item in batch_items:
+            key = item["cache_key"]
+            if key in unique_contracts:
+                continue
+            try:
+                contract = build_ibkr_contract(ibs, item["symbol"], item["asset_type"], item["exchange"], item["currency"])
+                qualified = ib.qualifyContracts(contract)
+                if not qualified:
+                    raise RuntimeError("IBKR contract doğrulanamadı.")
+                unique_contracts[key] = qualified[0]
+                tickers[key] = ib.reqMktData(qualified[0], "", True, False)
+            except Exception as e:
+                item["error"] = str(e)
+        if tickers:
+            ib.sleep(2.5)
+        for item in batch_items:
+            key = item["cache_key"]
+            if item.get("error"):
+                continue
+            ticker = tickers.get(key)
+            if ticker is None:
+                item["error"] = "IBKR contract doğrulanamadı."
+                continue
+            try:
+                item["result"] = _build_snapshot_from_ticker(
+                    ticker, item["symbol"], item["asset_type"], item["exchange"], item["currency"]
+                )
+            except Exception as e:
+                item["error"] = str(e)
+        return None
+
+    try:
+        ibkr_execute(_run, timeout=30.0)
+    except Exception as e:
+        # ibkr_execute'un kendisi (kuyruk/baglanti) patlarsa, hicbir item'in
+        # sonucu/hatasi set edilmemis olabilir - hepsine bu hatayi yaz.
+        for item in batch_items:
+            if not item.get("error") and item.get("result") is None:
+                item["error"] = str(e)
+    finally:
+        now = time.time()
+        for item in batch_items:
+            if item.get("result") is not None:
+                _IBKR_SNAPSHOT_CACHE[item["cache_key"]] = (now, item["result"])
+            item["event"].set()
+
 
 def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: str) -> Dict[str, Any]:
     # Mobil uygulama ayni sembolu birden fazla ekrandan (Piyasalar, Islem, Ekonomi
@@ -968,62 +1084,42 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
     if cached and (time.time() - cached[0]) < _IBKR_SNAPSHOT_CACHE_TTL_SEC:
         return cached[1]
 
-    def _run(ib, ibs):
-        contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
-        qualified = ib.qualifyContracts(contract)
-        if not qualified:
-            raise RuntimeError("IBKR contract doğrulanamadı.")
-        try:
-            # Bağlantı ensure_ibkr_connection dışında (ör. eski bir bağlantı)
-            # devam ediyorsa da gecikmeli veriye düştüğümüzden emin ol.
-            ib.reqMarketDataType(3)
-        except Exception:
-            pass
-        ticker = ib.reqMktData(qualified[0], "", True, False)
-        ib.sleep(2.5)
-        def _clean(v):
-            f = safe_float(v)
-            return f if f == f and f not in (float("inf"), float("-inf")) else 0.0
-        price = _clean(ticker.marketPrice())
-        last_price = _clean(getattr(ticker, "last", 0))
-        close_price = _clean(getattr(ticker, "close", 0))
-        if price <= 0:
-            price = last_price if last_price > 0 else close_price
-        if price <= 0:
-            raise RuntimeError("IBKR canlı fiyat alınamadı.")
-        prev = close_price if close_price > 0 else price
-        change_24h = ((price - prev) / prev) * 100.0 if prev > 0 else 0.0
-        # Ikinci, bagimsiz sinyal: emir defteri (bid/ask) buyuklugu dengesizligi.
-        # Momentum (change_24h) fiyattan turetilirken, bu deger gercek en iyi
-        # alis/satis emri boyutlarindan (top-of-book) geliyor - birbirinden bagimsiz.
-        bid_size = safe_float(getattr(ticker, "bidSize", 0))
-        ask_size = safe_float(getattr(ticker, "askSize", 0))
-        order_flow_signal = "NEUTRAL"
-        if bid_size > 0 or ask_size > 0:
-            total_size = bid_size + ask_size
-            if total_size > 0:
-                bid_ratio = bid_size / total_size
-                if bid_ratio > 0.58:
-                    order_flow_signal = "BUY"
-                elif bid_ratio < 0.42:
-                    order_flow_signal = "SELL"
-        return {
-            "symbol": normalize_symbol(symbol),
-            "asset_type": str(asset_type or "STK").upper(),
-            "exchange": exchange,
-            "currency": currency,
-            "data_source": "ibkr",
-            "price": round(price, 6),
-            "change_24h": round(change_24h, 4),
-            "prev_close": round(prev, 6),
-            "bid_size": bid_size,
-            "ask_size": ask_size,
-            "order_flow_signal": order_flow_signal,
-            "last_update": now_text(),
-        }
-    result = ibkr_execute(_run)
-    _IBKR_SNAPSHOT_CACHE[cache_key] = (time.time(), result)
-    return result
+    item = {
+        "cache_key": cache_key,
+        "symbol": symbol,
+        "asset_type": asset_type,
+        "exchange": exchange,
+        "currency": currency,
+        "event": threading.Event(),
+        "result": None,
+        "error": None,
+    }
+
+    global _IBKR_BATCH_OWNER_ACTIVE
+    is_owner = False
+    with _IBKR_BATCH_LOCK:
+        _IBKR_PENDING_BATCH.append(item)
+        if not _IBKR_BATCH_OWNER_ACTIVE:
+            _IBKR_BATCH_OWNER_ACTIVE = True
+            is_owner = True
+
+    if is_owner:
+        # Kisa bir sure bekleyerek ayni anda gelen diger istekleri de bu
+        # tura dahil et (debounce). Bu sirada baska thread'ler kendi
+        # item'larini _IBKR_PENDING_BATCH'e ekleyebilir.
+        time.sleep(_IBKR_BATCH_DEBOUNCE_SEC)
+        with _IBKR_BATCH_LOCK:
+            batch_items = _IBKR_PENDING_BATCH.copy()
+            _IBKR_PENDING_BATCH.clear()
+            _IBKR_BATCH_OWNER_ACTIVE = False
+        _process_ibkr_price_batch(batch_items)
+    else:
+        if not item["event"].wait(timeout=_IBKR_BATCH_MAX_WAIT_SEC):
+            raise RuntimeError("IBKR fiyat isteği zaman aşımına uğradı.")
+
+    if item.get("error"):
+        raise RuntimeError(f"IBKR işlem hatası: {item['error']}")
+    return item["result"]
 
 
 def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
