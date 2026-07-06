@@ -877,6 +877,20 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
             raise RuntimeError("IBKR canlı fiyat alınamadı.")
         prev = close_price if close_price > 0 else price
         change_24h = ((price - prev) / prev) * 100.0 if prev > 0 else 0.0
+        # Ikinci, bagimsiz sinyal: emir defteri (bid/ask) buyuklugu dengesizligi.
+        # Momentum (change_24h) fiyattan turetilirken, bu deger gercek en iyi
+        # alis/satis emri boyutlarindan (top-of-book) geliyor - birbirinden bagimsiz.
+        bid_size = safe_float(getattr(ticker, "bidSize", 0))
+        ask_size = safe_float(getattr(ticker, "askSize", 0))
+        order_flow_signal = "NEUTRAL"
+        if bid_size > 0 or ask_size > 0:
+            total_size = bid_size + ask_size
+            if total_size > 0:
+                bid_ratio = bid_size / total_size
+                if bid_ratio > 0.58:
+                    order_flow_signal = "BUY"
+                elif bid_ratio < 0.42:
+                    order_flow_signal = "SELL"
         return {
             "symbol": normalize_symbol(symbol),
             "asset_type": str(asset_type or "STK").upper(),
@@ -886,6 +900,9 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
             "price": round(price, 6),
             "change_24h": round(change_24h, 4),
             "prev_close": round(prev, 6),
+            "bid_size": bid_size,
+            "ask_size": ask_size,
+            "order_flow_signal": order_flow_signal,
             "last_update": now_text(),
         }
     return ibkr_execute(_run)
@@ -1493,15 +1510,44 @@ def auto_trader_cycle() -> None:
             return
 
     if broker == "IBKR":
+        # IBKR icin iki bagimsiz sinyal kullanilir: (1) fiyat momentumu (change_24h),
+        # (2) emir defteri bid/ask boyut dengesi (order_flow_signal). Ikisi ayni yonde
+        # BUY/SELL derse islem acilir; biri WAIT/NEUTRAL ise digeri tek basina yeterlidir
+        # (boylece tek sinyal her zaman zorunlu tutulmaz, "hic islem acmiyor" sorunu onlenir),
+        # ama ikisi ZIT yon gosterirse (biri BUY biri SELL) islem acilmaz - celiskili sinyal.
         snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency)
         price = safe_float(snap.get("price"))
         change = safe_float(snap.get("change_24h"))
+        order_flow = str(snap.get("order_flow_signal", "NEUTRAL")).upper()
+
+        momentum_signal = "WAIT"
         if change > 0.6:
-            action = "BUY"
+            momentum_signal = "BUY"
         elif change < -0.6:
-            action = "SELL"
-        confidence = min(90, int(55 + abs(change) * 11))
-        reason = f"IBKR momentum analizi: 24s değişim %{change:.2f}"
+            momentum_signal = "SELL"
+
+        if momentum_signal in ["BUY", "SELL"] and order_flow in ["BUY", "SELL"] and momentum_signal != order_flow:
+            action = "WAIT"
+            confidence = 50
+            reason = (
+                f"IBKR sinyalleri çelişiyor: momentum {momentum_signal} (24s değişim %{change:.2f}), "
+                f"emir akışı {order_flow} -> işlem açılmadı."
+            )
+        else:
+            action = momentum_signal if momentum_signal in ["BUY", "SELL"] else (order_flow if order_flow in ["BUY", "SELL"] else "WAIT")
+            confidence = min(90, int(55 + abs(change) * 11))
+            if momentum_signal in ["BUY", "SELL"] and order_flow == momentum_signal:
+                confidence = min(95, confidence + 10)
+                reason = (
+                    f"IBKR çift teyit: momentum {momentum_signal} (24s değişim %{change:.2f}) "
+                    f"ve emir akışı da {order_flow} yönünde."
+                )
+            elif momentum_signal in ["BUY", "SELL"]:
+                reason = f"IBKR momentum sinyali: 24s değişim %{change:.2f} ({momentum_signal}), emir akışı nötr."
+            elif order_flow in ["BUY", "SELL"]:
+                reason = f"IBKR emir akışı sinyali: bid/ask dengesi {order_flow} yönünde, momentum nötr."
+            else:
+                reason = f"IBKR: net sinyal yok (24s değişim %{change:.2f})."
     else:
         ai = calculate_ai_signal(symbol, market)
         action = str(ai.get("signal", "WAIT")).upper()
