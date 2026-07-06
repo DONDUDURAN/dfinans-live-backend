@@ -2802,6 +2802,66 @@ def ibkr_positions_alias():
         return jsonify({"positions": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
 
 
+_STABLECOIN_ASSETS = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI"}
+_ASSET_PRICE_CACHE: Dict[str, Any] = {}
+_ASSET_PRICE_CACHE_TTL_SEC = 15.0
+
+
+def _asset_usd_price(asset: str, market: str) -> float:
+    # Binance bakiyelerindeki her coin icin (USDT disinda) canli USD fiyatini
+    # bulup satirlara ekliyoruz. iOS uygulamasi usdValue alani yoksa stablecoin
+    # disindaki varliklari (orn. futures cuzdanindaki ETH bakiyesi) tamamen
+    # gormezden gelip toplam bakiyeyi yanlis (oldugundan dusuk) hesapliyordu.
+    asset = asset.upper()
+    if asset in _STABLECOIN_ASSETS:
+        return 1.0
+    cache_key = f"{asset}|{market}"
+    cached = _ASSET_PRICE_CACHE.get(cache_key)
+    if cached and (time.time() - cached[0]) < _ASSET_PRICE_CACHE_TTL_SEC:
+        return cached[1]
+    price = 0.0
+    try:
+        price = get_price(f"{asset}USDT", market)
+    except Exception:
+        try:
+            # Futures'ta islem gormeyen bir coin ise spot fiyatina dus.
+            price = get_price(f"{asset}USDT", "SPOT")
+        except Exception:
+            price = 0.0
+    _ASSET_PRICE_CACHE[cache_key] = (time.time(), price)
+    return price
+
+
+def _enrich_balances_with_usd(balances: Any, market: str) -> Any:
+    if not isinstance(balances, list):
+        return balances
+    for row in balances:
+        if not isinstance(row, dict):
+            continue
+        asset = str(row.get("asset") or row.get("symbol") or row.get("coin") or "").upper()
+        if not asset or asset in {"HATA", "SPOT_TRY_EQUIV", "FUTURES_TRY_EQUIV", "BINANCE_TRY_TOTAL"}:
+            continue
+        # Uygulamanin zaten okudugu direkt USD alanlarindan biri varsa dokunma.
+        has_direct = any(
+            row.get(k) not in (None, "")
+            for k in ("usdValue", "valueUSD", "value_usd", "totalUSDValue", "usdtValue", "totalUSDT")
+        )
+        if has_direct:
+            continue
+        qty = safe_float(row.get("total"))
+        if qty <= 0:
+            qty = safe_float(row.get("balance"))
+        if qty <= 0:
+            qty = safe_float(row.get("free")) + safe_float(row.get("locked"))
+        if qty <= 0:
+            continue
+        price = _asset_usd_price(asset, market)
+        if price > 0:
+            row["usdValue"] = round(qty * price, 4)
+            row["usd_price"] = price
+    return balances
+
+
 @app.route("/spot-balances", methods=["GET"])
 def spot_balances_proxy_alias():
     # Mobil uygulamanin dogrudan cagirdigi path. Railway'in IP'si Binance'de
@@ -2810,7 +2870,10 @@ def spot_balances_proxy_alias():
         data = _binance_proxy_request("GET", "/spot-balances")
         if isinstance(data, dict):
             data.setdefault("last_update", now_text())
+            if "balances" in data:
+                data["balances"] = _enrich_balances_with_usd(data["balances"], "SPOT")
             return jsonify(data)
+        data = _enrich_balances_with_usd(data, "SPOT")
         return jsonify({"ok": True, "balances": data, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "balances": [], "error": str(e), "last_update": now_text()}), 200
@@ -2822,7 +2885,10 @@ def futures_balances_proxy_alias():
         data = _binance_proxy_request("GET", "/futures-balances")
         if isinstance(data, dict):
             data.setdefault("last_update", now_text())
+            if "balances" in data:
+                data["balances"] = _enrich_balances_with_usd(data["balances"], "FUTURES")
             return jsonify(data)
+        data = _enrich_balances_with_usd(data, "FUTURES")
         return jsonify({"ok": True, "balances": data, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "balances": [], "error": str(e), "last_update": now_text()}), 200
