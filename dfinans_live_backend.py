@@ -873,9 +873,12 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
             raise RuntimeError("IBKR contract doğrulanamadı.")
         ticker = ib.reqMktData(qualified[0], "", True, False)
         ib.sleep(2.5)
-        price = safe_float(ticker.marketPrice())
-        last_price = safe_float(getattr(ticker, "last", 0))
-        close_price = safe_float(getattr(ticker, "close", 0))
+        def _clean(v):
+            f = safe_float(v)
+            return f if f == f and f not in (float("inf"), float("-inf")) else 0.0
+        price = _clean(ticker.marketPrice())
+        last_price = _clean(getattr(ticker, "last", 0))
+        close_price = _clean(getattr(ticker, "close", 0))
         if price <= 0:
             price = last_price if last_price > 0 else close_price
         if price <= 0:
