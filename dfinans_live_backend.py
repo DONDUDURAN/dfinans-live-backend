@@ -190,6 +190,11 @@ class AutoTraderState:
 AUTO_TRADER = AutoTraderState()
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
+
+# Mobil uygulamanin /ai-status ve /ai-control endpoint'lerinin bekledigi basit
+# 3 durumlu (off/watch/auto) mod. AUTO_TRADER.enabled sadece acik/kapali bilgisini
+# tasidigi icin "watch" (izleme, emir yok) durumunu ayrica saklamamiz gerekiyor.
+AI_UI_MODE: Dict[str, str] = {"mode": "off"}
 SIGNAL_QUEUE: List[Dict[str, Any]] = []
 LEARNING_STATS: Dict[str, Dict[str, int]] = {
     "BUY": {"wins": 0, "losses": 0},
@@ -917,6 +922,7 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
             qty = safe_float(pos.position)
             if qty == 0:
                 continue
+            avg_cost = safe_float(pos.avgCost)
             rows.append({
                 "id": f"IBKR-{pos.contract.secType}-{pos.contract.symbol}",
                 "broker": "IBKR",
@@ -928,10 +934,15 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                 "currency": pos.contract.currency,
                 "side": "LONG" if qty > 0 else "SHORT",
                 "size": abs(qty),
-                "entry_price": safe_float(pos.avgCost),
+                "entry_price": avg_cost,
                 "mark_price": 0.0,
                 "pnl": 0.0,
                 "leverage": "",
+                # iOS uygulamasi (IBKRService.swift) bu alan adlarini bekliyor:
+                "position": qty,
+                "avgCost": avg_cost,
+                "secType": pos.contract.secType,
+                "name": pos.contract.symbol,
             })
         return rows
     return ibkr_execute(_run)
@@ -3244,6 +3255,312 @@ def close_position():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "time": now_text()}), 500
+
+
+# ---------------------------------------------------------------------------
+# Mobil uygulama (DFinans iOS) icin ek route'lar. Uygulama daha once
+# http://46.101.194.52:5055 (VPS) adresine gidiyordu; Railway backend'ine
+# tasindiginda cagiracagi tum path'ler burada karsilaniyor.
+# ---------------------------------------------------------------------------
+
+@app.route("/ibkr-status", methods=["GET"])
+def ibkr_status_alias():
+    return ibkr_health()
+
+
+@app.route("/ibkr-price", methods=["GET"])
+def ibkr_price_alias():
+    symbol = request.args.get("symbol", "AAPL")
+    asset_type = request.args.get("asset_type", "STK")
+    exchange = request.args.get("exchange", "SMART")
+    currency = request.args.get("currency", "USD")
+    try:
+        snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency)
+        price = safe_float(snap.get("price"))
+        change = safe_float(snap.get("change_24h"))
+        return jsonify({
+            "symbol": normalize_symbol(symbol),
+            "price": price,
+            "priceText": f"${price:,.2f}" if price else "-",
+            "last": price,
+            "marketPrice": price,
+            "close": price,
+            "changePercent": change,
+            "dailyChange": change,
+            "source": "IBKR",
+            "last_update": now_text(),
+        })
+    except Exception as e:
+        return jsonify({
+            "symbol": normalize_symbol(symbol),
+            "price": 0,
+            "error": str(e),
+            "source": "IBKR",
+            "last_update": now_text(),
+        }), 200
+
+
+@app.route("/order", methods=["POST"])
+def ibkr_order_alias():
+    # Mobil uygulama IBKR gercek emirlerini bu path'e gonderiyor.
+    body = request.get_json(force=True) or {}
+    symbol = body.get("symbol", "AAPL")
+    side = str(body.get("side", "BUY")).upper()
+    if side in ("AL", "BUY", "LONG"):
+        side = "BUY"
+    elif side in ("SAT", "SELL", "SHORT"):
+        side = "SELL"
+    quantity = safe_float(body.get("quantity"), 0)
+    asset_type = str(body.get("assetType", body.get("asset_type", "STK")))
+    exchange = str(body.get("exchange", "SMART"))
+    currency = str(body.get("currency", "USD"))
+    if quantity <= 0:
+        return jsonify({"success": False, "message": "Miktar 0'dan büyük olmalı."}), 400
+    try:
+        request_id = str(body.get("request_id") or uuid.uuid4())
+        result = ibkr_place_market_order(symbol, side, quantity, asset_type, exchange, currency, request_id=request_id)
+        return jsonify({
+            "success": not bool(result.get("error")),
+            "message": f"IBKR emri gönderildi. Durum: {result.get('status', '-')}, Ortalama fiyat: {result.get('avg_fill_price', 0)}",
+            "orderId": str(result.get("order_id", "")),
+            "result": result,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": f"IBKR emir hatası: {e}"}), 500
+
+
+@app.route("/cancel_order", methods=["POST"])
+def ibkr_cancel_order_alias():
+    body = request.get_json(force=True) or {}
+    order_id = body.get("orderId") or body.get("order_id")
+    try:
+        def _run(ib, _):
+            cancelled = False
+            for trade in ib.openTrades():
+                if str(getattr(trade.order, "orderId", "")) == str(order_id):
+                    ib.cancelOrder(trade.order)
+                    cancelled = True
+            return cancelled
+        cancelled = ibkr_execute(_run)
+        return jsonify({"success": True, "message": "IBKR emir iptali gönderildi." if cancelled else "Eşleşen açık IBKR emri bulunamadı, yine de iptal talebi iletildi."})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"IBKR iptal hatası: {e}"}), 500
+
+
+@app.route("/history", methods=["GET"])
+def ibkr_history_alias():
+    symbol = request.args.get("symbol", "AAPL")
+    asset_type = request.args.get("asset_type", "STK")
+    exchange = request.args.get("exchange", "SMART")
+    currency = request.args.get("currency", "USD")
+    duration = request.args.get("duration", "1 M")
+    bar_size = request.args.get("bar_size", "1 day")
+    try:
+        def _run(ib, ibs):
+            contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
+            qualified = ib.qualifyContracts(contract)
+            if not qualified:
+                raise RuntimeError("IBKR contract doğrulanamadı.")
+            bars = ib.reqHistoricalData(
+                qualified[0],
+                endDateTime="",
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=1,
+            )
+            return [
+                {
+                    "date": str(b.date),
+                    "open": safe_float(b.open),
+                    "high": safe_float(b.high),
+                    "low": safe_float(b.low),
+                    "close": safe_float(b.close),
+                    "volume": safe_float(b.volume),
+                }
+                for b in bars
+            ]
+        points = ibkr_execute(_run)
+        return jsonify({"success": True, "symbol": normalize_symbol(symbol), "points": points, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"success": False, "symbol": normalize_symbol(symbol), "points": [], "error": str(e), "last_update": now_text()}), 200
+
+
+def _resolve_place_order_market(payload: Dict[str, Any]) -> Dict[str, Any]:
+    market = str(payload.get("market", "usdtm")).lower()
+    symbol = str(payload.get("symbol", "ETHUSDT")).upper().replace("/", "")
+    side = str(payload.get("side", "BUY")).upper()
+    quantity = safe_float(payload.get("amount", payload.get("quantity")), 0)
+    leverage = int(safe_float(payload.get("leverage"), 1) or 1)
+    request_id = str(payload.get("request_id") or uuid.uuid4())
+
+    if quantity <= 0:
+        return {"ok": False, "error": "amount/quantity 0'dan büyük olmalı."}
+    if side not in ("BUY", "SELL"):
+        return {"ok": False, "error": "side BUY veya SELL olmalı."}
+
+    if market == "spot":
+        try:
+            params = {
+                "symbol": symbol,
+                "side": side,
+                "type": "MARKET",
+                "quantity": quantity,
+            }
+            data = signed_request("POST", SPOT_BASE, "/api/v3/order", params)
+            db_insert_trade_journal(
+                broker="Binance", channel="manual-spot", symbol=symbol, side=side,
+                quantity=quantity, status="FILLED", simulated=False, payload=data, request_id=request_id,
+            )
+            return {"ok": True, "result": data}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # usdtm / coinm -> futures
+    try:
+        if leverage > 1:
+            ensure_binance_leverage(symbol, leverage)
+        result = place_futures_order(
+            symbol, side, quantity,
+            reduce_only=False, request_id=request_id, channel="manual",
+        )
+        if result.get("error"):
+            return {"ok": False, "error": result.get("error")}
+        return {"ok": True, "result": result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.route("/place-order", methods=["POST"])
+def place_order_alias():
+    body = request.get_json(force=True) or {}
+    outcome = _resolve_place_order_market(body)
+    if not outcome.get("ok"):
+        return jsonify({"success": False, "message": outcome.get("error", "Emir gönderilemedi.")}), 400
+    return jsonify({"success": True, "message": "Emir başarıyla gönderildi.", "result": outcome.get("result")})
+
+
+@app.route("/cancel-order", methods=["POST"])
+def cancel_order_dash_alias():
+    body = request.get_json(force=True) or {}
+    symbol = str(body.get("symbol", "")).upper().replace("/", "")
+    order_id = body.get("orderId")
+    market = str(body.get("market", "usdtm")).lower()
+    try:
+        base = SPOT_BASE if market == "spot" else FUTURES_BASE
+        path = "/api/v3/order" if market == "spot" else "/fapi/v1/order"
+        params: Dict[str, Any] = {"symbol": symbol}
+        if order_id:
+            params["orderId"] = order_id
+        signed_request("DELETE", base, path, params)
+        return jsonify({"success": True, "message": f"{symbol} emri iptal edildi."})
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Emir iptal hatası: {e}"}), 500
+
+
+def _open_orders_snapshot() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        futures_orders = signed_request("GET", FUTURES_BASE, "/fapi/v1/openOrders", {})
+        for o in futures_orders:
+            rows.append({
+                "symbol": o.get("symbol", "-"),
+                "type": o.get("type", "-"),
+                "side": o.get("side", "-"),
+                "amount": str(o.get("origQty", "-")),
+                "price": str(o.get("price", "-")),
+                "status": o.get("status", "Açık"),
+                "orderId": o.get("orderId"),
+            })
+    except Exception:
+        pass
+    try:
+        spot_orders = signed_request("GET", SPOT_BASE, "/api/v3/openOrders", {})
+        for o in spot_orders:
+            rows.append({
+                "symbol": o.get("symbol", "-"),
+                "type": o.get("type", "-"),
+                "side": o.get("side", "-"),
+                "amount": str(o.get("origQty", "-")),
+                "price": str(o.get("price", "-")),
+                "status": o.get("status", "Açık"),
+                "orderId": o.get("orderId"),
+            })
+    except Exception:
+        pass
+    return rows
+
+
+@app.route("/orders", methods=["GET"])
+def orders_alias():
+    try:
+        return jsonify({"success": True, "orders": _open_orders_snapshot(), "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"success": False, "orders": [], "error": str(e), "last_update": now_text()}), 200
+
+
+@app.route("/open-orders", methods=["GET"])
+def open_orders_alias():
+    try:
+        return jsonify({"orders": _open_orders_snapshot(), "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"orders": [], "error": str(e), "last_update": now_text()}), 200
+
+
+@app.route("/ai-status", methods=["GET"])
+def ai_status_alias():
+    with AUTO_LOCK:
+        mode = AI_UI_MODE.get("mode", "off")
+    return jsonify({"ok": True, "mode": mode, "source": "railway", "last_update": now_text()})
+
+
+@app.route("/ai-control", methods=["POST"])
+def ai_control_alias():
+    body = request.get_json(force=True) or {}
+    mode = str(body.get("mode", "off")).lower()
+    if mode not in ("off", "watch", "auto"):
+        mode = "off"
+    with AUTO_LOCK:
+        AI_UI_MODE["mode"] = mode
+        AUTO_TRADER.enabled = (mode == "auto")
+        AUTO_TRADER.last_update = now_text()
+        AUTO_TRADER.last_reason = f"Mobil uygulamadan mod değişti: {mode}"
+    return jsonify({"ok": True, "mode": mode, "last_update": now_text()})
+
+
+@app.route("/ai-logs", methods=["GET"])
+def ai_logs_alias():
+    return jsonify({"logs": TRADE_LOG[:100], "last_update": now_text()})
+
+
+@app.route("/signal", methods=["GET"])
+def signal_alias():
+    symbol = normalize_symbol(request.args.get("symbol", AUTO_TRADER.symbol))
+    try:
+        result = calculate_ai_signal(symbol, "FUTURES")
+        return jsonify({
+            "symbol": symbol,
+            "signal": result.get("signal", "WAIT"),
+            "confidence": int(safe_float(result.get("confidence"), 50)),
+        })
+    except Exception as e:
+        return jsonify({"symbol": symbol, "signal": "WAIT", "confidence": 50, "error": str(e)})
+
+
+@app.route("/status", methods=["GET"])
+def status_alias():
+    with IBKR_LOCK:
+        ibkr_connected = bool(IBKR_RUNTIME.get("connected"))
+    with AUTO_LOCK:
+        auto_enabled = AUTO_TRADER.enabled
+    return jsonify({
+        "ok": True,
+        "status": "online",
+        "ibkr_connected": ibkr_connected,
+        "auto_trader_enabled": auto_enabled,
+        "time": now_text(),
+    })
 
 
 @app.route("/trade-log", methods=["GET"])
