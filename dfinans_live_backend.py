@@ -32,6 +32,7 @@ import time
 import json
 import math
 import uuid
+import queue
 import sqlite3
 import hashlib
 import threading
@@ -214,6 +215,15 @@ IBKR_RUNTIME: Dict[str, Any] = {
 IBKR_LOCK = threading.RLock()  # RLock: ibkr_execute + ensure_ibkr_connection ayni thread'de ic ice kilit alabiliyor
 KEEPALIVE_THREAD_STARTED = False
 AUTO_THREAD_STARTED = False
+IBKR_WORKER_THREAD_STARTED = False
+# Tum IBKR (ib_insync) islemleri, kac tane paralel Flask/gunicorn thread'i olursa
+# olsun, DAIMA bu TEK kuyruk uzerinden TEK bir adanmis worker thread'de calisir.
+# ib_insync'in IB client'i, connect edildigi thread'in asyncio event loop'una
+# baglidir; farkli thread'lerden dogrudan cagrilirsa (ozellikle gunicorn
+# --threads arttirilinca) client-id celismesi ve tum servisin cokmesiyle
+# sonuclanan ciddi kilitlenmeler/hatalar olusuyordu. Kuyruk + tek worker
+# thread modeli bunu kokten cozer.
+IBKR_TASK_QUEUE: "queue.Queue" = queue.Queue()
 
 # Risk management state
 DAILY_REALIZED_PNL = 0.0
@@ -811,43 +821,27 @@ def ensure_ibkr_connection(force_reconnect: bool = False):
             raise
 
 
-def ibkr_execute(action):
+def _ibkr_execute_in_worker_thread(action):
+    """GERCEK IBKR (ib_insync) cagrisini yapar. SADECE tek adanmis IBKR worker
+    thread'i icinden cagrilmalidir - baska hicbir yerden dogrudan cagirma."""
     ensure_thread_event_loop()
     last_error: Optional[Exception] = None
     for attempt in range(2):
         try:
-            # Ayni ib_insync IB client'i (ve onun event loop'unu) ayni anda birden
-            # fazla thread'in (gunicorn istek thread'i, keepalive arka plan thread'i,
-            # auto-trader dongusu) kullanmasi ciddi kilitlenmelere/timeout'lara yol
-            # aciyordu. Tum baglanti + istek akisini tek bir lock altinda serilestirerek
-            # bu race condition'i onluyoruz.
-            if not IBKR_LOCK.acquire(timeout=12):
-                raise RuntimeError("IBKR şu anda meşgul, lütfen birkaç saniye sonra tekrar deneyin.")
+            ib, ibs = ensure_ibkr_connection(force_reconnect=(attempt == 1))
+            # ONEMLI: Gecersiz sembol / abonelik eksikligi gibi "is mantigi"
+            # hatalari (contract dogrulanamadi, canli fiyat yok, vb.) BAGLANTI
+            # hatasi degildir - bunlar icin tum IBKR oturumunu disconnect+
+            # reconnect etmek (eskiden burada oluyordu) mobil uygulama onlarca
+            # farkli/gecersiz sembol sorguladiginda saniyeler suren reconnect
+            # firtinasina yol aciyordu. Sadece GERCEKTEN baglanti kopmussa
+            # (ib.isConnected() False) yeniden baglaniyoruz; aksi halde hatayi
+            # oldugu gibi yukari firlatip mevcut baglantiyi koruyoruz.
             try:
-                ib, ibs = ensure_ibkr_connection(force_reconnect=(attempt == 1))
-            finally:
-                IBKR_LOCK.release()
-            # ONEMLI: action() cagrisini IBKR_LOCK icinde ama connect adimindan
-            # AYRI bir try/except ile calistiriyoruz. Gecersiz sembol / abonelik
-            # eksikligi gibi "is mantigi" hatalari (contract dogrulanamadi, canli
-            # fiyat yok, vb.) BAGLANTI hatasi degildir - bunlar icin tum IBKR
-            # oturumunu disconnect+reconnect etmek (eskiden burada oluyordu)
-            # mobil uygulama onlarca farkli/gecersiz sembol sorguladiginda
-            # saniyeler suren reconnect firtinasina ve tum gunicorn worker'larinin
-            # timeout ile cokup servisin tamamen erisilemez hale gelmesine yol
-            # aciyordu. Sadece GERCEKTEN baglanti kopmussa (ib.isConnected() False)
-            # yeniden baglaniyoruz; aksi halde hatayi oldugu gibi yukari firlatip
-            # mevcut baglantiyi koruyoruz.
-            try:
-                if not IBKR_LOCK.acquire(timeout=12):
-                    raise RuntimeError("IBKR şu anda meşgul, lütfen birkaç saniye sonra tekrar deneyin.")
-                try:
-                    result = action(ib, ibs)
-                    IBKR_RUNTIME["connected"] = bool(ib.isConnected())
-                    IBKR_RUNTIME["last_ok"] = now_text()
-                    IBKR_RUNTIME["last_error"] = ""
-                finally:
-                    IBKR_LOCK.release()
+                result = action(ib, ibs)
+                IBKR_RUNTIME["connected"] = bool(ib.isConnected())
+                IBKR_RUNTIME["last_ok"] = now_text()
+                IBKR_RUNTIME["last_error"] = ""
                 return result
             except Exception as action_err:
                 still_connected = False
@@ -855,9 +849,8 @@ def ibkr_execute(action):
                     still_connected = bool(ib.isConnected())
                 except Exception:
                     still_connected = False
-                with IBKR_LOCK:
-                    IBKR_RUNTIME["connected"] = still_connected
-                    IBKR_RUNTIME["last_error"] = str(action_err)
+                IBKR_RUNTIME["connected"] = still_connected
+                IBKR_RUNTIME["last_error"] = str(action_err)
                 if still_connected:
                     # Baglanti saglam; bu sadece is mantigi hatasi (ör. sembol
                     # bulunamadi, veri aboneligi yok). Reconnect'e GEREK YOK.
@@ -867,25 +860,61 @@ def ibkr_execute(action):
                 raise
         except Exception as e:
             last_error = e
-            with IBKR_LOCK:
-                still_connected = False
-                ib_ref = IBKR_RUNTIME.get("ib")
-                if ib_ref is not None:
-                    try:
-                        still_connected = bool(ib_ref.isConnected())
-                    except Exception:
-                        still_connected = False
-                if not still_connected:
-                    IBKR_RUNTIME["connected"] = False
-                    IBKR_RUNTIME["last_error"] = str(e)
-                    _ibkr_disconnect_locked()
+            still_connected = False
+            ib_ref = IBKR_RUNTIME.get("ib")
+            if ib_ref is not None:
+                try:
+                    still_connected = bool(ib_ref.isConnected())
+                except Exception:
+                    still_connected = False
             if not still_connected:
+                IBKR_RUNTIME["connected"] = False
+                IBKR_RUNTIME["last_error"] = str(e)
+                _ibkr_disconnect_locked()
                 time.sleep(0.7)
             else:
                 # Baglanti hala ayakta ve hata sadece is mantigi hatasiysa,
                 # gereksiz ikinci denemeyi (force_reconnect) atlayip direkt cik.
                 raise RuntimeError(f"IBKR işlem hatası: {e}") from None
     raise RuntimeError(f"IBKR işlem hatası: {last_error}")
+
+
+def _ibkr_worker_thread_main():
+    """Tum ib_insync IBKR islemlerinin calistigi TEK adanmis thread. Boylece
+    IB client'i her zaman AYNI thread'in AYNI asyncio event loop'una bagli
+    kalir; kac tane gunicorn/Flask thread'i paralel istek yaparsa yapsin,
+    hepsi bu kuyruk uzerinden sıraya girer ve hicbir zaman ib_insync
+    nesnesine birden fazla thread'den dogrudan dokunulmaz. Bu, farkli
+    thread'lerin IBKR baglantisina cakismasindan kaynaklanan
+    'client id already in use' / tum servisin cokmesi gibi hatalari kokten
+    onler."""
+    ensure_thread_event_loop()
+    while True:
+        job = IBKR_TASK_QUEUE.get()
+        if job is None:
+            continue
+        action, result_holder, done_event = job
+        try:
+            result_holder["result"] = _ibkr_execute_in_worker_thread(action)
+        except Exception as e:
+            result_holder["error"] = e
+        finally:
+            done_event.set()
+
+
+def ibkr_execute(action, timeout: float = 25.0):
+    """Herhangi bir thread'den cagrilabilir (Flask request thread'i, keepalive
+    thread'i, auto-trader thread'i). Gercek islemi kuyruga koyup TEK IBKR
+    worker thread'inin islemesini bekler; boylece cok sayida paralel istek
+    gelse bile IB client'ina her zaman ayni thread'den erisilir."""
+    done_event = threading.Event()
+    result_holder: Dict[str, Any] = {}
+    IBKR_TASK_QUEUE.put((action, result_holder, done_event))
+    if not done_event.wait(timeout=timeout):
+        raise RuntimeError("IBKR şu anda meşgul, lütfen birkaç saniye sonra tekrar deneyin.")
+    if "error" in result_holder:
+        raise result_holder["error"]
+    return result_holder.get("result")
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -1801,7 +1830,11 @@ def _auto_trader_loop():
 
 
 def start_background_workers_once():
-    global KEEPALIVE_THREAD_STARTED, AUTO_THREAD_STARTED
+    global KEEPALIVE_THREAD_STARTED, AUTO_THREAD_STARTED, IBKR_WORKER_THREAD_STARTED
+    if not IBKR_WORKER_THREAD_STARTED:
+        t0 = threading.Thread(target=_ibkr_worker_thread_main, daemon=True)
+        t0.start()
+        IBKR_WORKER_THREAD_STARTED = True
     if not KEEPALIVE_THREAD_STARTED:
         t1 = threading.Thread(target=_ibkr_keepalive_loop, daemon=True)
         t1.start()
