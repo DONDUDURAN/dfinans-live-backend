@@ -1029,6 +1029,15 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
 def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
     def _run(ib, _):
         rows = []
+        # ib.positions() sadece pozisyon miktari/maliyetini dondurur; mark_price
+        # ve pnl hep 0 kaliyordu. ib.portfolio() IBKR'in kendi hesapladigi
+        # marketPrice/marketValue/unrealizedPNL degerlerini de icerir - ekstra
+        # reqMktData cagrisi gerektirmeden dogru fiyat ve PnL saglar.
+        portfolio_items = ib.portfolio()
+        portfolio_by_key = {
+            (item.contract.secType, item.contract.symbol, item.account): item
+            for item in portfolio_items
+        }
         for pos in ib.positions():
             if IBKR_ACCOUNT and pos.account != IBKR_ACCOUNT:
                 continue
@@ -1036,6 +1045,23 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
             if qty == 0:
                 continue
             avg_cost = safe_float(pos.avgCost)
+            item = portfolio_by_key.get((pos.contract.secType, pos.contract.symbol, pos.account))
+            mark_price = safe_float(getattr(item, "marketPrice", 0.0)) if item else 0.0
+            pnl = safe_float(getattr(item, "unrealizedPNL", 0.0)) if item else 0.0
+            if mark_price <= 0 and item is None:
+                # portfolio() bu pozisyonu icermiyorsa (nadir) canli fiyati
+                # dogrudan reqMktData ile cekmeyi dene.
+                try:
+                    contract = pos.contract
+                    ib.qualifyContracts(contract)
+                    ticker = ib.reqMktData(contract, "", True, False)
+                    ib.sleep(1.5)
+                    mp = safe_float(ticker.marketPrice())
+                    if mp == mp and mp > 0:
+                        mark_price = mp
+                        pnl = (mark_price - avg_cost) * qty
+                except Exception:
+                    pass
             rows.append({
                 "id": f"IBKR-{pos.contract.secType}-{pos.contract.symbol}",
                 "broker": "IBKR",
@@ -1048,8 +1074,8 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                 "side": "LONG" if qty > 0 else "SHORT",
                 "size": abs(qty),
                 "entry_price": avg_cost,
-                "mark_price": 0.0,
-                "pnl": 0.0,
+                "mark_price": round(mark_price, 6),
+                "pnl": round(pnl, 4),
                 "leverage": "",
                 # iOS uygulamasi (IBKRService.swift) bu alan adlarini bekliyor:
                 "position": qty,
