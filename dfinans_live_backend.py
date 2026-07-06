@@ -823,18 +823,60 @@ def ibkr_execute(action):
             # bu race condition'i onluyoruz.
             with IBKR_LOCK:
                 ib, ibs = ensure_ibkr_connection(force_reconnect=(attempt == 1))
-                result = action(ib, ibs)
-                IBKR_RUNTIME["connected"] = bool(ib.isConnected())
-                IBKR_RUNTIME["last_ok"] = now_text()
-                IBKR_RUNTIME["last_error"] = ""
-            return result
+            # ONEMLI: action() cagrisini IBKR_LOCK icinde ama connect adimindan
+            # AYRI bir try/except ile calistiriyoruz. Gecersiz sembol / abonelik
+            # eksikligi gibi "is mantigi" hatalari (contract dogrulanamadi, canli
+            # fiyat yok, vb.) BAGLANTI hatasi degildir - bunlar icin tum IBKR
+            # oturumunu disconnect+reconnect etmek (eskiden burada oluyordu)
+            # mobil uygulama onlarca farkli/gecersiz sembol sorguladiginda
+            # saniyeler suren reconnect firtinasina ve tum gunicorn worker'larinin
+            # timeout ile cokup servisin tamamen erisilemez hale gelmesine yol
+            # aciyordu. Sadece GERCEKTEN baglanti kopmussa (ib.isConnected() False)
+            # yeniden baglaniyoruz; aksi halde hatayi oldugu gibi yukari firlatip
+            # mevcut baglantiyi koruyoruz.
+            try:
+                with IBKR_LOCK:
+                    result = action(ib, ibs)
+                    IBKR_RUNTIME["connected"] = bool(ib.isConnected())
+                    IBKR_RUNTIME["last_ok"] = now_text()
+                    IBKR_RUNTIME["last_error"] = ""
+                return result
+            except Exception as action_err:
+                still_connected = False
+                try:
+                    still_connected = bool(ib.isConnected())
+                except Exception:
+                    still_connected = False
+                with IBKR_LOCK:
+                    IBKR_RUNTIME["connected"] = still_connected
+                    IBKR_RUNTIME["last_error"] = str(action_err)
+                if still_connected:
+                    # Baglanti saglam; bu sadece is mantigi hatasi (ör. sembol
+                    # bulunamadi, veri aboneligi yok). Reconnect'e GEREK YOK.
+                    raise RuntimeError(str(action_err)) from None
+                # Baglanti gercekten kopmus - disconnect edip bir sonraki
+                # denemede yeniden baglanmayi dene.
+                raise
         except Exception as e:
             last_error = e
             with IBKR_LOCK:
-                IBKR_RUNTIME["connected"] = False
-                IBKR_RUNTIME["last_error"] = str(e)
-                _ibkr_disconnect_locked()
-            time.sleep(0.7)
+                still_connected = False
+                ib_ref = IBKR_RUNTIME.get("ib")
+                if ib_ref is not None:
+                    try:
+                        still_connected = bool(ib_ref.isConnected())
+                    except Exception:
+                        still_connected = False
+                if not still_connected:
+                    IBKR_RUNTIME["connected"] = False
+                    IBKR_RUNTIME["last_error"] = str(e)
+                    _ibkr_disconnect_locked()
+            if not still_connected:
+                time.sleep(0.7)
+            else:
+                # Baglanti hala ayakta ve hata sadece is mantigi hatasiysa,
+                # gereksiz ikinci denemeyi (force_reconnect) atlayip direkt cik.
+                raise RuntimeError(f"IBKR işlem hatası: {e}") from None
     raise RuntimeError(f"IBKR işlem hatası: {last_error}")
 
 
