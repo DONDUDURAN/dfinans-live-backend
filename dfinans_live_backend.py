@@ -943,7 +943,12 @@ def ibkr_account_summary_snapshot() -> List[Dict[str, Any]]:
     endpoint'inden bu formati (data: [{tag, currency, value, account}]) bekliyor."""
     def _run(ib, _):
         rows = []
-        values = ib.accountValues(IBKR_ACCOUNT or "")
+        # accountValues() sadece reqAccountUpdates ile abone olunan TEK (birincil)
+        # hesabi dondurur; birden fazla IBKR hesabi (ör. canli + demo) varsa
+        # accountSummary(group='All') hepsini kapsar - bu yuzden o kullaniliyor.
+        values = ib.accountSummary(IBKR_ACCOUNT or "")
+        if not values:
+            values = ib.accountValues(IBKR_ACCOUNT or "")
         for v in values:
             if IBKR_ACCOUNT and v.account != IBKR_ACCOUNT:
                 continue
