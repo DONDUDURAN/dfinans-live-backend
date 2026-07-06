@@ -176,6 +176,10 @@ class AutoTraderState:
     mode: str = AUTO_TRADER_MODE if AUTO_TRADER_MODE in ["paper", "live"] else "paper"
     broker: str = "BINANCE"
     symbol: str = "ETHUSDT"
+    # Cok sembollu tarama listesi: doluysa auto_trader_cycle her dongude 'symbol'
+    # yerine bu listedeki TUM sembolleri tek tek tarar ve uygun olanlarda islem acar.
+    # Bos birakilirsa geriye donuk uyumluluk icin sadece 'symbol' kullanilir.
+    symbols: List[str] = field(default_factory=list)
     market: str = "FUTURES"
     asset_type: str = "STK"
     exchange: str = "SMART"
@@ -199,6 +203,19 @@ AUTO_TRADER = AutoTraderState()
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
 
+# Varsayilan cok-sembol tarama listeleri (env ile ozellestirilebilir, virgullu).
+# Kullanici basta "havuzdaki tum varliklar taransin" seklinde kurulmasini istemisti;
+# tek sembole (ETHUSDT/AAPL) daralmis olmasi bir gerileme idi - simdi geri getirildi.
+_BINANCE_WATCHLIST_DEFAULT = "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT"
+_IBKR_WATCHLIST_DEFAULT = "AAPL,MSFT,NVDA,AMD,TSLA,F,T,IBKR"
+
+
+def _parse_symbol_list(raw: str) -> List[str]:
+    return [str(s.strip()).upper().replace("/", "").replace("-", "") for s in raw.split(",") if s.strip()]
+
+
+AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
+
 # IBKR icin bagimsiz, Binance'tan tamamen ayri calisan ikinci bir auto-trader ornegi.
 # Eskiden tek bir global AUTO_TRADER/broker alani vardi ve varsayilan olarak "BINANCE"a
 # ayarliydi - yani IBKR icin auto-trader hicbir zaman calismiyordu (kullanici broker'i
@@ -209,6 +226,7 @@ AUTO_HISTORY: List[Dict[str, Any]] = []
 IBKR_AUTO_TRADER = AutoTraderState()
 IBKR_AUTO_TRADER.broker = "IBKR"
 IBKR_AUTO_TRADER.symbol = os.getenv("IBKR_AUTO_SYMBOL", "AAPL")
+IBKR_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("IBKR_AUTO_WATCHLIST", _IBKR_WATCHLIST_DEFAULT))
 IBKR_AUTO_TRADER.market = "IBKR"
 IBKR_AUTO_TRADER.asset_type = "STK"
 IBKR_AUTO_TRADER.exchange = "SMART"
@@ -1437,6 +1455,11 @@ def _cache_get_or_fetch(key: str, ttl_seconds: int, fetch_fn):
     return data
 
 
+def _invalidate_cache(key: str) -> None:
+    with _external_signal_lock:
+        _external_signal_cache.pop(key, None)
+
+
 def get_whale_positioning(symbol: str) -> Dict[str, Any]:
     """Binance Futures 'top trader' (buyuk hesap) long/short pozisyon orani.
     Whale Alert/Etherscan gibi zincir-ustu (on-chain) servisler API anahtari
@@ -2014,13 +2037,14 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
         lock = AUTO_LOCK
     if history is None:
         history = AUTO_HISTORY
+
     with lock:
         if not state.enabled:
             return
         broker = state.broker.upper()
-        symbol = normalize_symbol(state.symbol)
+        symbols = list(state.symbols) if state.symbols else [normalize_symbol(state.symbol)]
         market = state.market.upper()
-        qty = max(0.0, state.quantity)
+        base_qty = max(0.0, state.quantity)
         min_conf = state.min_confidence
         mode = state.mode
         asset_type = state.asset_type
@@ -2032,20 +2056,15 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
         if not state.last_update.startswith(day_key):
             state.daily_trade_count = 0
 
-    action = "WAIT"
-    confidence = 50
-    reason = "Koşullar bekleniyor."
-    price = 0.0
-    execution: Dict[str, Any] = {"simulated": True, "message": "Emir yok"}
-
     if broker == "BINANCE":
         tp_execution = enforce_binance_take_profit(channel="auto_take_profit")
         if tp_execution:
             with lock:
+                fallback_symbol = symbols[0] if symbols else normalize_symbol(state.symbol)
                 state.last_action = "TAKE_PROFIT"
                 state.last_confidence = 100
                 state.last_reason = (
-                    f"{tp_execution.get('symbol', symbol)} için %"
+                    f"{tp_execution.get('symbol', fallback_symbol)} için %"
                     f"{tp_execution.get('target_pct', BINANCE_TAKE_PROFIT_PCT)} kâr hedefi tetiklendi."
                 )
                 state.last_price = 0.0
@@ -2057,7 +2076,7 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                     {
                         "time": state.last_update,
                         "broker": broker,
-                        "symbol": tp_execution.get("symbol", symbol),
+                        "symbol": tp_execution.get("symbol", fallback_symbol),
                         "action": "TAKE_PROFIT",
                         "confidence": 100,
                         "price": 0.0,
@@ -2068,7 +2087,7 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                 del history[300:]
                 db_insert_auto_history(
                     broker=broker,
-                    symbol=str(tp_execution.get("symbol", symbol)),
+                    symbol=str(tp_execution.get("symbol", fallback_symbol)),
                     action="TAKE_PROFIT",
                     confidence=100,
                     price=0.0,
@@ -2076,6 +2095,26 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                     execution=tp_execution,
                 )
             return
+
+    # Cok sembollu tarama: watchlist'teki HER sembol icin ayri sinyal uretilir ve
+    # uygun olanlarda ayri ayri islem acilir. Gunluk islem limiti (max_daily_trades)
+    # tum semboller arasinda PAYLASILIR (tek bir hesap risk butcesi gibi calisir).
+    for symbol in symbols:
+        _auto_trader_run_symbol(
+            state, lock, history, broker, symbol, market, base_qty, min_conf,
+            mode, asset_type, exchange, currency, eval_window, max_daily,
+        )
+
+
+def _auto_trader_run_symbol(
+    state, lock, history, broker, symbol, market, qty, min_conf,
+    mode, asset_type, exchange, currency, eval_window, max_daily,
+) -> None:
+    action = "WAIT"
+    confidence = 50
+    reason = "Koşullar bekleniyor."
+    price = 0.0
+    execution: Dict[str, Any] = {"simulated": True, "message": "Emir yok"}
 
     if broker == "IBKR":
         # IBKR icin iki bagimsiz sinyal kullanilir: (1) fiyat momentumu (change_24h),
@@ -2149,14 +2188,12 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
             if broker == "IBKR":
                 if do_live:
                     # Sabit miktarli (ör. 1 hisse) emir, hesaptaki diger pozisyonlarin
-                    # (NVDA/AMD/IBKR) kullandigi marj yuzunden 'Available Funds
-                    # insufficient' hatasiyla iptal edilebiliyordu (gercek IBKR hatasi:
-                    # Error 201 Order rejected - margin requirement). Emir gondermeden
-                    # once kullanilabilir fonu kontrol edip, gerekirse islem tarafinda
-                    # BUY icin miktari guvenli bir seviyeye (kullanilabilir fonun %80'i)
-                    # dusuruyoruz. IBKR kesirli (fractional) hisse alimini destekledigi
-                    # icin miktari tam sayiya yuvarlamiyoruz - kucuk hesap bakiyesiyle de
-                    # (ör. 0.083 hisse) gercek pozisyon acilabilsin diye.
+                    # kullandigi marj yuzunden 'Available Funds insufficient' hatasiyla
+                    # iptal edilebiliyordu (gercek IBKR hatasi: Error 201 Order rejected -
+                    # margin requirement). Emir gondermeden once kullanilabilir fonu kontrol
+                    # edip, gerekirse miktari guvenli bir seviyeye (kullanilabilir fonun
+                    # %80'i) dusuruyoruz. IBKR kesirli (fractional) hisse alimini destekledigi
+                    # icin miktari tam sayiya yuvarlamiyoruz.
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
                         needed = qty * price
@@ -2186,6 +2223,10 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                                 qty = affordable_qty
                     if qty > 0 and "error" not in execution:
                         execution = ibkr_place_market_order(symbol, action, qty, asset_type, exchange, currency)
+                        # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
+                        # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
+                        # cache'i temizliyoruz.
+                        _invalidate_cache("ibkr_available_funds")
                 else:
                     execution = {
                         "simulated": True,
@@ -2236,15 +2277,18 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
             if execution.get("error"):
                 state.last_error = str(execution.get("error"))
             else:
+                state.last_error = ""
                 state.daily_trade_count += 1
                 queue_signal_for_learning(symbol, action, price, eval_window)
+        else:
+            state.last_error = ""
 
         state.last_action = action
         state.last_confidence = confidence
         state.last_reason = reason
         state.last_price = price
+        state.symbol = symbol
         state.last_update = now_text()
-        state.last_error = ""
         state.updated_at_epoch = time.time()
         history.insert(
             0,
@@ -2260,7 +2304,7 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
             },
         )
         del history[300:]
-        
+
         # Log to persistent DB
         db_insert_auto_history(
             broker=broker,
@@ -2271,8 +2315,6 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
             reason=reason,
             execution=execution,
         )
-
-
 def _ibkr_keepalive_loop():
     while True:
         time.sleep(max(8, IBKR_KEEPALIVE_SEC))
@@ -3772,6 +3814,12 @@ def auto_trader_start():
         AUTO_TRADER.enabled = True
         AUTO_TRADER.broker = str(body.get("broker", AUTO_TRADER.broker)).upper()
         AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", AUTO_TRADER.symbol))
+        if "symbols" in body:
+            raw_symbols = body.get("symbols")
+            if isinstance(raw_symbols, list):
+                AUTO_TRADER.symbols = [normalize_symbol(s) for s in raw_symbols if str(s).strip()]
+            else:
+                AUTO_TRADER.symbols = _parse_symbol_list(str(raw_symbols))
         AUTO_TRADER.market = str(body.get("market", AUTO_TRADER.market)).upper()
         AUTO_TRADER.asset_type = str(body.get("asset_type", AUTO_TRADER.asset_type)).upper()
         AUTO_TRADER.exchange = str(body.get("exchange", AUTO_TRADER.exchange)).upper()
@@ -3811,6 +3859,12 @@ def ibkr_auto_trader_start():
     with IBKR_AUTO_LOCK:
         IBKR_AUTO_TRADER.enabled = True
         IBKR_AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", IBKR_AUTO_TRADER.symbol))
+        if "symbols" in body:
+            raw_symbols = body.get("symbols")
+            if isinstance(raw_symbols, list):
+                IBKR_AUTO_TRADER.symbols = [normalize_symbol(s) for s in raw_symbols if str(s).strip()]
+            else:
+                IBKR_AUTO_TRADER.symbols = _parse_symbol_list(str(raw_symbols))
         IBKR_AUTO_TRADER.asset_type = str(body.get("asset_type", IBKR_AUTO_TRADER.asset_type)).upper()
         IBKR_AUTO_TRADER.exchange = str(body.get("exchange", IBKR_AUTO_TRADER.exchange)).upper()
         IBKR_AUTO_TRADER.currency = str(body.get("currency", IBKR_AUTO_TRADER.currency)).upper()
