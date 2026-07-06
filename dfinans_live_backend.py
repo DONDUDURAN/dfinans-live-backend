@@ -127,6 +127,13 @@ YAHOO_MAP = {
     "ADAUSDT": "ADA-USD",
     "XAUUSD": "GC=F",
     "VNQ": "VNQ",
+    "VIX": "^VIX",
+    "NASDAQ": "^IXIC",
+    "SP500": "^GSPC",
+    "DXY": "DX-Y.NYB",
+    "GOLD": "GC=F",
+    "OIL": "CL=F",
+    "US10Y": "^TNX",
 }
 
 app = Flask(__name__)
@@ -191,6 +198,28 @@ class AutoTraderState:
 AUTO_TRADER = AutoTraderState()
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
+
+# IBKR icin bagimsiz, Binance'tan tamamen ayri calisan ikinci bir auto-trader ornegi.
+# Eskiden tek bir global AUTO_TRADER/broker alani vardi ve varsayilan olarak "BINANCE"a
+# ayarliydi - yani IBKR icin auto-trader hicbir zaman calismiyordu (kullanici broker'i
+# manuel olarak "IBKR" yapip Binance'i durdurmadan ikisini ayni anda calistiramazdi).
+# Bu yuzden "IBKR hala pozisyon acmadi" sikayeti tamamen dogruydu: IBKR tarafinda islem
+# mantigi calisir durumda degildi. Simdi Binance ve IBKR es zamanli, birbirinden bagimsiz
+# calisiyor.
+IBKR_AUTO_TRADER = AutoTraderState()
+IBKR_AUTO_TRADER.broker = "IBKR"
+IBKR_AUTO_TRADER.symbol = os.getenv("IBKR_AUTO_SYMBOL", "AAPL")
+IBKR_AUTO_TRADER.market = "IBKR"
+IBKR_AUTO_TRADER.asset_type = "STK"
+IBKR_AUTO_TRADER.exchange = "SMART"
+IBKR_AUTO_TRADER.currency = "USD"
+IBKR_AUTO_TRADER.quantity = float(os.getenv("IBKR_AUTO_QUANTITY", "1"))
+IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "60"))
+IBKR_AUTO_TRADER.interval_sec = int(os.getenv("IBKR_AUTO_INTERVAL_SEC", "30"))
+IBKR_AUTO_TRADER.mode = AUTO_TRADER.mode
+IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower() == "true"
+IBKR_AUTO_LOCK = threading.Lock()
+IBKR_AUTO_HISTORY: List[Dict[str, Any]] = []
 
 # Mobil uygulamanin /ai-status ve /ai-control endpoint'lerinin bekledigi basit
 # 3 durumlu (off/watch/auto) mod. AUTO_TRADER.enabled sadece acik/kapali bilgisini
@@ -505,6 +534,79 @@ def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+def _text_time_to_epoch(text: str) -> int:
+    try:
+        return int(datetime.strptime(text, "%Y-%m-%d %H:%M:%S").timestamp())
+    except Exception:
+        return int(time.time())
+
+
+def build_ai_log_entries(limit: int = 100) -> List[Dict[str, Any]]:
+    """iOS AITradeLogView.swift'in bekledigi RemoteAILog semasina (symbol, side,
+    status, confidence, reason, market, created_at:epoch, extra) uygun kayitlar
+    uretir. Eskiden bu route sadece gercek emir calistirmalarini (TRADE_LOG) donduruyordu
+    ve auto-trader hicbir gercek emir acmadigi surece (ornegin guven esigi asilmadiginda)
+    sonsuza dek bos kaliyordu - oysa dd AI her dongude bir karar (WAIT dahil) uretiyor ve
+    bunlar auto_history tablosuna zaten kaydediliyor. Ayrica onceki surumde yanitta zorunlu
+    "ok" alani hic yoktu; iOS tarafi bu alan olmadan JSON decode'u tamamen basarisiz
+    sayiyordu (RemoteAILogResponse.ok non-optional Bool) - gercek veri gelse bile ekran
+    hep bos kaliyordu."""
+    entries: List[Dict[str, Any]] = []
+
+    try:
+        history_rows = db_recent_auto_history(limit)
+    except Exception:
+        history_rows = AUTO_HISTORY[:limit]
+
+    for row in history_rows:
+        action = str(row.get("action", "WAIT")).upper()
+        execution = row.get("execution") or {}
+        simulated = bool(execution.get("simulated", True)) if isinstance(execution, dict) else True
+        err = str(execution.get("error", "") or "") if isinstance(execution, dict) else ""
+        if err:
+            status = "error"
+        elif action in ["BUY", "SELL"] and not simulated:
+            status = "opened"
+        elif action in ["BUY", "SELL"] and simulated:
+            status = "waitingConfirmation"
+        elif action == "TAKE_PROFIT":
+            status = "opened"
+        else:
+            status = "scan"
+        reason = str(row.get("reason", ""))
+        if "açık" in reason.lower() and "pozisyon" in reason.lower() and action == "WAIT":
+            status = "protectedPosition"
+        entries.append({
+            "symbol": row.get("symbol", "-"),
+            "side": action if action in ["BUY", "SELL"] else "-",
+            "status": status,
+            "confidence": int(safe_float(row.get("confidence"), 0)),
+            "reason": reason or "-",
+            "market": str(row.get("broker", "-")),
+            "created_at": _text_time_to_epoch(str(row.get("time", now_text()))),
+            "extra": {},
+        })
+
+    for row in TRADE_LOG[:limit]:
+        order = row.get("order") or {}
+        symbol = str(order.get("symbol", row.get("symbol", "-"))) if isinstance(order, dict) else "-"
+        side = str(order.get("side", "-")) if isinstance(order, dict) else "-"
+        status = "error" if row.get("error") else "opened"
+        entries.append({
+            "symbol": symbol,
+            "side": side,
+            "status": status,
+            "confidence": int(safe_float(row.get("confidence"), 80)),
+            "reason": str(row.get("message", row.get("reason", "Manuel/otomatik emir çalıştırıldı."))),
+            "market": str(row.get("market", "-")),
+            "created_at": _text_time_to_epoch(str(row.get("time", now_text()))),
+            "extra": {},
+        })
+
+    entries.sort(key=lambda e: e["created_at"], reverse=True)
+    return entries[:limit]
 
 
 def request_id_seen(request_id: str) -> bool:
@@ -1660,6 +1762,164 @@ def get_macro_regime() -> Dict[str, Any]:
     return _cache_get_or_fetch("macro_regime", 14400, _fetch)
 
 
+def get_macro_dashboard_raw() -> Dict[str, Any]:
+    """VIX/Nasdaq/S&P500/DXY/Altin/Petrol icin Yahoo Finance'tan canli fiyat
+    ceker (2 dakika cache). iOS uygulamasindaki Piyasalar ekranindaki makro
+    panel /dd-ai-dashboard endpoint'inden bu veriyi bekliyordu ama bu route
+    hic yoktu - panel sonsuza dek 'veri bekleniyor' placeholder'inda kaliyordu."""
+    def _fetch():
+        out = {}
+        for key in ["VIX", "NASDAQ", "SP500", "DXY", "GOLD", "OIL"]:
+            try:
+                t = try_yahoo_ticker(key)
+            except Exception:
+                t = None
+            out[key] = t
+        return out
+    return _cache_get_or_fetch("macro_dashboard_raw", 120, _fetch)
+
+
+def build_dd_ai_dashboard() -> Dict[str, Any]:
+    macro_raw = get_macro_dashboard_raw()
+    regime_info = get_macro_regime()
+
+    def _fmt(key: str, prefix: str = "", decimals: int = 2) -> str:
+        t = macro_raw.get(key)
+        if not t or safe_float(t.get("price")) <= 0:
+            return "-"
+        val = safe_float(t.get("price"))
+        return f"{prefix}{val:,.{decimals}f}"
+
+    vix_val = safe_float((macro_raw.get("VIX") or {}).get("price"))
+    regime = regime_info.get("regime", "NEUTRAL") if isinstance(regime_info, dict) else "NEUTRAL"
+
+    if vix_val > 0:
+        if vix_val >= 25:
+            risk_appetite = "Düşük (Korku)"
+        elif vix_val <= 15:
+            risk_appetite = "Yüksek (Rahat)"
+        else:
+            risk_appetite = "Normal"
+    else:
+        risk_appetite = "-"
+
+    general_mode = {"RISK_ON": "Risk İştahı Açık", "RISK_OFF": "Risk Kaçışı", "NEUTRAL": "Normal"}.get(regime, "Normal")
+    ai_confidence = 50
+    if regime == "RISK_ON":
+        ai_confidence = 65
+    elif regime == "RISK_OFF":
+        ai_confidence = 35
+
+    institutional_scores: Dict[str, Any] = {}
+    for sym in ["BTCUSDT", "ETHUSDT"]:
+        try:
+            whale = get_whale_positioning(sym)
+            ratio = safe_float(whale.get("long_short_ratio", 1.0)) if isinstance(whale, dict) else 1.0
+            score = max(0, min(100, int(round((ratio / (ratio + 1.0)) * 100.0)))) if ratio > 0 else 50
+            trend = "LONG ağırlıklı" if ratio > 1.1 else ("SHORT ağırlıklı" if ratio < 0.9 else "Dengeli")
+            institutional_scores[sym.replace("USDT", "")] = {"score": score, "trend": trend}
+        except Exception:
+            institutional_scores[sym.replace("USDT", "")] = {"score": 50, "trend": "Veri bekleniyor"}
+
+    learning_rates: Dict[str, Any] = {}
+    for side in ["BUY", "SELL"]:
+        stats = LEARNING_STATS.get(side, {"wins": 0, "losses": 0})
+        total = int(stats.get("wins", 0)) + int(stats.get("losses", 0))
+        win_rate = (int(stats.get("wins", 0)) / total) if total > 0 else 0.5
+        learning_rates[side] = {"win_rate": round(win_rate, 4)}
+
+    last_decision = {"symbol": "-", "action": "-", "confidence": 0, "reason": "Backend verisi bekleniyor."}
+    try:
+        sig = calculate_ai_signal("ETHUSDT", "FUTURES")
+        last_decision = {
+            "symbol": "ETHUSDT",
+            "action": str(sig.get("signal", "WAIT")),
+            "confidence": int(safe_float(sig.get("confidence", 0))),
+            "reason": "; ".join(sig.get("reasons", [])) or "Belirgin bir sinyal yok, izleniyor.",
+        }
+    except Exception:
+        pass
+
+    return {
+        "updated_at": now_text(),
+        "ai_confidence": ai_confidence,
+        "market_regime": general_mode,
+        "macro": {
+            "vix": _fmt("VIX"),
+            "nasdaq": _fmt("NASDAQ", decimals=0),
+            "sp500": _fmt("SP500", decimals=0),
+            "dxy": _fmt("DXY"),
+            "gold": _fmt("GOLD", prefix="$"),
+            "oil": _fmt("OIL", prefix="$"),
+        },
+        "market_mood": {
+            "general_mode": general_mode,
+            "risk_appetite": risk_appetite,
+            "institutional_flow": "Kurumsal veri: BTC/ETH top-trader pozisyonlama.",
+            "bubble_risk": "Yüksek" if vix_val > 0 and vix_val < 13 else "Normal",
+        },
+        "institutional_scores": institutional_scores,
+        "learning_rates": learning_rates,
+        "last_decision": last_decision,
+    }
+
+
+def build_market_flow_risk() -> Dict[str, Any]:
+    macro_raw = get_macro_dashboard_raw()
+    regime_info = get_macro_regime()
+    regime = regime_info.get("regime", "NEUTRAL") if isinstance(regime_info, dict) else "NEUTRAL"
+    vix_val = safe_float((macro_raw.get("VIX") or {}).get("price"))
+    risk_score = 50
+    if regime == "RISK_ON":
+        risk_score = 30
+    elif regime == "RISK_OFF":
+        risk_score = 75
+    if vix_val >= 25:
+        risk_score = max(risk_score, 70)
+
+    def _flow_item(key: str, unit: str = "M$") -> Dict[str, Any]:
+        t = macro_raw.get(key)
+        if not t:
+            return {"value": f"0 {unit}", "raw": 0.0, "status": "-"}
+        change = safe_float(t.get("change_24h"))
+        volume = safe_float(t.get("quote_volume"))
+        raw_m = round(volume / 1_000_000.0, 2) if volume > 0 else round(change * 10.0, 2)
+        status = "Giriş" if change >= 0 else "Çıkış"
+        sign = "+" if raw_m >= 0 else ""
+        return {"value": f"{sign}{raw_m} {unit}", "raw": raw_m, "status": status}
+
+    crypto_change = 0.0
+    try:
+        eth_snap = get_market_snapshot("ETHUSDT", "FUTURES")
+        crypto_change = safe_float(eth_snap.get("change_24h"))
+    except Exception:
+        pass
+
+    warning = "Piyasa normal seyrediyor."
+    if regime == "RISK_OFF":
+        warning = "Risk-off rejim: dolar güçlü, borsalar zayıf. Temkinli olun."
+    elif regime == "RISK_ON":
+        warning = "Risk-on rejim: risk iştahı yüksek."
+
+    return {
+        "ok": True,
+        "updated_at": now_text(),
+        "market_state": regime,
+        "risk_score": int(risk_score),
+        "warning": warning,
+        "net_flows": {
+            "crypto": {
+                "value": f"{'+' if crypto_change >= 0 else ''}{round(crypto_change * 12, 1)} M$",
+                "raw": round(crypto_change * 12, 1),
+                "status": "Giriş" if crypto_change >= 0 else "Çıkış",
+            },
+            "stocks": _flow_item("SP500"),
+            "commodities": _flow_item("GOLD"),
+            "fx_bonds": _flow_item("DXY"),
+        },
+    }
+
+
 def learning_bias(signal: str) -> int:
     side = signal.upper()
     if side not in ["BUY", "SELL"]:
@@ -1716,24 +1976,30 @@ def resolve_learning(symbol: str, current_price: float) -> None:
         SIGNAL_QUEUE.pop(idx)
 
 
-def auto_trader_cycle() -> None:
-    with AUTO_LOCK:
-        if not AUTO_TRADER.enabled:
+def auto_trader_cycle(state=None, lock=None, history=None) -> None:
+    if state is None:
+        state = AUTO_TRADER
+    if lock is None:
+        lock = AUTO_LOCK
+    if history is None:
+        history = AUTO_HISTORY
+    with lock:
+        if not state.enabled:
             return
-        broker = AUTO_TRADER.broker.upper()
-        symbol = normalize_symbol(AUTO_TRADER.symbol)
-        market = AUTO_TRADER.market.upper()
-        qty = max(0.0, AUTO_TRADER.quantity)
-        min_conf = AUTO_TRADER.min_confidence
-        mode = AUTO_TRADER.mode
-        asset_type = AUTO_TRADER.asset_type
-        exchange = AUTO_TRADER.exchange
-        currency = AUTO_TRADER.currency
-        eval_window = AUTO_TRADER.evaluation_window_sec
-        max_daily = AUTO_TRADER.max_daily_trades
+        broker = state.broker.upper()
+        symbol = normalize_symbol(state.symbol)
+        market = state.market.upper()
+        qty = max(0.0, state.quantity)
+        min_conf = state.min_confidence
+        mode = state.mode
+        asset_type = state.asset_type
+        exchange = state.exchange
+        currency = state.currency
+        eval_window = state.evaluation_window_sec
+        max_daily = state.max_daily_trades
         day_key = datetime.now().strftime("%Y-%m-%d")
-        if not AUTO_TRADER.last_update.startswith(day_key):
-            AUTO_TRADER.daily_trade_count = 0
+        if not state.last_update.startswith(day_key):
+            state.daily_trade_count = 0
 
     action = "WAIT"
     confidence = 50
@@ -1744,38 +2010,38 @@ def auto_trader_cycle() -> None:
     if broker == "BINANCE":
         tp_execution = enforce_binance_take_profit(channel="auto_take_profit")
         if tp_execution:
-            with AUTO_LOCK:
-                AUTO_TRADER.last_action = "TAKE_PROFIT"
-                AUTO_TRADER.last_confidence = 100
-                AUTO_TRADER.last_reason = (
+            with lock:
+                state.last_action = "TAKE_PROFIT"
+                state.last_confidence = 100
+                state.last_reason = (
                     f"{tp_execution.get('symbol', symbol)} için %"
                     f"{tp_execution.get('target_pct', BINANCE_TAKE_PROFIT_PCT)} kâr hedefi tetiklendi."
                 )
-                AUTO_TRADER.last_price = 0.0
-                AUTO_TRADER.last_update = now_text()
-                AUTO_TRADER.last_error = str(tp_execution.get("error", "") or "")
-                AUTO_TRADER.updated_at_epoch = time.time()
-                AUTO_HISTORY.insert(
+                state.last_price = 0.0
+                state.last_update = now_text()
+                state.last_error = str(tp_execution.get("error", "") or "")
+                state.updated_at_epoch = time.time()
+                history.insert(
                     0,
                     {
-                        "time": AUTO_TRADER.last_update,
+                        "time": state.last_update,
                         "broker": broker,
                         "symbol": tp_execution.get("symbol", symbol),
                         "action": "TAKE_PROFIT",
                         "confidence": 100,
                         "price": 0.0,
-                        "reason": AUTO_TRADER.last_reason,
+                        "reason": state.last_reason,
                         "execution": tp_execution,
                     },
                 )
-                del AUTO_HISTORY[300:]
+                del history[300:]
                 db_insert_auto_history(
                     broker=broker,
                     symbol=str(tp_execution.get("symbol", symbol)),
                     action="TAKE_PROFIT",
                     confidence=100,
                     price=0.0,
-                    reason=AUTO_TRADER.last_reason,
+                    reason=state.last_reason,
                     execution=tp_execution,
                 )
             return
@@ -1840,11 +2106,11 @@ def auto_trader_cycle() -> None:
             reason = (reason + " " + " ".join(ext["notes"])).strip()
     resolve_learning(symbol, price)
 
-    with AUTO_LOCK:
+    with lock:
         allow_trade = (
             action in ["BUY", "SELL"]
             and confidence >= min_conf
-            and AUTO_TRADER.daily_trade_count < max_daily
+            and state.daily_trade_count < max_daily
             and qty > 0
         )
         do_live = mode == "live" and ((broker == "IBKR" and IBKR_LIVE_TRADING) or (broker != "IBKR" and LIVE_TRADING))
@@ -1900,22 +2166,22 @@ def auto_trader_cycle() -> None:
                         "time": now_text(),
                     }
             if execution.get("error"):
-                AUTO_TRADER.last_error = str(execution.get("error"))
+                state.last_error = str(execution.get("error"))
             else:
-                AUTO_TRADER.daily_trade_count += 1
+                state.daily_trade_count += 1
                 queue_signal_for_learning(symbol, action, price, eval_window)
 
-        AUTO_TRADER.last_action = action
-        AUTO_TRADER.last_confidence = confidence
-        AUTO_TRADER.last_reason = reason
-        AUTO_TRADER.last_price = price
-        AUTO_TRADER.last_update = now_text()
-        AUTO_TRADER.last_error = ""
-        AUTO_TRADER.updated_at_epoch = time.time()
-        AUTO_HISTORY.insert(
+        state.last_action = action
+        state.last_confidence = confidence
+        state.last_reason = reason
+        state.last_price = price
+        state.last_update = now_text()
+        state.last_error = ""
+        state.updated_at_epoch = time.time()
+        history.insert(
             0,
             {
-                "time": AUTO_TRADER.last_update,
+                "time": state.last_update,
                 "broker": broker,
                 "symbol": symbol,
                 "action": action,
@@ -1925,7 +2191,7 @@ def auto_trader_cycle() -> None:
                 "execution": execution,
             },
         )
-        del AUTO_HISTORY[300:]
+        del history[300:]
         
         # Log to persistent DB
         db_insert_auto_history(
@@ -1964,6 +2230,20 @@ def _auto_trader_loop():
                     AUTO_TRADER.last_error = str(e)
                     AUTO_TRADER.last_update = now_text()
                     AUTO_TRADER.updated_at_epoch = time.time()
+
+        with IBKR_AUTO_LOCK:
+            ibkr_enabled = IBKR_AUTO_TRADER.enabled
+            ibkr_interval_sec = max(8, IBKR_AUTO_TRADER.interval_sec)
+            ibkr_elapsed = time.time() - IBKR_AUTO_TRADER.updated_at_epoch if IBKR_AUTO_TRADER.updated_at_epoch else 10_000
+        if ibkr_enabled and IBKR_ENABLED and ibkr_elapsed >= ibkr_interval_sec:
+            try:
+                auto_trader_cycle(IBKR_AUTO_TRADER, IBKR_AUTO_LOCK, IBKR_AUTO_HISTORY)
+            except Exception as e:
+                with IBKR_AUTO_LOCK:
+                    IBKR_AUTO_TRADER.last_error = str(e)
+                    IBKR_AUTO_TRADER.last_update = now_text()
+                    IBKR_AUTO_TRADER.updated_at_epoch = time.time()
+
         time.sleep(1.0)
 
 
@@ -2278,6 +2558,61 @@ def ensure_binance_leverage(symbol: str, leverage: int) -> None:
         pass
 
 
+_USDTRY_RATE_CACHE: Dict[str, Any] = {"rate": 0.0, "ts": 0.0}
+_USDTRY_RATE_CACHE_TTL_SEC = 30.0
+
+
+def get_live_usdtry_rate() -> float:
+    """Binance'in kendi USDT/TRY paritesinden canli kur ceker (public endpoint,
+    IP whitelist gerektirmez). VPS proxy'sinin hesap ozetindeki TRY donusumu
+    eski/sabit bir kur kullaniyordu ve gercek bakiyeden belirgin sekilde
+    (~%5-10) dusuk gosteriyordu."""
+    cached_ts = _USDTRY_RATE_CACHE.get("ts", 0.0)
+    if cached_ts and (time.time() - cached_ts) < _USDTRY_RATE_CACHE_TTL_SEC:
+        return _USDTRY_RATE_CACHE.get("rate", 0.0)
+    try:
+        rate = get_price("USDTTRY", "SPOT")
+        if rate > 0:
+            _USDTRY_RATE_CACHE["rate"] = rate
+            _USDTRY_RATE_CACHE["ts"] = time.time()
+            return rate
+    except Exception:
+        pass
+    return _USDTRY_RATE_CACHE.get("rate", 0.0)
+
+
+def get_binance_try_totals_live() -> Optional[Dict[str, float]]:
+    """Spot ve futures bakiyelerini VPS proxy'sinin HAM (TRY'ye cevrilmemis)
+    endpoint'lerinden ceker, her varligi canli fiyatla USD'ye cevirir ve
+    canli USDT/TRY kuruyla TRY'ye donusturur. VPS'in kendi hesap-ozeti
+    endpoint'i (build_binance_summary/get_spot_balances icinde kullanilan)
+    eski bir kur kullandigi icin gercek bakiyeden dusuk gosteriyordu; bu
+    fonksiyon dogru toplami bagimsiz olarak hesaplar ve mumkunse onun
+    yerine kullanilir."""
+    if not BINANCE_PROXY_BASE_URL:
+        return None
+    try:
+        rate = get_live_usdtry_rate()
+        if rate <= 0:
+            return None
+        spot_raw = _binance_proxy_request("GET", "/spot-balances")
+        futures_raw = _binance_proxy_request("GET", "/futures-balances")
+        spot_rows = spot_raw.get("balances", []) if isinstance(spot_raw, dict) else (spot_raw or [])
+        futures_rows = futures_raw.get("balances", []) if isinstance(futures_raw, dict) else (futures_raw or [])
+        spot_rows = _enrich_balances_with_usd(spot_rows, "SPOT")
+        futures_rows = _enrich_balances_with_usd(futures_rows, "FUTURES")
+        spot_usd = sum(safe_float(r.get("usdValue")) for r in spot_rows if isinstance(r, dict))
+        futures_usd = sum(safe_float(r.get("usdValue")) for r in futures_rows if isinstance(r, dict))
+        return {
+            "spot_try": round(spot_usd * rate, 2),
+            "futures_try": round(futures_usd * rate, 2),
+            "total_try": round((spot_usd + futures_usd) * rate, 2),
+            "usdtry_rate": rate,
+        }
+    except Exception:
+        return None
+
+
 def get_spot_balances() -> List[Dict[str, Any]]:
     if BINANCE_PROXY_BASE_URL:
         # VPS proxy /portfolio endpoint döndürüyor {"data": {"spotTry": ..., ...}, "ok": true}
@@ -2387,6 +2722,21 @@ def get_portfolio() -> Dict[str, Any]:
         total_try = safe_float(binance_summary.get("binance_total"))
         spot_try = safe_float(binance_summary.get("spot_total"))
         futures_try = safe_float(binance_summary.get("futures_total"))
+
+    # VPS proxy'nin hesap-ozeti eski/sabit bir USD/TRY kuru kullandigi icin
+    # gercek bakiyeden belirgin sekilde dusuk gosterebiliyor (kullanicinin
+    # kendi Binance uygulamasindaki gercek bakiyeyle karsilastirmasi bunu
+    # dogruladi). Mumkunse canli kurla hesaplanan dogru toplami kullan.
+    live_totals = get_binance_try_totals_live()
+    if live_totals and live_totals.get("total_try", 0.0) > 0:
+        total_try = live_totals["total_try"]
+        spot_try = live_totals["spot_try"]
+        futures_try = live_totals["futures_try"]
+        binance_summary["binance_total"] = total_try
+        binance_summary["spot_total"] = spot_try
+        binance_summary["futures_total"] = futures_try
+        binance_summary["currency"] = "TRY_EQUIV_LIVE"
+        binance_summary["usdtry_rate"] = live_totals.get("usdtry_rate")
     
     result = {
         "last_update": now_text(),
@@ -2910,18 +3260,23 @@ def binance_private_order():
 @app.route("/ibkr/positions", methods=["GET"])
 def ibkr_positions():
     try:
-        return jsonify({"positions": ibkr_positions_snapshot(), "last_update": now_text(), "broker": "IBKR"})
+        rows = ibkr_positions_snapshot()
+        return jsonify({"ok": True, "positions": rows, "data": rows, "last_update": now_text(), "broker": "IBKR"})
     except Exception as e:
-        return jsonify({"positions": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
+        return jsonify({"ok": False, "positions": [], "data": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
 
 
 @app.route("/ibkr-positions", methods=["GET"])
 def ibkr_positions_alias():
     # Mobil uygulama bu path'i cagiriyor; /ibkr/positions ile ayni veriyi dondurur.
+    # NOT: iOS tarafi (TradingCenterView.loadIBKRPositions) yanitta "ok": true alanini
+    # zorunlu tutuyor - bu alan olmadan gercek pozisyon verisi gelse bile "IBKR pozisyon
+    # okunamadi" hatasi gosteriyordu, veri sanki hic gelmiyormus gibi gorunuyordu.
     try:
-        return jsonify({"positions": ibkr_positions_snapshot(), "last_update": now_text(), "broker": "IBKR"})
+        rows = ibkr_positions_snapshot()
+        return jsonify({"ok": True, "positions": rows, "data": rows, "last_update": now_text(), "broker": "IBKR"})
     except Exception as e:
-        return jsonify({"positions": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
+        return jsonify({"ok": False, "positions": [], "data": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
 
 
 _STABLECOIN_ASSETS = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI"}
@@ -3382,6 +3737,52 @@ def auto_trader_status():
     return jsonify(payload)
 
 
+@app.route("/auto-trader/ibkr/start", methods=["POST"])
+def ibkr_auto_trader_start():
+    body = request.get_json(force=True) or {}
+    with IBKR_AUTO_LOCK:
+        IBKR_AUTO_TRADER.enabled = True
+        IBKR_AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", IBKR_AUTO_TRADER.symbol))
+        IBKR_AUTO_TRADER.asset_type = str(body.get("asset_type", IBKR_AUTO_TRADER.asset_type)).upper()
+        IBKR_AUTO_TRADER.exchange = str(body.get("exchange", IBKR_AUTO_TRADER.exchange)).upper()
+        IBKR_AUTO_TRADER.currency = str(body.get("currency", IBKR_AUTO_TRADER.currency)).upper()
+        IBKR_AUTO_TRADER.mode = "live" if str(body.get("mode", IBKR_AUTO_TRADER.mode)).lower() == "live" else "paper"
+        IBKR_AUTO_TRADER.quantity = max(0.0, safe_float(body.get("quantity"), IBKR_AUTO_TRADER.quantity))
+        IBKR_AUTO_TRADER.interval_sec = max(8, int(safe_float(body.get("interval_sec"), IBKR_AUTO_TRADER.interval_sec)))
+        IBKR_AUTO_TRADER.min_confidence = max(50, min(95, int(safe_float(body.get("min_confidence"), IBKR_AUTO_TRADER.min_confidence))))
+        IBKR_AUTO_TRADER.max_daily_trades = max(1, int(safe_float(body.get("max_daily_trades"), IBKR_AUTO_TRADER.max_daily_trades)))
+        IBKR_AUTO_TRADER.last_update = now_text()
+        IBKR_AUTO_TRADER.updated_at_epoch = 0.0
+    return jsonify(asdict(IBKR_AUTO_TRADER))
+
+
+@app.route("/auto-trader/ibkr/stop", methods=["POST"])
+def ibkr_auto_trader_stop():
+    with IBKR_AUTO_LOCK:
+        IBKR_AUTO_TRADER.enabled = False
+        IBKR_AUTO_TRADER.last_update = now_text()
+        IBKR_AUTO_TRADER.last_reason = "IBKR auto trader durduruldu."
+    return jsonify(asdict(IBKR_AUTO_TRADER))
+
+
+@app.route("/auto-trader/ibkr/status", methods=["GET"])
+def ibkr_auto_trader_status():
+    with IBKR_AUTO_LOCK:
+        payload = asdict(IBKR_AUTO_TRADER)
+        payload["ibkr_connected"] = bool(IBKR_RUNTIME.get("connected"))
+    return jsonify(payload)
+
+
+@app.route("/auto-trader/ibkr/history", methods=["GET"])
+def ibkr_auto_trader_history():
+    try:
+        limit = max(1, min(int(request.args.get("limit", "120")), 500))
+        db_records = [r for r in db_recent_auto_history(limit * 2) if str(r.get("broker", "")).upper() == "IBKR"][:limit]
+        return jsonify({"ok": True, "history": db_records, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "history": [], "last_update": now_text()}), 200
+
+
 @app.route("/market-signals/external", methods=["GET"])
 def market_signals_external():
     """Funding rate + Fear&Greed Index gibi harici piyasa sinyallerini gosterir (sadece bilgi amaçlı)."""
@@ -3813,6 +4214,37 @@ def open_orders_alias():
         return jsonify({"orders": [], "error": str(e), "last_update": now_text()}), 200
 
 
+@app.route("/dd-ai-dashboard", methods=["GET"])
+def dd_ai_dashboard_route():
+    try:
+        return jsonify(build_dd_ai_dashboard())
+    except Exception as e:
+        return jsonify({
+            "updated_at": now_text(), "ai_confidence": 0, "market_regime": "-",
+            "macro": {"vix": "-", "nasdaq": "-", "sp500": "-", "dxy": "-", "gold": "-", "oil": "-"},
+            "market_mood": {"general_mode": "-", "risk_appetite": "-", "institutional_flow": "-", "bubble_risk": "-"},
+            "institutional_scores": {}, "learning_rates": {},
+            "last_decision": {"symbol": "-", "action": "-", "confidence": 0, "reason": str(e)},
+        }), 200
+
+
+@app.route("/market-flow-risk", methods=["GET"])
+def market_flow_risk_route():
+    try:
+        return jsonify(build_market_flow_risk())
+    except Exception as e:
+        return jsonify({
+            "ok": False, "updated_at": now_text(), "market_state": "-", "risk_score": 0,
+            "warning": str(e),
+            "net_flows": {
+                "crypto": {"value": "-", "raw": 0.0, "status": "-"},
+                "stocks": {"value": "-", "raw": 0.0, "status": "-"},
+                "commodities": {"value": "-", "raw": 0.0, "status": "-"},
+                "fx_bonds": {"value": "-", "raw": 0.0, "status": "-"},
+            },
+        }), 200
+
+
 @app.route("/ai-status", methods=["GET"])
 def ai_status_alias():
     with AUTO_LOCK:
@@ -3836,7 +4268,14 @@ def ai_control_alias():
 
 @app.route("/ai-logs", methods=["GET"])
 def ai_logs_alias():
-    return jsonify({"logs": TRADE_LOG[:100], "last_update": now_text()})
+    try:
+        limit = max(1, min(int(request.args.get("limit", "100")), 500))
+    except Exception:
+        limit = 100
+    try:
+        return jsonify({"ok": True, "logs": build_ai_log_entries(limit), "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "logs": [], "error": str(e), "last_update": now_text()}), 200
 
 
 @app.route("/signal", methods=["GET"])
