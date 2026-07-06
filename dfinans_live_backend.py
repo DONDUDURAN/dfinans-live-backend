@@ -806,6 +806,16 @@ def ensure_ibkr_connection(force_reconnect: bool = False):
             IBKR_RUNTIME["last_error"] = ""
             IBKR_RUNTIME["reconnect_count"] = reconnect_count + 1
             IBKR_RUNTIME["failed_attempts"] = 0
+            try:
+                # Hesapta canli (real-time) piyasa verisi abonelugu yok
+                # (Error 10089). Once canli veri deneyip, olmazsa gecikmeli
+                # veriye (delayed, 15-20 dk gecikmeli) dusuyoruz. Bunu
+                # default olarak 3 (delayed) ayarlamak, her sembolde canli
+                # veri denemesinin bosuna 2.5sn beklemesini onler.
+                ib.reqMarketDataType(3)
+                print("[IBKR] Market data type set to DELAYED (3) - hesapta canli veri abonelugu yok.")
+            except Exception as mdt_err:
+                print(f"[IBKR] reqMarketDataType ayarlanamadi: {mdt_err}")
             print(f"[IBKR] Connected successfully at attempt {reconnect_count+1}")
             return ib, ibs
         except Exception as e:
@@ -963,6 +973,12 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
         qualified = ib.qualifyContracts(contract)
         if not qualified:
             raise RuntimeError("IBKR contract doğrulanamadı.")
+        try:
+            # Bağlantı ensure_ibkr_connection dışında (ör. eski bir bağlantı)
+            # devam ediyorsa da gecikmeli veriye düştüğümüzden emin ol.
+            ib.reqMarketDataType(3)
+        except Exception:
+            pass
         ticker = ib.reqMktData(qualified[0], "", True, False)
         ib.sleep(2.5)
         def _clean(v):
