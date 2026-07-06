@@ -2154,14 +2154,17 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                     # Error 201 Order rejected - margin requirement). Emir gondermeden
                     # once kullanilabilir fonu kontrol edip, gerekirse islem tarafinda
                     # BUY icin miktari guvenli bir seviyeye (kullanilabilir fonun %80'i)
-                    # dusuruyoruz; hala 0'dan kucukse islem hic gonderilmiyor.
+                    # dusuruyoruz. IBKR kesirli (fractional) hisse alimini destekledigi
+                    # icin miktari tam sayiya yuvarlamiyoruz - kucuk hesap bakiyesiyle de
+                    # (ör. 0.083 hisse) gercek pozisyon acilabilsin diye.
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
                         needed = qty * price
                         safe_budget = available_funds * 0.8
                         if available_funds > 0 and needed > safe_budget:
-                            affordable_qty = math.floor(safe_budget / price)
-                            if affordable_qty <= 0:
+                            affordable_qty = round(safe_budget / price, 4)
+                            min_fractional_qty = 0.01
+                            if affordable_qty < min_fractional_qty:
                                 execution = {
                                     "simulated": False,
                                     "broker": "IBKR",
@@ -2170,7 +2173,7 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                                     "quantity": 0,
                                     "error": (
                                         f"Yetersiz alım gücü: kullanılabilir fon {available_funds:.2f} USD, "
-                                        f"1 {symbol} hissesi ~{price:.2f} USD tutuyor. Emir gönderilmedi."
+                                        f"minimum kesirli hisse tutarını bile karşılamıyor. Emir gönderilmedi."
                                     ),
                                     "time": now_text(),
                                 }
@@ -2178,7 +2181,7 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                             else:
                                 reason = (
                                     reason
-                                    + f" (Miktar {qty} -> {affordable_qty} olarak düşürüldü: kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
+                                    + f" (Miktar {qty} -> {affordable_qty} olarak düşürüldü (kesirli hisse): kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
                                 ).strip()
                                 qty = affordable_qty
                     if qty > 0 and "error" not in execution:
