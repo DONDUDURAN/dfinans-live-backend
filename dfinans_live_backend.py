@@ -821,8 +821,12 @@ def ibkr_execute(action):
             # auto-trader dongusu) kullanmasi ciddi kilitlenmelere/timeout'lara yol
             # aciyordu. Tum baglanti + istek akisini tek bir lock altinda serilestirerek
             # bu race condition'i onluyoruz.
-            with IBKR_LOCK:
+            if not IBKR_LOCK.acquire(timeout=12):
+                raise RuntimeError("IBKR şu anda meşgul, lütfen birkaç saniye sonra tekrar deneyin.")
+            try:
                 ib, ibs = ensure_ibkr_connection(force_reconnect=(attempt == 1))
+            finally:
+                IBKR_LOCK.release()
             # ONEMLI: action() cagrisini IBKR_LOCK icinde ama connect adimindan
             # AYRI bir try/except ile calistiriyoruz. Gecersiz sembol / abonelik
             # eksikligi gibi "is mantigi" hatalari (contract dogrulanamadi, canli
@@ -835,11 +839,15 @@ def ibkr_execute(action):
             # yeniden baglaniyoruz; aksi halde hatayi oldugu gibi yukari firlatip
             # mevcut baglantiyi koruyoruz.
             try:
-                with IBKR_LOCK:
+                if not IBKR_LOCK.acquire(timeout=12):
+                    raise RuntimeError("IBKR şu anda meşgul, lütfen birkaç saniye sonra tekrar deneyin.")
+                try:
                     result = action(ib, ibs)
                     IBKR_RUNTIME["connected"] = bool(ib.isConnected())
                     IBKR_RUNTIME["last_ok"] = now_text()
                     IBKR_RUNTIME["last_error"] = ""
+                finally:
+                    IBKR_LOCK.release()
                 return result
             except Exception as action_err:
                 still_connected = False
@@ -907,7 +915,20 @@ def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, curren
     raise RuntimeError("asset_type desteklenmiyor. STK, CRYPTO veya FOREX kullanılmalı.")
 
 
+_IBKR_SNAPSHOT_CACHE: Dict[str, Any] = {}
+_IBKR_SNAPSHOT_CACHE_TTL_SEC = 4.0
+
+
 def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: str) -> Dict[str, Any]:
+    # Mobil uygulama ayni sembolu birden fazla ekrandan (Piyasalar, Islem, Ekonomi
+    # Radari vb.) kisa arayla tekrar tekrar sorguluyor. Her istek ~2.5sn IBKR
+    # bekleme + paylasilan IBKR_LOCK gerektirdigi icin, kisa bir TTL cache
+    # gereksiz tekrar sorgulari (ve IBKR uzerindeki yuku) buyuk olcude azaltir.
+    cache_key = f"{normalize_symbol(symbol)}|{asset_type}|{exchange}|{currency}"
+    cached = _IBKR_SNAPSHOT_CACHE.get(cache_key)
+    if cached and (time.time() - cached[0]) < _IBKR_SNAPSHOT_CACHE_TTL_SEC:
+        return cached[1]
+
     def _run(ib, ibs):
         contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
         qualified = ib.qualifyContracts(contract)
@@ -955,7 +976,9 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
             "order_flow_signal": order_flow_signal,
             "last_update": now_text(),
         }
-    return ibkr_execute(_run)
+    result = ibkr_execute(_run)
+    _IBKR_SNAPSHOT_CACHE[cache_key] = (time.time(), result)
+    return result
 
 
 def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
