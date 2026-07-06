@@ -1331,6 +1331,8 @@ def ibkr_place_market_order(
         if not qualified:
             raise RuntimeError("IBKR contract doğrulanamadı.")
         order = ibs.MarketOrder(order_side, quantity)
+        order.tif = "DAY"
+        order.outsideRth = True
         if IBKR_ACCOUNT:
             order.account = IBKR_ACCOUNT
         trade = ib.placeOrder(qualified[0], order)
@@ -1339,6 +1341,15 @@ def ibkr_place_market_order(
             if status in ibs.OrderStatus.DoneStates:
                 break
             ib.sleep(0.25)
+
+        log_messages = []
+        try:
+            for entry in (trade.log or []):
+                msg = str(getattr(entry, "message", "") or "")
+                if msg:
+                    log_messages.append(msg)
+        except Exception:
+            pass
 
         result = {
             "broker": "IBKR",
@@ -1352,6 +1363,8 @@ def ibkr_place_market_order(
             "filled": safe_float(getattr(trade.orderStatus, "filled", 0)),
             "remaining": safe_float(getattr(trade.orderStatus, "remaining", 0)),
             "avg_fill_price": safe_float(getattr(trade.orderStatus, "avgFillPrice", 0)),
+            "why_held": str(getattr(trade.orderStatus, "whyHeld", "") or ""),
+            "log": log_messages[-5:],
             "last_update": now_text(),
         }
         db_insert_trade_journal(
