@@ -2030,6 +2030,163 @@ def resolve_learning(symbol: str, current_price: float) -> None:
         SIGNAL_QUEUE.pop(idx)
 
 
+# ---------------------------------------------------------------------------
+# Korelasyon / Lag / Hedge Motoru
+# ---------------------------------------------------------------------------
+# Watchlist'teki (Binance + IBKR) tum semboller icin fiyat gecmisi tutulur.
+# Birbiriyle guclu korele olan iki varlikta biri hareket edip digeri henuz
+# etmediyse ("lag"), henuz hareket etmeyen tarafta o yonde (veya negatif
+# korelasyonda ters yonde) bir sinyal onerisi uretilir. Bu ayni zamanda
+# "Piyasalar arasi analiz" ekraninin veri kaynagi olarak da kullanilir.
+_CORR_PRICE_HISTORY: Dict[str, List[Tuple[float, float]]] = {}
+_CORR_HISTORY_LOCK = threading.Lock()
+_CORR_MAX_POINTS = 200
+_CORR_MIN_POINTS = 12
+_CORR_STRONG_THRESHOLD = 0.6
+_CORR_LAG_MOVE_PCT = 1.2  # hareket eden varligin en az bu kadar (%) degismis olmasi gerekir
+_CORR_FOLLOW_TOLERANCE_PCT = 0.4  # takip eden varlik bu kadardan az hareket ettiyse "henuz gelmedi" sayilir
+
+
+def record_correlation_price(symbol: str, price: float) -> None:
+    """Her sinyal degerlendirmesinde (Binance + IBKR) cagirilir; sembolun
+    fiyat gecmisine bir nokta ekler. Korelasyon hesaplamasi bu geçmişe dayanir."""
+    if price <= 0:
+        return
+    sym = normalize_symbol(symbol)
+    now_epoch = time.time()
+    with _CORR_HISTORY_LOCK:
+        series = _CORR_PRICE_HISTORY.setdefault(sym, [])
+        if series and now_epoch - series[-1][0] < 5:
+            # Ayni 5 saniyelik pencerede tekrar tekrar eklenmesin (asiri sik ornekleme).
+            return
+        series.append((now_epoch, price))
+        if len(series) > _CORR_MAX_POINTS:
+            del series[: len(series) - _CORR_MAX_POINTS]
+
+
+def _returns_series(points: List[Tuple[float, float]]) -> List[float]:
+    rets: List[float] = []
+    for i in range(1, len(points)):
+        prev = points[i - 1][1]
+        cur = points[i][1]
+        if prev > 0:
+            rets.append((cur - prev) / prev)
+    return rets
+
+
+def _pearson_corr(a: List[float], b: List[float]) -> Optional[float]:
+    n = min(len(a), len(b))
+    if n < _CORR_MIN_POINTS:
+        return None
+    a = a[-n:]
+    b = b[-n:]
+    mean_a = sum(a) / n
+    mean_b = sum(b) / n
+    cov = sum((a[i] - mean_a) * (b[i] - mean_b) for i in range(n))
+    var_a = sum((x - mean_a) ** 2 for x in a)
+    var_b = sum((x - mean_b) ** 2 for x in b)
+    denom = math.sqrt(var_a * var_b)
+    if denom <= 0:
+        return None
+    return max(-1.0, min(1.0, cov / denom))
+
+
+def compute_correlation_matrix(symbols: List[str]) -> List[Dict[str, Any]]:
+    """Watchlist'teki tum sembol ciftleri icin korelasyon katsayisini hesaplar."""
+    syms = [normalize_symbol(s) for s in symbols]
+    with _CORR_HISTORY_LOCK:
+        snapshot = {s: list(_CORR_PRICE_HISTORY.get(s, [])) for s in syms}
+    returns = {s: _returns_series(snapshot[s]) for s in syms}
+    rows: List[Dict[str, Any]] = []
+    for i in range(len(syms)):
+        for j in range(i + 1, len(syms)):
+            s1, s2 = syms[i], syms[j]
+            corr = _pearson_corr(returns.get(s1, []), returns.get(s2, []))
+            if corr is None:
+                continue
+            rows.append({
+                "pair": f"{s1} ↔ {s2}",
+                "symbol_a": s1,
+                "symbol_b": s2,
+                "correlation": round(corr, 3),
+                "strength": (
+                    "Güçlü pozitif" if corr >= _CORR_STRONG_THRESHOLD else
+                    "Güçlü negatif" if corr <= -_CORR_STRONG_THRESHOLD else
+                    "Zayıf/nötr"
+                ),
+                "sample_size": min(len(returns.get(s1, [])), len(returns.get(s2, []))),
+            })
+    rows.sort(key=lambda r: abs(r["correlation"]), reverse=True)
+    return rows
+
+
+def get_correlation_pair_signal(symbol: str, all_watchlist_symbols: List[str]) -> Dict[str, Any]:
+    """Verilen sembol icin en guclu korele oldugu es (peer) varligi bulur;
+    peer belirgin hareket ettiyse ama bu sembol henuz takip etmediyse bir
+    "lag" sinyali (BUY/SELL) ve gerekce metni dondurur. Sinyal yoksa
+    action=WAIT, bias=0 doner."""
+    sym = normalize_symbol(symbol)
+    peers = [normalize_symbol(s) for s in all_watchlist_symbols if normalize_symbol(s) != sym]
+    with _CORR_HISTORY_LOCK:
+        sym_points = list(_CORR_PRICE_HISTORY.get(sym, []))
+        peer_points = {p: list(_CORR_PRICE_HISTORY.get(p, [])) for p in peers}
+    sym_returns = _returns_series(sym_points)
+    if len(sym_returns) < _CORR_MIN_POINTS or len(sym_points) < 2:
+        return {"action": "WAIT", "bias": 0, "note": ""}
+
+    def _recent_move_pct(points: List[Tuple[float, float]], lookback: int = 6) -> float:
+        if len(points) < 2:
+            return 0.0
+        window = points[-lookback:] if len(points) >= lookback else points
+        first_price = window[0][1]
+        last_price = window[-1][1]
+        if first_price <= 0:
+            return 0.0
+        return (last_price - first_price) / first_price * 100.0
+
+    sym_move = _recent_move_pct(sym_points)
+    best_peer = None
+    best_corr = 0.0
+    for peer in peers:
+        pts = peer_points.get(peer, [])
+        peer_returns = _returns_series(pts)
+        corr = _pearson_corr(sym_returns, peer_returns)
+        if corr is None:
+            continue
+        if abs(corr) > abs(best_corr):
+            best_corr = corr
+            best_peer = peer
+
+    if best_peer is None or abs(best_corr) < _CORR_STRONG_THRESHOLD:
+        return {"action": "WAIT", "bias": 0, "note": ""}
+
+    peer_move = _recent_move_pct(peer_points.get(best_peer, []))
+    if abs(peer_move) < _CORR_LAG_MOVE_PCT:
+        return {"action": "WAIT", "bias": 0, "note": ""}
+    if abs(sym_move) > _CORR_FOLLOW_TOLERANCE_PCT:
+        # Sembol zaten hareket etmis, "henuz gelmedi" durumu yok - lag sinyali gecersiz.
+        return {"action": "WAIT", "bias": 0, "note": ""}
+
+    if best_corr >= _CORR_STRONG_THRESHOLD:
+        # Pozitif korelasyon: peer yukari gittiyse bu da yukari gitmeli (henuz gitmedi -> BUY),
+        # peer asagi gittiyse bu da asagi gitmeli (henuz gitmedi -> SELL).
+        action = "BUY" if peer_move > 0 else "SELL"
+        note = (
+            f"Korelasyon sinyali: {best_peer} son periyotta %{peer_move:.2f} hareket etti, "
+            f"{sym} (korelasyon {best_corr:.2f}) henüz takip etmedi -> {action} bekleniyor (lag)."
+        )
+    else:
+        # Negatif korelasyon (hedge cifti): peer yukari gittiyse bu asagi gitmeli (SELL),
+        # peer asagi gittiyse bu yukari gitmeli (BUY).
+        action = "SELL" if peer_move > 0 else "BUY"
+        note = (
+            f"Ters korelasyon (hedge) sinyali: {best_peer} son periyotta %{peer_move:.2f} hareket etti, "
+            f"{sym} (korelasyon {best_corr:.2f}) ters yönde tepki vermesi bekleniyor -> {action}."
+        )
+    bias = 8 if abs(best_corr) >= 0.8 else 5
+    return {"action": action, "bias": bias, "note": note, "peer": best_peer, "peer_move_pct": round(peer_move, 3), "correlation": round(best_corr, 3)}
+
+
 def auto_trader_cycle(state=None, lock=None, history=None) -> None:
     if state is None:
         state = AUTO_TRADER
@@ -2161,6 +2318,22 @@ def _auto_trader_run_symbol(
         confidence = int(ai.get("confidence", 50))
         price = safe_float(ai.get("price"))
         reason = str(ai.get("reason", ""))
+
+    # Korelasyon/lag/hedge motoru: fiyat gecmisine kaydet ve bu sembol icin
+    # en guclu korele oldugu esin (peer) henuz takip edilmemis hareketi var mi bak.
+    if price > 0:
+        record_correlation_price(symbol, price)
+    corr_signal = get_correlation_pair_signal(symbol, state.symbols or [symbol])
+    if corr_signal["action"] in ["BUY", "SELL"]:
+        if action == "WAIT":
+            # Baska sinyal yokken, guclu bir korelasyon/lag firsati tek basina islem acabilir.
+            action = corr_signal["action"]
+            confidence = 58 + corr_signal["bias"]
+            reason = corr_signal["note"]
+        elif action == corr_signal["action"]:
+            confidence = min(95, confidence + corr_signal["bias"])
+            reason = (reason + " " + corr_signal["note"]).strip()
+        # action mevcut sinyalle ters yondeyse mevcut (dogrudan) sinyale mudahale etmiyoruz.
 
     if action in ["BUY", "SELL"]:
         confidence = max(0, min(95, confidence + learning_bias(action)))
@@ -3977,6 +4150,97 @@ def market_signals_external():
         "sell_bias": get_external_signal_bias(symbol, "SELL"),
         "time": now_text(),
     })
+
+
+@app.route("/auto-trader/positions-opened-24h", methods=["GET"])
+def auto_trader_positions_opened_24h():
+    """Son 24 saatte gercekten acilan (simule/hata olmayan, BUY/SELL) pozisyon
+    sayisini broker bazinda ve toplam olarak dondurur. Ana sayfada 'son 24
+    saatte kac pozisyon acildi' gostergesi icin kullanilir."""
+    try:
+        cutoff = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT broker, symbol, action, created_at, execution_json
+                    FROM auto_history
+                    WHERE created_at >= ? AND action IN ('BUY', 'SELL')
+                    ORDER BY created_at DESC
+                    """,
+                    (cutoff,),
+                ).fetchall()
+            finally:
+                conn.close()
+        total = 0
+        by_broker: Dict[str, int] = {}
+        items: List[Dict[str, Any]] = []
+        for r in rows:
+            exec_json = r["execution_json"] or "{}"
+            try:
+                execution = json.loads(exec_json)
+            except Exception:
+                execution = {}
+            simulated = bool(execution.get("simulated", False))
+            has_error = bool(execution.get("error"))
+            if simulated or has_error:
+                continue
+            broker = str(r["broker"] or "").upper()
+            total += 1
+            by_broker[broker] = by_broker.get(broker, 0) + 1
+            items.append({
+                "broker": broker,
+                "symbol": r["symbol"],
+                "action": r["action"],
+                "time": r["created_at"],
+            })
+        return jsonify({
+            "ok": True,
+            "total_opened_24h": total,
+            "by_broker": by_broker,
+            "items": items[:50],
+            "window_hours": 24,
+            "time": now_text(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "total_opened_24h": 0, "by_broker": {}, "items": []}), 500
+
+
+@app.route("/intermarket-analysis", methods=["GET"])
+def intermarket_analysis():
+    """Piyasalar arasi (kripto <-> hisse <-> emtia) gercek korelasyon analizi.
+    Watchlist'teki tum semboller (Binance + IBKR) icin canli fiyat gecmisinden
+    hesaplanan Pearson korelasyonunu ve varsa aktif lag/hedge sinyallerini dondurur."""
+    try:
+        with AUTO_LOCK:
+            binance_symbols = list(AUTO_TRADER.symbols) if AUTO_TRADER.symbols else []
+        with IBKR_AUTO_LOCK:
+            ibkr_symbols = list(IBKR_AUTO_TRADER.symbols) if IBKR_AUTO_TRADER.symbols else []
+        all_symbols = binance_symbols + ibkr_symbols
+        pairs = compute_correlation_matrix(all_symbols)
+        active_signals = []
+        for sym in all_symbols:
+            sig = get_correlation_pair_signal(sym, all_symbols)
+            if sig.get("action") in ("BUY", "SELL"):
+                active_signals.append({
+                    "symbol": normalize_symbol(sym),
+                    "action": sig["action"],
+                    "peer": sig.get("peer"),
+                    "correlation": sig.get("correlation"),
+                    "peer_move_pct": sig.get("peer_move_pct"),
+                    "note": sig.get("note"),
+                })
+        return jsonify({
+            "ok": True,
+            "pairs": pairs[:30],
+            "active_lag_signals": active_signals,
+            "symbols_tracked": len(all_symbols),
+            "time": now_text(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "pairs": [], "active_lag_signals": []}), 500
 
 
 @app.route("/auto-trader/history", methods=["GET"])
