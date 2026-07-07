@@ -2820,6 +2820,28 @@ def get_portfolio() -> Dict[str, Any]:
                 ibkr_positions = ibkr_positions_snapshot()
             except Exception as e:
                 ibkr_error = str(e)
+            # IBKR dogrudan bagliyken de NetLiquidation degerini TRY'ye cevirip
+            # portfoy toplamina dahil et. Onceden bu deger sadece proxy fallback
+            # yolunda (ibkr baglanti YOKSA) hesaplaniyordu; dogrudan baglantida
+            # ibkr_try hep 0 kaliyordu ve toplam bakiyeden IBKR hesabinin tamami
+            # (~binlerce TRY) eksik gorunuyordu.
+            try:
+                acct_rows = ibkr_account_summary_snapshot()
+                net_liq_usd = safe_float(next(
+                    (r.get("value") for r in acct_rows if str(r.get("tag")) == "NetLiquidation" and str(r.get("currency")) in ("USD", "BASE")),
+                    0.0,
+                ))
+                if net_liq_usd <= 0:
+                    net_liq_usd = safe_float(next(
+                        (r.get("value") for r in acct_rows if str(r.get("tag")) == "NetLiquidation"),
+                        0.0,
+                    ))
+                if net_liq_usd > 0:
+                    rate = get_live_usdtry_rate() or 0.0
+                    if rate > 0:
+                        ibkr_try = net_liq_usd * rate
+            except Exception:
+                pass
         else:
             ibkr_error = str(IBKR_RUNTIME.get("last_error", "") or "IBKR bağlı değil.")
             # Dogrudan IBKR baglantisi yoksa (Railway -> IBKR Gateway soket erisimi
