@@ -3006,6 +3006,98 @@ def get_sector_scenario_analysis() -> Dict[str, Any]:
     return _cache_get_or_fetch("sector_scenario_analysis", 21600, _fetch)
 
 
+def get_daily_investment_advice() -> Dict[str, Any]:
+    """'Bugün neye yatırım yapmalı / dikkat etmeli' - günlük kısa yatırım notu.
+    Tüm profesyonel analiz motorlarının (balon/çöküş riski, defter değeri,
+    bilanço/nakit akış sağlığı, short/long pozisyonlanma-manipülasyon, sektör
+    senaryoları) özetini periyodik olarak (günde 1 kez, gün içinde değişmez)
+    tarayıp kısa, aksiyona dönük bir Türkçe not üretir."""
+
+    def _fetch() -> Dict[str, Any]:
+        try:
+            valuation = get_valuation_bubble_analysis()
+        except Exception:
+            valuation = {}
+        try:
+            book_value = get_fundamental_valuation_analysis()
+        except Exception:
+            book_value = {"overpriced_count": 0, "overpriced_symbols": []}
+        try:
+            financials = get_financial_statement_analysis()
+        except Exception:
+            financials = {"risky_count": 0, "risky_symbols": []}
+        try:
+            positioning = get_market_positioning_and_manipulation_analysis()
+        except Exception:
+            positioning = {"alert_count": 0, "alert_symbols": []}
+        try:
+            sector = get_sector_scenario_analysis()
+        except Exception:
+            sector = {"active_count": 0, "active_scenario_titles": []}
+
+        crash_level = valuation.get("crash_risk_level", "BİLİNMİYOR")
+        overheat_count = valuation.get("overheat_count", 0)
+        assets = valuation.get("assets", [])
+        cheapest = sorted(
+            [a for a in assets if safe_float(a.get("z_score")) < -0.3],
+            key=lambda a: safe_float(a.get("z_score")),
+        )
+        hottest = sorted(
+            [a for a in assets if safe_float(a.get("overheat_score")) >= 2],
+            key=lambda a: -safe_float(a.get("overheat_score")),
+        )
+
+        notes: List[str] = []
+
+        if crash_level == "YÜKSEK":
+            notes.append("⚠️ Genel piyasa çöküş riski YÜKSEK görünüyor - yeni pozisyonlarda kaldıraç ve boyut küçültülmeli, nakit payı artırılabilir.")
+        elif crash_level == "ORTA":
+            notes.append("🟡 Genel piyasa çöküş riski ORTA seviyede - temkinli iyimserlik uygun, sıkı stop-loss kullanılmalı.")
+        else:
+            notes.append("🟢 Genel piyasa çöküş riski şu an DÜŞÜK - fırsat taraması için görece uygun bir ortam.")
+
+        if hottest:
+            top = hottest[0]
+            notes.append(f"🔥 En çok ısınmış varlık: {top.get('name')} ({top.get('status')}) - yeni alım için acele edilmemeli, kâr realizasyonu düşünülebilir.")
+
+        if cheapest:
+            top = cheapest[0]
+            notes.append(f"💡 Görece ucuz/soğuk kalmış varlık: {top.get('name')} (z-skor {safe_float(top.get('z_score')):+.2f}) - araştırma için aday olabilir.")
+
+        if book_value.get("overpriced_count", 0) > 0:
+            syms = ", ".join(book_value.get("overpriced_symbols", [])[:5])
+            notes.append(f"📊 Defter değerine göre pahalı hisseler: {syms} - yeni pozisyon açmadan önce büyüme gerekçesi sorgulanmalı.")
+
+        if financials.get("risky_count", 0) > 0:
+            syms = ", ".join(financials.get("risky_symbols", [])[:5])
+            notes.append(f"📉 Bilanço/nakit akışında risk bayrağı olan şirketler: {syms} - pozisyon büyüklüğü sınırlı tutulmalı.")
+
+        if positioning.get("alert_count", 0) > 0:
+            syms = ", ".join(positioning.get("alert_symbols", [])[:5])
+            notes.append(f"🚨 Manipülasyon/olağandışı pozisyonlanma uyarısı olan semboller: {syms} - işlem öncesi ekstra dikkat.")
+
+        active_titles = sector.get("active_scenario_titles", [])
+        if active_titles:
+            notes.append(f"🌐 Şu an aktif sektör senaryosu: {', '.join(active_titles)} - ilgili sektörlerdeki pozisyonlar gözden geçirilmeli.")
+
+        if overheat_count >= 5:
+            notes.append("📌 Geniş tabanlı ısınma var (5+ varlık/sektör) - portföy genelinde risk azaltma düşünülebilir.")
+
+        summary = " ".join(notes[:3]) if notes else "Bugün için özel bir uyarı yok, standart risk yönetimiyle devam edilebilir."
+
+        return {
+            "ok": True,
+            "date": now_text().split(" ")[0],
+            "crash_risk_level": crash_level,
+            "summary": summary,
+            "notes": notes,
+            "disclaimer": "Bu bir yatırım tavsiyesi değildir; istatistiksel/kural tabanlı bir özet niteliğindedir. Kendi araştırmanızı yapın.",
+            "time": now_text(),
+        }
+
+    return _cache_get_or_fetch("daily_investment_advice", 86400, _fetch)
+
+
 def build_dd_ai_dashboard() -> Dict[str, Any]:
     macro_raw = get_macro_dashboard_raw()
     regime_info = get_macro_regime()
@@ -5149,6 +5241,17 @@ def get_personal_cash_flow() -> Dict[str, Any]:
         ),
         "time": now_text(),
     }
+
+
+@app.route("/daily-investment-advice", methods=["GET"])
+def daily_investment_advice_endpoint():
+    """Günlük yatırım tavsiyesi: tüm profesyonel analiz motorlarını (balon/çöküş
+    riski, defter değeri, bilanço sağlığı, manipülasyon, sektör senaryoları)
+    günde 1 kez tarayıp kısa, aksiyona dönük Türkçe bir özet döner."""
+    try:
+        return jsonify(get_daily_investment_advice())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "summary": "", "notes": [], "time": now_text()}), 200
 
 
 @app.route("/personal-cash-flow", methods=["GET"])
