@@ -1908,6 +1908,164 @@ def get_macro_regime() -> Dict[str, Any]:
     return _cache_get_or_fetch("macro_regime", 14400, _fetch)
 
 
+_VALUATION_ASSETS: Dict[str, tuple] = {
+    "SPX": ("^GSPC", "S&P 500 (ABD Borsası)"),
+    "NASDAQ": ("^IXIC", "Nasdaq (Teknoloji Ağırlıklı)"),
+    "GOLD": ("GC=F", "Altın"),
+    "XLK": ("XLK", "Teknoloji Sektörü"),
+    "XLF": ("XLF", "Finans Sektörü"),
+    "XLE": ("XLE", "Enerji Sektörü"),
+    "XLV": ("XLV", "Sağlık Sektörü"),
+    "XLY": ("XLY", "Tüketici (İsteğe Bağlı) Sektörü"),
+    "SMH": ("SMH", "Yarı İletken (Çip) Sektörü"),
+    "BTC": ("BTC-USD", "Bitcoin"),
+}
+
+
+def get_valuation_bubble_analysis() -> Dict[str, Any]:
+    """ABD borsalari, altin ve ana sektorlerin son 1 yillik fiyat verisinden
+    istatistiksel 'asiri degerleme / balon' analizi uretir: 1 yillik getiri,
+    200 gunluk ortalamadan sapma, kendi 1 yillik ortalamasina gore z-skoru ve
+    yillik volatilite kullanilarak her varlik icin bir 'isinma skoru' hesaplanir.
+    VIX + Fear&Greed endeksiyle birlikte genel 'piyasa cokusu/duzeltme riski'
+    seviyesi (DUSUK/ORTA/YUKSEK) belirlenir. Yatirim tavsiyesi degil, istatistiksel
+    bir gosterge niteligindedir - agir yfinance cagrisi oldugu icin 6 saat cache'lenir."""
+    def _fetch():
+        import yfinance as yf
+
+        tickers = [t for t, _ in _VALUATION_ASSETS.values()]
+        data = yf.download(tickers, period="1y", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"] if "Close" in data else data
+        results: List[Dict[str, Any]] = []
+        overheat_count = 0
+
+        for key, (ticker, name) in _VALUATION_ASSETS.items():
+            try:
+                series = close[ticker].dropna() if ticker in close else close.dropna()
+                if len(series) < 60:
+                    continue
+                current = float(series.iloc[-1])
+                year_ago = float(series.iloc[0])
+                change_1y_pct = (current / year_ago - 1.0) * 100.0 if year_ago else 0.0
+                high_1y = float(series.max())
+                dist_from_high_pct = (current / high_1y - 1.0) * 100.0 if high_1y else 0.0
+                ma200 = float(series.tail(200).mean())
+                dist_from_ma200_pct = (current / ma200 - 1.0) * 100.0 if ma200 else 0.0
+                mean_price = float(series.mean())
+                std_price = float(series.std())
+                z_score = (current - mean_price) / std_price if std_price > 0 else 0.0
+                returns = series.pct_change().dropna()
+                ann_vol_pct = float(returns.std() * (252 ** 0.5) * 100.0) if len(returns) > 5 else 0.0
+                last_month_change_pct = (
+                    (float(series.iloc[-1]) / float(series.iloc[-21]) - 1.0) * 100.0 if len(series) > 21 else 0.0
+                )
+
+                score = 0
+                reasons: List[str] = []
+                if change_1y_pct > 40:
+                    score += 2
+                    reasons.append(f"1 yılda %{change_1y_pct:.0f} yükseliş (aşırı hızlı)")
+                elif change_1y_pct > 20:
+                    score += 1
+                    reasons.append(f"1 yılda %{change_1y_pct:.0f} yükseliş (güçlü)")
+                if dist_from_ma200_pct > 20:
+                    score += 2
+                    reasons.append(f"200 günlük ortalamanın %{dist_from_ma200_pct:.0f} üzerinde (aşırı uzamış)")
+                elif dist_from_ma200_pct > 10:
+                    score += 1
+                if z_score > 2:
+                    score += 2
+                    reasons.append(f"1 yıllık ortalamanın {z_score:.1f} standart sapma üzerinde (istatistiksel olarak aşırı)")
+                elif z_score > 1.2:
+                    score += 1
+                if dist_from_high_pct > -3:
+                    score += 1
+                    reasons.append("1 yılın zirvesine çok yakın")
+
+                if score >= 5:
+                    status = "BALON RİSKİ YÜKSEK"
+                elif score >= 3:
+                    status = "AŞIRI DEĞERLİ / ISINMIŞ"
+                elif score <= 0 and change_1y_pct < 0:
+                    status = "UCUZ / BASKI ALTINDA"
+                    reasons.append(f"1 yılda %{change_1y_pct:.0f} (negatif)")
+                else:
+                    status = "NORMAL"
+
+                if score >= 3:
+                    overheat_count += 1
+
+                results.append({
+                    "key": key,
+                    "name": name,
+                    "change_1y_pct": round(change_1y_pct, 2),
+                    "distance_from_1y_high_pct": round(dist_from_high_pct, 2),
+                    "distance_from_ma200_pct": round(dist_from_ma200_pct, 2),
+                    "z_score": round(z_score, 2),
+                    "annualized_volatility_pct": round(ann_vol_pct, 2),
+                    "last_month_change_pct": round(last_month_change_pct, 2),
+                    "overheat_score": score,
+                    "status": status,
+                    "reasons": reasons,
+                })
+            except Exception:
+                continue
+
+        vix_val = 0.0
+        try:
+            vix_data = try_yahoo_ticker("VIX")
+            vix_val = safe_float((vix_data or {}).get("price"))
+        except Exception:
+            pass
+
+        fg_val = 50.0
+        try:
+            fg = get_fear_greed_index()
+            fg_val = safe_float(fg.get("value")) if isinstance(fg, dict) and fg.get("value") is not None else 50.0
+        except Exception:
+            pass
+
+        crash_risk_score = 0
+        crash_reasons: List[str] = []
+        if overheat_count >= 4:
+            crash_risk_score += 2
+            crash_reasons.append(f"{overheat_count} varlık/sektör aşırı ısınmış görünüyor - geniş tabanlı balon riski")
+        elif overheat_count >= 2:
+            crash_risk_score += 1
+            crash_reasons.append(f"{overheat_count} varlık/sektör aşırı ısınmış görünüyor")
+        if 0 < vix_val < 14:
+            crash_risk_score += 1
+            crash_reasons.append(f"VIX çok düşük ({vix_val:.1f}) - piyasa aşırı rahat, sürpriz şoklara karşı savunmasız")
+        if fg_val >= 75:
+            crash_risk_score += 1
+            crash_reasons.append(f"Fear&Greed endeksi 'Aşırı Açgözlülük' bölgesinde ({fg_val:.0f})")
+
+        if crash_risk_score >= 3:
+            crash_risk_level = "YÜKSEK"
+            crash_summary = "Piyasada geniş tabanlı aşırı değerleme belirtileri var; sert bir düzeltme riski normalden yüksek."
+        elif crash_risk_score >= 1:
+            crash_risk_level = "ORTA"
+            crash_summary = "Bazı varlıklarda ısınma belirtileri var ama henüz sistemik bir çöküş sinyali yok."
+        else:
+            crash_risk_level = "DÜŞÜK"
+            crash_summary = "Şu an için geniş tabanlı bir balon/çöküş riski görünmüyor."
+
+        return {
+            "assets": results,
+            "overheat_count": overheat_count,
+            "vix": round(vix_val, 2) if vix_val else None,
+            "fear_greed_index": round(fg_val, 1) if fg_val else None,
+            "crash_risk_level": crash_risk_level,
+            "crash_risk_score": crash_risk_score,
+            "crash_risk_reasons": crash_reasons,
+            "summary": crash_summary,
+            "note": "Bu analiz istatistiksel bir yaklaşımdır (fiyat/ortalama sapması, volatilite, momentum); kesin bir öngörü değildir, yatırım tavsiyesi yerine geçmez.",
+            "time": now_text(),
+        }
+
+    return _cache_get_or_fetch("valuation_bubble_analysis", 21600, _fetch)
+
+
 def get_macro_dashboard_raw() -> Dict[str, Any]:
     """VIX/Nasdaq/S&P500/DXY/Altin/Petrol icin Yahoo Finance'tan canli fiyat
     ceker (2 dakika cache). iOS uygulamasindaki Piyasalar ekranindaki makro
@@ -1923,6 +2081,393 @@ def get_macro_dashboard_raw() -> Dict[str, Any]:
             out[key] = t
         return out
     return _cache_get_or_fetch("macro_dashboard_raw", 120, _fetch)
+
+
+def get_fundamental_valuation_analysis() -> Dict[str, Any]:
+    """Hisse senetleri icin defter degeri (book value) bazli temel degerleme
+    analizi: Piyasa Fiyati / Defter Degeri orani (P/B) hesaplanir. P/B ne kadar
+    yuksekse hisse, sirketin net oz kaynagina (varlik - borc) gore o kadar
+    'pahali' fiyatlanmis demektir - buyume beklentisi yuksek teknoloji hisselerinde
+    normal olabilir ama asiri yuksekse (>15) balon/asiri iyimserlik isareti sayilir.
+    IBKR watchlist'indeki hisseler + birkac buyuk sirket taranir. yfinance .info
+    cagrisi agir oldugu icin 6 saat cache'lenir, hata durumunda sessizce atlanir."""
+    def _fetch():
+        import yfinance as yf
+
+        symbols = sorted(set(_parse_symbol_list(_IBKR_WATCHLIST_DEFAULT)) | {
+            "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "F", "T", "GOOGL", "AMZN", "META",
+        })
+        results: List[Dict[str, Any]] = []
+        for sym in symbols:
+            try:
+                info = yf.Ticker(sym).info or {}
+                pb = safe_float(info.get("priceToBook"))
+                if pb <= 0:
+                    continue
+                book_value = safe_float(info.get("bookValue"))
+                price = safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+                pe = safe_float(info.get("trailingPE"))
+                name = str(info.get("shortName") or sym)
+
+                if pb > 15:
+                    status = "DEFTER DEĞERİNE GÖRE AŞIRI PAHALI"
+                elif pb > 8:
+                    status = "DEFTER DEĞERİNE GÖRE PAHALI"
+                elif 0 < pb < 1:
+                    status = "DEFTER DEĞERİNİN ALTINDA (UCUZ OLABİLİR)"
+                else:
+                    status = "NORMAL"
+
+                results.append({
+                    "symbol": sym,
+                    "name": name,
+                    "price_to_book": round(pb, 2),
+                    "book_value_per_share": round(book_value, 2) if book_value else None,
+                    "price": round(price, 2) if price else None,
+                    "pe_ratio": round(pe, 2) if pe else None,
+                    "status": status,
+                })
+            except Exception:
+                continue
+
+        overpriced = [r for r in results if "PAHALI" in r["status"]]
+        return {
+            "assets": results,
+            "overpriced_count": len(overpriced),
+            "overpriced_symbols": [r["symbol"] for r in overpriced],
+            "note": (
+                "P/B (Piyasa Fiyatı/Defter Değeri) oranı 8'in üzeri pahalı, 15'in üzeri aşırı "
+                "pahalı kabul edilir; sektöre göre değişebileceğinden kesin ölçü değildir."
+            ),
+            "time": now_text(),
+        }
+
+    return _cache_get_or_fetch("fundamental_valuation", 21600, _fetch)
+
+
+def _statement_row(df, candidates: List[str]) -> Optional[List[float]]:
+    """yfinance bilanco/nakit akis DataFrame'inden verilen olasi satir adlarindan
+    ilk bulunani sutun sirasiyla (en yeniden en eskiye) liste olarak dondurur."""
+    if df is None or df.empty:
+        return None
+    for name in candidates:
+        if name in df.index:
+            row = df.loc[name]
+            try:
+                return [float(v) for v in row.tolist() if v is not None and str(v) != "nan"]
+            except Exception:
+                continue
+    return None
+
+
+def get_financial_statement_analysis() -> Dict[str, Any]:
+    """Hisse senetleri icin profesyonel seviyede bilanco + gelir tablosu + nakit
+    akis tablosu analizi uretir:
+      - Borc/Oz Kaynak, Cari Oran (likidite)
+      - Serbest Nakit Akisi (FCF) seviyesi ve yillik trendi, Operasyonel Nakit Akisi
+      - ROE (Oz Kaynak Karliligi), ROA (Aktif Karliligi), Net Kar Marji
+      - Yillik Gelir Buyumesi (YoY), Faiz Karsilama Orani (EBIT/Faiz Gideri)
+      - Altman Z-Skoru (klasik iflas riski modeli - profesyonel kredi analistlerinin
+        kullandigi 5 degiskenli formul): Z = 1.2*A + 1.4*B + 3.3*C + 0.6*D + 1.0*E
+        (A=Isletme Sermayesi/Toplam Aktif, B=Dagitilmamis Kar/Toplam Aktif,
+         C=FVOK/Toplam Aktif, D=Piyasa Degeri/Toplam Borc, E=Satislar/Toplam Aktif)
+        Z > 2.99: Güvenli bölge, 1.81-2.99: Gri bölge, < 1.81: İflas riski bölgesi.
+    Yuksek borc/oz kaynak orani, negatif/azalan FCF, dusuk cari oran, dusuk/negatif
+    ROE-ROA ve dusuk Altman Z-skoru finansal risk isaretleri olarak raporlanir.
+    yfinance'in yillik bilanco/gelir tablosu/nakit akis verileri kullanilir (agir
+    cagri - 12 saat cache'lenir, sirket bazinda hata olursa o sirket sessizce atlanir)."""
+    def _fetch():
+        import yfinance as yf
+
+        symbols = sorted(set(_parse_symbol_list(_IBKR_WATCHLIST_DEFAULT)) | {
+            "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "F", "T", "GOOGL", "AMZN", "META",
+        })
+        results: List[Dict[str, Any]] = []
+        for sym in symbols:
+            try:
+                tk = yf.Ticker(sym)
+                bs = tk.balance_sheet
+                cf = tk.cashflow
+                inc = tk.financials
+                info = tk.info or {}
+
+                total_debt = _statement_row(bs, ["Total Debt"])
+                equity = _statement_row(bs, ["Stockholders Equity", "Total Stockholder Equity", "Common Stock Equity"])
+                current_assets = _statement_row(bs, ["Current Assets", "Total Current Assets"])
+                current_liabilities = _statement_row(bs, ["Current Liabilities", "Total Current Liabilities"])
+                total_assets = _statement_row(bs, ["Total Assets"])
+                total_liabilities = _statement_row(bs, ["Total Liabilities Net Minority Interest", "Total Liab"])
+                retained_earnings = _statement_row(bs, ["Retained Earnings"])
+
+                op_cf = _statement_row(cf, ["Operating Cash Flow", "Total Cash From Operating Activities"])
+                free_cf = _statement_row(cf, ["Free Cash Flow"])
+                capex = _statement_row(cf, ["Capital Expenditure", "Capital Expenditures"])
+
+                revenue = _statement_row(inc, ["Total Revenue"])
+                net_income = _statement_row(inc, ["Net Income"])
+                ebit = _statement_row(inc, ["EBIT", "Operating Income"])
+                interest_expense = _statement_row(inc, ["Interest Expense"])
+
+                if free_cf is None and op_cf and capex:
+                    free_cf = [o + c for o, c in zip(op_cf, capex)]  # capex negatif gelir, toplanir
+
+                if not equity or equity[0] == 0:
+                    continue
+
+                debt_to_equity = round((total_debt[0] / equity[0]), 2) if total_debt and equity[0] else None
+                current_ratio = (
+                    round(current_assets[0] / current_liabilities[0], 2)
+                    if current_assets and current_liabilities and current_liabilities[0]
+                    else None
+                )
+                fcf_latest = round(free_cf[0], 0) if free_cf else None
+                fcf_trend = None
+                if free_cf and len(free_cf) > 1 and free_cf[1] != 0:
+                    fcf_trend = round(((free_cf[0] - free_cf[1]) / abs(free_cf[1])) * 100.0, 1)
+                op_cf_latest = round(op_cf[0], 0) if op_cf else None
+
+                roe_pct = round((net_income[0] / equity[0]) * 100.0, 2) if net_income and equity[0] else None
+                roa_pct = (
+                    round((net_income[0] / total_assets[0]) * 100.0, 2)
+                    if net_income and total_assets and total_assets[0]
+                    else None
+                )
+                net_margin_pct = (
+                    round((net_income[0] / revenue[0]) * 100.0, 2) if net_income and revenue and revenue[0] else None
+                )
+                revenue_growth_pct = None
+                if revenue and len(revenue) > 1 and revenue[1] != 0:
+                    revenue_growth_pct = round(((revenue[0] - revenue[1]) / abs(revenue[1])) * 100.0, 1)
+                interest_coverage = None
+                if ebit and interest_expense and interest_expense[0]:
+                    interest_coverage = round(ebit[0] / abs(interest_expense[0]), 2)
+
+                # Altman Z-Skoru (imalat/genel sirketler icin klasik formul)
+                altman_z = None
+                market_cap = safe_float(info.get("marketCap"))
+                if total_assets and total_assets[0] and current_assets and current_liabilities and total_liabilities:
+                    working_capital = current_assets[0] - current_liabilities[0]
+                    a = working_capital / total_assets[0]
+                    b = (retained_earnings[0] / total_assets[0]) if retained_earnings else 0.0
+                    c = (ebit[0] / total_assets[0]) if ebit else 0.0
+                    d = (market_cap / total_liabilities[0]) if market_cap and total_liabilities[0] else 0.0
+                    e = (revenue[0] / total_assets[0]) if revenue else 0.0
+                    altman_z = round(1.2 * a + 1.4 * b + 3.3 * c + 0.6 * d + 1.0 * e, 2)
+
+                risk_flags: List[str] = []
+                if debt_to_equity is not None and debt_to_equity > 2:
+                    risk_flags.append(f"Borç/Öz Kaynak oranı yüksek ({debt_to_equity})")
+                if current_ratio is not None and current_ratio < 1:
+                    risk_flags.append(f"Cari oran 1'in altında ({current_ratio}) - kısa vadeli likidite riski")
+                if fcf_latest is not None and fcf_latest < 0:
+                    risk_flags.append("Serbest nakit akışı negatif (nakit yakıyor)")
+                if fcf_trend is not None and fcf_trend < -20:
+                    risk_flags.append(f"Serbest nakit akışı yıllık bazda %{abs(fcf_trend):.0f} geriledi")
+                if op_cf_latest is not None and op_cf_latest < 0:
+                    risk_flags.append("Operasyonel nakit akışı negatif")
+                if roe_pct is not None and roe_pct < 0:
+                    risk_flags.append(f"ROE (öz kaynak karlılığı) negatif (%{roe_pct})")
+                if net_margin_pct is not None and net_margin_pct < 0:
+                    risk_flags.append(f"Net kâr marjı negatif (%{net_margin_pct})")
+                if revenue_growth_pct is not None and revenue_growth_pct < -10:
+                    risk_flags.append(f"Gelir yıllık bazda %{abs(revenue_growth_pct):.0f} geriledi")
+                if interest_coverage is not None and interest_coverage < 2:
+                    risk_flags.append(f"Faiz karşılama oranı düşük ({interest_coverage}) - borç servisinde risk")
+                if altman_z is not None and altman_z < 1.81:
+                    risk_flags.append(f"Altman Z-Skoru iflas riski bölgesinde ({altman_z})")
+                elif altman_z is not None and altman_z < 2.99:
+                    risk_flags.append(f"Altman Z-Skoru gri bölgede ({altman_z})")
+
+                high_risk_flag_count = sum(
+                    1 for f in risk_flags if "iflas" in f or "negatif" in f or "yüksek" in f
+                )
+                if high_risk_flag_count >= 2 or (altman_z is not None and altman_z < 1.81):
+                    status = "FİNANSAL RİSK YÜKSEK"
+                elif len(risk_flags) >= 1:
+                    status = "DİKKAT"
+                else:
+                    status = "SAĞLIKLI"
+
+                results.append({
+                    "symbol": sym,
+                    "debt_to_equity": debt_to_equity,
+                    "current_ratio": current_ratio,
+                    "free_cash_flow": fcf_latest,
+                    "free_cash_flow_yoy_change_pct": fcf_trend,
+                    "operating_cash_flow": op_cf_latest,
+                    "roe_pct": roe_pct,
+                    "roa_pct": roa_pct,
+                    "net_margin_pct": net_margin_pct,
+                    "revenue_growth_yoy_pct": revenue_growth_pct,
+                    "interest_coverage": interest_coverage,
+                    "altman_z_score": altman_z,
+                    "status": status,
+                    "risk_flags": risk_flags,
+                })
+            except Exception:
+                continue
+
+        risky = [r for r in results if r["status"] != "SAĞLIKLI"]
+        return {
+            "assets": results,
+            "risky_count": len(risky),
+            "risky_symbols": [r["symbol"] for r in risky],
+            "note": (
+                "Profesyonel kredi/eşitlik analizi ölçütleri kullanılmıştır: Borç/Öz Kaynak > 2, "
+                "Cari Oran < 1, negatif FCF/ROE/Net Marj, Faiz Karşılama < 2 ve Altman Z-Skoru < 1.81 "
+                "(iflas riski bölgesi) risk göstergesi kabul edilir; sektöre göre değişebileceğinden "
+                "kesin ölçü değildir, yatırım tavsiyesi yerine geçmez."
+            ),
+            "time": now_text(),
+        }
+
+    return _cache_get_or_fetch("financial_statement_analysis", 43200, _fetch)
+
+
+def get_klines_volume_stats(symbol: str, market: str = "FUTURES", limit: int = 30) -> Optional[Dict[str, Any]]:
+    """Son N gunluk mum verisinden ortalama hacim ve son gunun hacim orani ile
+    fiyat/hacim uyumsuzlugunu hesaplar. Ani hacim patlamasi (ort. hacmin 3 kati+)
+    ama fiyat neredeyse yerinde sayiyorsa (ör. wash-trading/yapay hacim) veya
+    tam tersi cok dusuk hacimle sert fiyat hareketi (ince likidite/manipulasyon
+    kolayligi) varsa bunu tespit etmek icin kullanilir."""
+    try:
+        base = FUTURES_BASE if market.upper() == "FUTURES" else SPOT_BASE
+        path = "/fapi/v1/klines" if market.upper() == "FUTURES" else "/api/v3/klines"
+        data = public_get(base, path, {"symbol": symbol, "interval": "1d", "limit": limit})
+        if not isinstance(data, list) or len(data) < 5:
+            return None
+        volumes = [safe_float(row[5]) for row in data]
+        closes = [safe_float(row[4]) for row in data]
+        last_volume = volumes[-1]
+        prior_volumes = volumes[:-1]
+        avg_volume = (sum(prior_volumes) / len(prior_volumes)) if prior_volumes else 0.0
+        volume_ratio = (last_volume / avg_volume) if avg_volume > 0 else 0.0
+        last_price_change_pct = ((closes[-1] / closes[-2] - 1.0) * 100.0) if len(closes) > 1 and closes[-2] else 0.0
+        return {
+            "volume_ratio_vs_avg": round(volume_ratio, 2),
+            "last_day_change_pct": round(last_price_change_pct, 2),
+        }
+    except Exception:
+        return None
+
+
+def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
+    """Kripto icin: buyuk hesap (whale) long/short orani + fonlama orani (funding
+    rate) asiriliklarini ve hacim/fiyat uyumsuzluguna dayali olasi manipulasyon
+    (pump&dump, ani hacim patlamasi, asiri kaldiracli tek yonlu yigilma - short
+    squeeze/long squeeze riski) isaretlerini tarar.
+    Hisse senetleri icin: kisa pozisyon orani (short interest / float), kapanma
+    gunu sayisi (short ratio/days-to-cover - yuksekse short squeeze potansiyeli),
+    kurumsal ve icerden (insider) sahiplik oranlarini raporlar (yuksek kurumsal
+    sahiplik = 'akilli para' ilgisi, dusuk = spekulatif/perakende agirlikli).
+    Kripto tarafi 5 dakika, hisse tarafi (yfinance) 6 saat cache'lenir."""
+    def _fetch_crypto():
+        crypto_symbols = sorted(set(_parse_symbol_list(_BINANCE_WATCHLIST_DEFAULT)) | {"BTCUSDT", "ETHUSDT"})
+        results: List[Dict[str, Any]] = []
+        for sym in crypto_symbols:
+            try:
+                whale = get_whale_positioning(sym)
+                funding = get_funding_rate(sym)
+                vol_stats = get_klines_volume_stats(sym, "FUTURES")
+                ratio = safe_float(whale.get("long_short_ratio", 1.0))
+                funding_pct = safe_float(funding.get("funding_rate_pct"))
+
+                flags: List[str] = []
+                if ratio >= 2.5:
+                    flags.append(f"Büyük hesaplar aşırı long tarafında yığılmış (oran {ratio:.2f}) - long squeeze riski")
+                elif 0 < ratio <= 0.4:
+                    flags.append(f"Büyük hesaplar aşırı short tarafında yığılmış (oran {ratio:.2f}) - short squeeze riski")
+                if funding_pct >= 0.05:
+                    flags.append(f"Fonlama oranı aşırı pozitif (%{funding_pct:.3f}/8s) - kalabalık long, aşırı ısınma riski")
+                elif funding_pct <= -0.05:
+                    flags.append(f"Fonlama oranı aşırı negatif (%{funding_pct:.3f}/8s) - kalabalık short, sert yukarı sıçrama riski")
+                if vol_stats:
+                    vr = vol_stats.get("volume_ratio_vs_avg", 0)
+                    chg = abs(vol_stats.get("last_day_change_pct", 0))
+                    if vr >= 3.0 and chg < 1.5:
+                        flags.append(
+                            f"Hacim ortalamanın {vr:.1f} katına fırladı ama fiyat neredeyse yerinde saydı "
+                            f"(%{chg:.1f}) - yapay/wash-trading hacmi şüphesi"
+                        )
+                    elif vr < 0.3 and chg >= 4.0:
+                        flags.append(
+                            f"Çok düşük hacimle (ort.'nın %{vr*100:.0f}'i) sert fiyat hareketi (%{chg:.1f}) "
+                            "- ince likidite, manipülasyona açık"
+                        )
+
+                status = "MANİPÜLASYON RİSKİ / AŞIRI POZİSYONLANMA" if flags else "NORMAL"
+                results.append({
+                    "symbol": sym,
+                    "long_short_ratio": ratio,
+                    "long_account_pct": whale.get("long_account_pct"),
+                    "short_account_pct": whale.get("short_account_pct"),
+                    "funding_rate_pct": funding_pct,
+                    "volume_ratio_vs_avg": vol_stats.get("volume_ratio_vs_avg") if vol_stats else None,
+                    "last_day_change_pct": vol_stats.get("last_day_change_pct") if vol_stats else None,
+                    "status": status,
+                    "flags": flags,
+                })
+            except Exception:
+                continue
+        return results
+
+    def _fetch_stocks():
+        import yfinance as yf
+
+        symbols = sorted(set(_parse_symbol_list(_IBKR_WATCHLIST_DEFAULT)) | {
+            "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "F", "T", "GOOGL", "AMZN", "META",
+        })
+        results: List[Dict[str, Any]] = []
+        for sym in symbols:
+            try:
+                info = yf.Ticker(sym).info or {}
+                short_pct_float = safe_float(info.get("shortPercentOfFloat")) * 100.0
+                short_ratio_days = safe_float(info.get("shortRatio"))
+                institutional_pct = safe_float(info.get("heldPercentInstitutions")) * 100.0
+                insider_pct = safe_float(info.get("heldPercentInsiders")) * 100.0
+                if short_pct_float <= 0 and institutional_pct <= 0:
+                    continue
+
+                flags: List[str] = []
+                if short_pct_float >= 20:
+                    flags.append(f"Halka açık payın %{short_pct_float:.1f}'i açığa satılmış - aşırı short yığılması")
+                if short_ratio_days >= 8:
+                    flags.append(f"Kısa pozisyonları kapatmak {short_ratio_days:.1f} gün sürer - short squeeze potansiyeli yüksek")
+                if institutional_pct > 0 and institutional_pct < 20:
+                    flags.append(f"Kurumsal sahiplik düşük (%{institutional_pct:.1f}) - spekülatif/perakende ağırlıklı hareket riski")
+
+                status = "AŞIRI SHORT POZİSYONLANMA / SQUEEZE RİSKİ" if (short_pct_float >= 20 or short_ratio_days >= 8) else "NORMAL"
+                results.append({
+                    "symbol": sym,
+                    "short_percent_of_float_pct": round(short_pct_float, 2),
+                    "short_ratio_days_to_cover": round(short_ratio_days, 2) if short_ratio_days else None,
+                    "institutional_ownership_pct": round(institutional_pct, 2) if institutional_pct else None,
+                    "insider_ownership_pct": round(insider_pct, 2) if insider_pct else None,
+                    "status": status,
+                    "flags": flags,
+                })
+            except Exception:
+                continue
+        return results
+
+    def _fetch():
+        crypto = _fetch_crypto()
+        stocks = _cache_get_or_fetch("stock_positioning_raw", 21600, _fetch_stocks)
+        alerts = [r for r in crypto if r["status"] != "NORMAL"] + [r for r in stocks if r["status"] != "NORMAL"]
+        return {
+            "crypto_positioning": crypto,
+            "stock_positioning": stocks,
+            "alert_count": len(alerts),
+            "alert_symbols": [a["symbol"] for a in alerts],
+            "note": (
+                "Bu analiz kesin manipülasyon kanıtı değildir; aşırı pozisyonlanma, yüksek short "
+                "interest ve hacim/fiyat uyumsuzluğu gibi istatistiksel uyarı işaretlerini gösterir. "
+                "Squeeze riskleri her iki yönde de sert ve ani fiyat hareketlerine yol açabilir."
+            ),
+            "time": now_text(),
+        }
+
+    return _cache_get_or_fetch("market_positioning_manipulation", 300, _fetch)
 
 
 def build_dd_ai_dashboard() -> Dict[str, Any]:
@@ -4651,6 +5196,32 @@ def spot_auto_trader_positions():
         return jsonify({"ok": True, "positions": enriched, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "positions": [], "last_update": now_text()}), 200
+
+
+@app.route("/valuation-bubble-analysis", methods=["GET"])
+def valuation_bubble_analysis_endpoint():
+    """ABD borsalari (S&P500/Nasdaq), altin ve ana sektorlerin (teknoloji,
+    finans, enerji, saglik, yari iletken) + Bitcoin'in 1 yillik veriye dayali
+    asiri degerleme/balon ve genel piyasa cokusu/duzeltme riski analizini, ayrica
+    hisselerin defter degerine (P/B) gore asiri fiyatlanip fiyatlanmadigini ve
+    bilanco/nakit akis tablosu bazli profesyonel finansal saglik analizini dondurur."""
+    try:
+        payload = {"ok": True, **get_valuation_bubble_analysis()}
+        try:
+            payload["book_value_analysis"] = get_fundamental_valuation_analysis()
+        except Exception as e:
+            payload["book_value_analysis"] = {"assets": [], "error": str(e)}
+        try:
+            payload["financial_statement_analysis"] = get_financial_statement_analysis()
+        except Exception as e:
+            payload["financial_statement_analysis"] = {"assets": [], "error": str(e)}
+        try:
+            payload["positioning_and_manipulation_analysis"] = get_market_positioning_and_manipulation_analysis()
+        except Exception as e:
+            payload["positioning_and_manipulation_analysis"] = {"crypto_positioning": [], "stock_positioning": [], "error": str(e)}
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "assets": [], "time": now_text()}), 200
 
 
 @app.route("/market-signals/external", methods=["GET"])
