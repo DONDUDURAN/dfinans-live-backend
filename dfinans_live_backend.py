@@ -428,6 +428,21 @@ def init_runtime_db() -> None:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS balance_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    total_try REAL NOT NULL,
+                    binance_try REAL NOT NULL,
+                    ibkr_try REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_balance_snapshots_ts ON balance_snapshots(ts)"
+            )
             conn.commit()
         finally:
             conn.close()
@@ -605,6 +620,58 @@ def db_list_spot_positions() -> List[Dict[str, Any]]:
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+_LAST_BALANCE_SNAPSHOT_TS = 0.0
+_BALANCE_SNAPSHOT_MIN_INTERVAL_SEC = 600  # en fazla 10 dakikada bir yaz (DB'yi şişirmemek için)
+
+
+def db_record_balance_snapshot(total_try: float, binance_try: float, ibkr_try: float) -> None:
+    """Kişisel hesabın (Binance + IBKR toplamı) TRY cinsinden değerini periyodik
+    olarak kaydeder. Bu geçmiş, 'Net Para Akışı' hesaplamasının piyasa geneli
+    değil GERÇEKTEN kullanıcının kendi hesabındaki net değişimi göstermesini
+    sağlar (bugün/bu hafta hesabım ne kadar arttı/azaldı)."""
+    global _LAST_BALANCE_SNAPSHOT_TS
+    now_epoch = time.time()
+    if now_epoch - _LAST_BALANCE_SNAPSHOT_TS < _BALANCE_SNAPSHOT_MIN_INTERVAL_SEC:
+        return
+    if total_try <= 0:
+        return
+    _LAST_BALANCE_SNAPSHOT_TS = now_epoch
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                "INSERT INTO balance_snapshots (ts, created_at, total_try, binance_try, ibkr_try) VALUES (?, ?, ?, ?, ?)",
+                (now_epoch, now_text(), total_try, binance_try, ibkr_try),
+            )
+            # 90 günden eski kayıtları temizle (DB büyümesin).
+            conn.execute("DELETE FROM balance_snapshots WHERE ts < ?", (now_epoch - 90 * 86400,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_closest_balance_snapshot(hours_ago: float) -> Optional[Dict[str, Any]]:
+    """Belirtilen saat kadar once alinmis en yakin bakiye anlik goruntusunu
+    dondurur (tam o zamanda kayit olmayabilecegi icin en yakinini bulur)."""
+    target_ts = time.time() - hours_ago * 3600
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """
+                SELECT ts, created_at, total_try, binance_try, ibkr_try
+                FROM balance_snapshots
+                ORDER BY ABS(ts - ?) ASC
+                LIMIT 1
+                """,
+                (target_ts,),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
 
 
 def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
@@ -4640,7 +4707,12 @@ def get_portfolio() -> Dict[str, Any]:
     # Cache the result if successful
     if not any("error" in str(x).lower() for x in [spot, futures_positions]):
         set_cached_portfolio(result)
-    
+
+    try:
+        db_record_balance_snapshot(total_try + ibkr_try, total_try, ibkr_try)
+    except Exception:
+        pass
+
     return result
 
 
@@ -5037,6 +5109,57 @@ def symbols():
         return jsonify({"market": market, "symbols": rows[:500], "last_update": now_text()})
     except Exception as e:
         return jsonify({"market": market, "symbols": DEFAULT_SYMBOLS, "error": str(e), "last_update": now_text()}), 200
+
+
+def get_personal_cash_flow() -> Dict[str, Any]:
+    """Piyasa geneli 'net para akışı' göstergesinden (MarketFlowRisk) farklı olarak,
+    kullanıcının KENDİ hesabındaki (Binance + IBKR toplamı) gerçek değer değişimini
+    hesaplar. balance_snapshots tablosuna periyodik kaydedilen anlık görüntülerle
+    şimdiki değeri karşılaştırır."""
+    current = get_cached_portfolio() or get_portfolio()
+    current_total = safe_float((current.get("data") or {}).get("totalTry"))
+
+    def _delta(hours: float) -> Dict[str, Any]:
+        snap = db_closest_balance_snapshot(hours)
+        if not snap or current_total <= 0:
+            return {"available": False, "change_try": 0.0, "change_pct": 0.0, "from_time": None}
+        prev_total = safe_float(snap.get("total_try"))
+        if prev_total <= 0:
+            return {"available": False, "change_try": 0.0, "change_pct": 0.0, "from_time": snap.get("created_at")}
+        change_try = current_total - prev_total
+        change_pct = (change_try / prev_total) * 100.0
+        return {
+            "available": True,
+            "change_try": round(change_try, 2),
+            "change_pct": round(change_pct, 2),
+            "from_total_try": round(prev_total, 2),
+            "from_time": snap.get("created_at"),
+        }
+
+    return {
+        "ok": True,
+        "current_total_try": round(current_total, 2),
+        "today_24h": _delta(24),
+        "week_7d": _delta(24 * 7),
+        "month_30d": _delta(24 * 30),
+        "note": (
+            "Bu bölüm piyasa geneli para akışından farklıdır; SİZİN Binance+IBKR "
+            "hesabınızın toplam TRY değerindeki gerçek değişimi (yatırım/çekim + "
+            "kâr-zarar dahil net etki) gösterir."
+        ),
+        "time": now_text(),
+    }
+
+
+@app.route("/personal-cash-flow", methods=["GET"])
+def personal_cash_flow_endpoint():
+    """Kişisel hesap net para akışı: MarketsView'deki piyasa geneli akıştan farklı
+    olarak kullanıcının kendi Binance+IBKR toplam bakiyesindeki 24s/7g/30g gerçek
+    değişimi döner (önceden bu veri hiç yoktu, sadece piyasa geneli gösteriliyordu)."""
+    try:
+        return jsonify(get_personal_cash_flow())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "current_total_try": 0.0, "time": now_text()}), 200
 
 
 @app.route("/portfolio", methods=["GET"])
