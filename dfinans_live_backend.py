@@ -1917,6 +1917,8 @@ _VALUATION_ASSETS: Dict[str, tuple] = {
     "XLE": ("XLE", "Enerji Sektörü"),
     "XLV": ("XLV", "Sağlık Sektörü"),
     "XLY": ("XLY", "Tüketici (İsteğe Bağlı) Sektörü"),
+    "XLP": ("XLP", "Gıda/Temel Tüketim Sektörü"),
+    "ITA": ("ITA", "Savunma Sanayi Sektörü"),
     "SMH": ("SMH", "Yarı İletken (Çip) Sektörü"),
     "BTC": ("BTC-USD", "Bitcoin"),
 }
@@ -2468,6 +2470,283 @@ def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
         }
 
     return _cache_get_or_fetch("market_positioning_manipulation", 300, _fetch)
+
+
+_SECTOR_SCENARIO_PLAYBOOK: List[Dict[str, Any]] = [
+    {
+        "id": "chip_shortage",
+        "title": "Yarı İletken (Çip) Arz Sıkıntısı",
+        "trigger_key": "SMH",
+        "trigger_direction": "up",
+        "trigger_threshold": 8.0,
+        "narrative": (
+            "Yarı iletken sektöründe arz sıkıntısı/talep patlaması olduğunda: (1) Çip ÜRETİCİLERİ "
+            "(NVDA, AMD, TSM gibi) fiyatlama gücü kazanır, marjları genişler -> OLUMLU. "
+            "(2) Çip KULLANAN teknoloji donanım/otomotiv üreticileri girdi maliyeti artışı ve üretim "
+            "gecikmesi yaşar, kâr marjı baskılanır -> OLUMSUZ. (3) Otomotiv sektörü üretim durmalarına "
+            "kadar gidebilecek şekilde en çok etkilenen taraftır. (4) Orta vadede yüksek kâr, rakiplerin "
+            "yatırımını (yeni fabrika/kapasite) teşvik eder ve sıkıntı 12-24 ay içinde hafifler."
+        ),
+        "affected": [
+            {"sector": "Yarı iletken üreticileri (SMH, NVDA, AMD)", "impact": "OLUMLU", "reason": "Fiyatlama gücü ve marj genişlemesi"},
+            {"sector": "Teknoloji donanım/tüketici elektroniği", "impact": "OLUMSUZ", "reason": "Girdi maliyeti artışı, üretim gecikmesi"},
+            {"sector": "Otomotiv", "impact": "OLUMSUZ", "reason": "Çipsiz üretim durabilir"},
+        ],
+    },
+    {
+        "id": "war_geopolitical",
+        "title": "Savaş / Jeopolitik Kriz",
+        "trigger_key": "XLE",
+        "trigger_direction": "up",
+        "trigger_threshold": 8.0,
+        "narrative": (
+            "Savaş veya büyük jeopolitik kriz durumunda tipik zincirleme etki: (1) Enerji fiyatları "
+            "(petrol/doğalgaz) sıçrar -> enerji sektörü OLUMLU. (2) Savunma sanayi siparişleri artar -> "
+            "OLUMLU. (3) Gıda/tarım tedarik zinciri kesintiye uğrarsa (özellikle tahıl/gübre ihracatçısı "
+            "bölgeler etkilenirse) gıda fiyatları yükselir, gıda sektörü kârlılığı karışık (maliyet artışı "
+            "vs fiyatlama gücü). (4) Altın güvenli liman talebiyle yükselir -> OLUMLU. (5) Havayolları/"
+            "turizm yakıt maliyeti + talep düşüşüyle OLUMSUZ etkilenir. (6) Genel borsa risk-off modda "
+            "baskı altında kalır, VIX yükselir."
+        ),
+        "affected": [
+            {"sector": "Enerji (XLE)", "impact": "OLUMLU", "reason": "Petrol/doğalgaz fiyat şoku"},
+            {"sector": "Savunma Sanayi (ITA)", "impact": "OLUMLU", "reason": "Askeri harcama artışı"},
+            {"sector": "Altın", "impact": "OLUMLU", "reason": "Güvenli liman talebi"},
+            {"sector": "Gıda/Temel Tüketim (XLP)", "impact": "KARIŞIK", "reason": "Maliyet artışı vs fiyatlama gücü"},
+            {"sector": "Havayolları/Turizm", "impact": "OLUMSUZ", "reason": "Yakıt maliyeti ve talep düşüşü"},
+            {"sector": "Genel Borsa (SPX)", "impact": "OLUMSUZ", "reason": "Risk-off, VIX yükselişi"},
+        ],
+    },
+    {
+        "id": "rate_hike",
+        "title": "Faiz Artışı / Sıkı Para Politikası",
+        "trigger_key": "XLF",
+        "trigger_direction": "up",
+        "trigger_threshold": 6.0,
+        "narrative": (
+            "Merkez bankaları faiz artırdığında: (1) Teknoloji/büyüme hisseleri iskonto oranı artışıyla "
+            "OLUMSUZ etkilenir (gelecekteki nakit akışları bugüne daha düşük değerle iner). (2) Bankacılık/"
+            "finans sektörü net faiz marjı avantajıyla kısa vadede OLUMLU olabilir. (3) Emlak/REIT kredi "
+            "maliyeti artışıyla OLUMSUZ. (4) Altın, faizli enstrümanlara karşı fırsat maliyeti arttığı için "
+            "baskı altında kalır. (5) Dolar (DXY) genelde güçlenir."
+        ),
+        "affected": [
+            {"sector": "Teknoloji (XLK)", "impact": "OLUMSUZ", "reason": "İskonto oranı artışı, büyüme hisseleri baskılanır"},
+            {"sector": "Finans (XLF)", "impact": "OLUMLU", "reason": "Net faiz marjı genişlemesi"},
+            {"sector": "Emlak/REIT", "impact": "OLUMSUZ", "reason": "Kredi maliyeti artışı"},
+            {"sector": "Altın", "impact": "OLUMSUZ", "reason": "Fırsat maliyeti artışı"},
+        ],
+    },
+    {
+        "id": "dollar_strength",
+        "title": "Dolar Endeksi (DXY) Güçlenmesi",
+        "trigger_key": "DXY",
+        "trigger_direction": "up",
+        "trigger_threshold": 2.0,
+        "narrative": (
+            "Dolar güçlendiğinde: (1) Emtia (altın, petrol - dolar bazlı fiyatlanır) baskı altında kalır. "
+            "(2) Gelişen piyasalar ve gelişen piyasa para birimleri (TRY dahil) OLUMSUZ etkilenir, dış borç "
+            "servisi ağırlaşır. (3) ABD çok uluslu şirketlerinin (Apple, Microsoft gibi) yurt dışı geliri "
+            "kur çevirisinde küçülür -> hafif OLUMSUZ. (4) Kripto paralar genelde dolar likiditesi daraldığı "
+            "için baskı altında kalır."
+        ),
+        "affected": [
+            {"sector": "Altın/Emtia", "impact": "OLUMSUZ", "reason": "Dolar bazlı fiyatlama baskısı"},
+            {"sector": "Gelişen Piyasalar / TRY", "impact": "OLUMSUZ", "reason": "Dış borç servisi ağırlaşır"},
+            {"sector": "ABD Çok Uluslu Şirketleri", "impact": "HAFİF OLUMSUZ", "reason": "Kur çevirisi kaybı"},
+            {"sector": "Kripto (BTC)", "impact": "OLUMSUZ", "reason": "Dolar likiditesi daralması"},
+        ],
+    },
+    {
+        "id": "energy_crash",
+        "title": "Enerji Fiyatlarında Sert Düşüş",
+        "trigger_key": "XLE",
+        "trigger_direction": "down",
+        "trigger_threshold": -8.0,
+        "narrative": (
+            "Petrol/enerji fiyatları sert düştüğünde: (1) Enerji sektörü kârlılığı daralır -> OLUMSUZ. "
+            "(2) Havayolları/nakliye/lojistik girdi maliyeti düştüğü için OLUMLU. (3) Tüketici harcanabilir "
+            "geliri artar -> perakende/tüketici sektörü hafif OLUMLU. (4) Enflasyon baskısı azalır, bu da "
+            "merkez bankalarının gevşeme ihtimalini artırır -> teknoloji/büyüme hisseleri OLUMLU etkilenebilir."
+        ),
+        "affected": [
+            {"sector": "Enerji (XLE)", "impact": "OLUMSUZ", "reason": "Kârlılık daralması"},
+            {"sector": "Havayolları/Nakliye", "impact": "OLUMLU", "reason": "Yakıt maliyeti düşüşü"},
+            {"sector": "Teknoloji (XLK)", "impact": "OLUMLU", "reason": "Enflasyon baskısı azalması, gevşeme ihtimali"},
+        ],
+    },
+    {
+        "id": "ai_investment_boom",
+        "title": "Yapay Zeka (AI) Yatırım Patlaması",
+        "trigger_key": "SMH",
+        "trigger_direction": "up",
+        "trigger_threshold": 18.0,
+        "narrative": (
+            "Yapay zeka altyapısına dev yatırımlar hızlandığında: (1) Yarı iletken/çip üreticileri "
+            "(NVDA, AMD, TSM) talep patlamasıyla OLUMLU etkilenir. (2) Bulut/hiper-ölçek teknoloji "
+            "şirketleri (veri merkezi yatırımı yapanlar) hem yatırımcı ilgisi hem uzun vadeli verimlilik "
+            "kazancıyla OLUMLU. (3) Veri merkezlerinin devasa elektrik tüketimi enerji/elektrik "
+            "üreticilerine (özellikle nükleer ve doğalgaz) ek talep getirir -> OLUMLU. (4) Kısa vadede "
+            "aşırı sermaye harcaması (capex) nedeniyle bu şirketlerin serbest nakit akışı baskılanabilir "
+            "-> KARIŞIK. (5) Balon riski: değerlemeler hızla gerçek kazanç büyümesinin önüne geçerse "
+            "sert bir düzeltme riski oluşur."
+        ),
+        "affected": [
+            {"sector": "Yarı iletken (SMH, NVDA)", "impact": "OLUMLU", "reason": "Talep patlaması"},
+            {"sector": "Bulut/Büyük Teknoloji", "impact": "OLUMLU", "reason": "Uzun vadeli verimlilik, yatırımcı ilgisi"},
+            {"sector": "Enerji/Elektrik Üretimi", "impact": "OLUMLU", "reason": "Veri merkezi elektrik talebi"},
+            {"sector": "Genel Teknoloji Değerlemesi", "impact": "KARIŞIK", "reason": "Aşırı capex, balon riski"},
+        ],
+    },
+    {
+        "id": "recession_yield_curve",
+        "title": "Resesyon Riski / Getiri Eğrisi Tersine Dönmesi",
+        "trigger_key": "XLF",
+        "trigger_direction": "down",
+        "trigger_threshold": -8.0,
+        "narrative": (
+            "Resesyon sinyalleri güçlendiğinde (getiri eğrisi tersine döndüğünde veya finans "
+            "sektörü sert düştüğünde): (1) Döngüsel sektörler (finans, tüketici isteğe bağlı, "
+            "sanayi) kredi büyümesi yavaşlaması ve tüketici harcamalarının azalmasıyla OLUMSUZ "
+            "etkilenir. (2) Savunmacı sektörler (sağlık, gıda/temel tüketim, kamu hizmetleri) "
+            "talebin daha istikrarlı olması nedeniyle görece OLUMLU/dayanıklı kalır. (3) Devlet "
+            "tahvilleri faiz indirimi beklentisiyle değer kazanır. (4) Altın güvenli liman "
+            "talebiyle OLUMLU olabilir."
+        ),
+        "affected": [
+            {"sector": "Finans (XLF)", "impact": "OLUMSUZ", "reason": "Kredi büyümesi yavaşlaması"},
+            {"sector": "Tüketici İsteğe Bağlı (XLY)", "impact": "OLUMSUZ", "reason": "Harcama daralması"},
+            {"sector": "Sağlık (XLV) / Gıda (XLP)", "impact": "OLUMLU", "reason": "Savunmacı, istikrarlı talep"},
+            {"sector": "Altın", "impact": "OLUMLU", "reason": "Güvenli liman talebi"},
+        ],
+    },
+    {
+        "id": "agri_supply_shock",
+        "title": "Kuraklık / Tarımsal Arz Şoku",
+        "trigger_key": "XLP",
+        "trigger_direction": "up",
+        "trigger_threshold": 9.0,
+        "narrative": (
+            "Büyük tarım bölgelerinde kuraklık/kötü hasat veya ihracat kısıtlaması olduğunda: "
+            "(1) Gıda fiyatları küresel çapta yükselir; gıda ÜRETİCİLERİ (marka gücü olanlar) "
+            "fiyat artışını tüketiciye yansıtabiliyorsa OLUMLU, yansıtamıyorsa (rekabetin yoğun "
+            "olduğu segmentler) OLUMSUZ -> KARIŞIK. (2) Tarım girdisi/gübre üreticileri talep "
+            "artışıyla OLUMLU. (3) Perakende/restoran zincirleri girdi maliyeti artışıyla OLUMSUZ. "
+            "(4) Gelişmekte olan, gıda ithalatına bağımlı ülkelerde enflasyon baskısı ve sosyal "
+            "huzursuzluk riski artar."
+        ),
+        "affected": [
+            {"sector": "Gıda/Temel Tüketim (XLP)", "impact": "KARIŞIK", "reason": "Fiyat yansıtma gücüne bağlı"},
+            {"sector": "Tarım Girdisi/Gübre Üreticileri", "impact": "OLUMLU", "reason": "Talep artışı"},
+            {"sector": "Perakende/Restoran", "impact": "OLUMSUZ", "reason": "Girdi maliyeti artışı"},
+        ],
+    },
+    {
+        "id": "crypto_regulation_crackdown",
+        "title": "Kripto Para Düzenleme Sıkılaştırması",
+        "trigger_key": "BTC",
+        "trigger_direction": "down",
+        "trigger_threshold": -18.0,
+        "narrative": (
+            "Büyük ekonomilerde kripto para düzenlemesi sertleştiğinde (borsa yasakları, "
+            "vergi/KYC sıkılaştırması gibi): (1) Kripto piyasası (BTC, ETH ve altcoinler) "
+            "likidite çekilmesi ve kurumsal tereddütle OLUMSUZ etkilenir, volatilite artar. "
+            "(2) Geleneksel finans/borsa altyapısı şirketleri (düzenlenmiş borsalar, saklama "
+            "hizmetleri) uzun vadede kurumsal güven artışıyla OLUMLU olabilir. (3) Madencilik "
+            "şirketleri düzenleme + fiyat düşüşü kombinasyonuyla OLUMSUZ etkilenir."
+        ),
+        "affected": [
+            {"sector": "Kripto (BTC/ETH/Altcoin)", "impact": "OLUMSUZ", "reason": "Likidite çekilmesi, kurumsal tereddüt"},
+            {"sector": "Düzenlenmiş Borsa/Saklama Hizmetleri", "impact": "OLUMLU", "reason": "Uzun vadeli kurumsal güven"},
+            {"sector": "Kripto Madenciliği", "impact": "OLUMSUZ", "reason": "Düzenleme + fiyat düşüşü"},
+        ],
+    },
+    {
+        "id": "pandemic_lockdown",
+        "title": "Pandemi / Küresel Karantina Riski",
+        "trigger_key": "XLV",
+        "trigger_direction": "up",
+        "trigger_threshold": 12.0,
+        "narrative": (
+            "Küresel bir salgın/karantina senaryosunda: (1) Sağlık/ilaç ve biyoteknoloji "
+            "sektörü aşı/tedavi talebiyle OLUMLU etkilenir. (2) E-ticaret, bulut/uzaktan çalışma "
+            "teknolojileri ve kargo/lojistik talep patlamasıyla OLUMLU. (3) Havayolları, turizm, "
+            "perakende mağazacılık, restoran/eğlence sektörü talep çöküşüyle sert OLUMSUZ etkilenir. "
+            "(4) Enerji talebi (ulaşımın durmasıyla) düşer -> OLUMSUZ. (5) Merkez bankaları genelde "
+            "agresif parasal genişlemeye gider, bu da orta vadede risk varlıklarını (borsa, kripto) "
+            "destekler."
+        ),
+        "affected": [
+            {"sector": "Sağlık/İlaç (XLV)", "impact": "OLUMLU", "reason": "Aşı/tedavi talebi"},
+            {"sector": "E-ticaret/Bulut Teknoloji", "impact": "OLUMLU", "reason": "Uzaktan çalışma/alışveriş talebi"},
+            {"sector": "Havayolları/Turizm/Perakende", "impact": "OLUMSUZ", "reason": "Talep çöküşü"},
+            {"sector": "Enerji (XLE)", "impact": "OLUMSUZ", "reason": "Ulaşım talebi düşüşü"},
+        ],
+    },
+]
+
+
+def get_sector_scenario_analysis() -> Dict[str, Any]:
+    """Sektorler arasi neden-sonuc senaryo motoru: onceden tanimlanmis (yari
+    iletken arz sikintisi, savas/jeopolitik kriz, faiz artisi, dolar guclenmesi,
+    enerji cokusu gibi) senaryolarin gercek sektor ETF verisiyle (son 1 aylik
+    degisim - get_valuation_bubble_analysis) su an 'AKTIF' mi yoksa sadece
+    'IZLENIYOR' (henuz tetiklenmemis, bilgi amacli) durumda mi oldugunu belirler
+    ve her senaryo icin hangi sektorun nasil etkilenecegini (OLUMLU/OLUMSUZ/KARISIK)
+    Turkce anlatimla dondurur."""
+    def _fetch():
+        try:
+            valuation = get_valuation_bubble_analysis()
+            assets_by_key = {a["key"]: a for a in valuation.get("assets", [])}
+        except Exception:
+            assets_by_key = {}
+
+        dxy_change_1m = 0.0
+        try:
+            dxy_ticker = try_yahoo_ticker("DXY")
+            dxy_change_1m = safe_float((dxy_ticker or {}).get("change_24h"))
+        except Exception:
+            pass
+
+        scenarios_out: List[Dict[str, Any]] = []
+        for scenario in _SECTOR_SCENARIO_PLAYBOOK:
+            trigger_key = scenario["trigger_key"]
+            if trigger_key == "DXY":
+                measured_change = dxy_change_1m
+            else:
+                asset = assets_by_key.get(trigger_key)
+                measured_change = safe_float(asset.get("last_month_change_pct")) if asset else 0.0
+
+            threshold = scenario["trigger_threshold"]
+            direction = scenario["trigger_direction"]
+            is_active = (measured_change >= threshold) if direction == "up" else (measured_change <= threshold)
+
+            scenarios_out.append({
+                "id": scenario["id"],
+                "title": scenario["title"],
+                "status": "AKTİF" if is_active else "İZLENİYOR",
+                "trigger_sector": trigger_key,
+                "measured_change_pct": round(measured_change, 2),
+                "trigger_threshold_pct": threshold,
+                "narrative": scenario["narrative"],
+                "affected_sectors": scenario["affected"],
+            })
+
+        active_scenarios = [s for s in scenarios_out if s["status"] == "AKTİF"]
+        return {
+            "scenarios": scenarios_out,
+            "active_count": len(active_scenarios),
+            "active_scenario_titles": [s["title"] for s in active_scenarios],
+            "note": (
+                "Bu senaryolar tarihsel/ekonomik ilişkilere dayanan genel çerçevelerdir; kesin "
+                "öngörü değildir. 'AKTİF' etiketi, ilgili sektörün son 1 aylık gerçek hareketinin "
+                "senaryo eşiğini geçtiğini gösterir - yani senaryo şu an piyasada fiilen yaşanıyor "
+                "olabilir. 'İZLENİYOR' etiketi henüz tetiklenmediği ama bilgi amaçlı takip edildiği anlamına gelir."
+            ),
+            "time": now_text(),
+        }
+
+    return _cache_get_or_fetch("sector_scenario_analysis", 21600, _fetch)
 
 
 def build_dd_ai_dashboard() -> Dict[str, Any]:
@@ -5219,6 +5498,10 @@ def valuation_bubble_analysis_endpoint():
             payload["positioning_and_manipulation_analysis"] = get_market_positioning_and_manipulation_analysis()
         except Exception as e:
             payload["positioning_and_manipulation_analysis"] = {"crypto_positioning": [], "stock_positioning": [], "error": str(e)}
+        try:
+            payload["sector_scenario_analysis"] = get_sector_scenario_analysis()
+        except Exception as e:
+            payload["sector_scenario_analysis"] = {"scenarios": [], "error": str(e)}
         return jsonify(payload)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "assets": [], "time": now_text()}), 200
