@@ -2775,6 +2775,104 @@ _SECTOR_SCENARIO_PLAYBOOK: List[Dict[str, Any]] = [
 ]
 
 
+# Kullanicinin serbest metin senaryo sorusunu (dd AI analizi) yukaridaki playbook
+# senaryolariyla eslestirmek icin anahtar kelime haritasi.
+_SCENARIO_KEYWORDS: Dict[str, List[str]] = {
+    "chip_shortage": ["çip", "cip", "yarı iletken", "yari iletken", "semiconductor", "nvidia", "amd", "tsm"],
+    "war_geopolitical": ["savaş", "savas", "jeopolitik", "çatışma", "catisma", "kriz", "gerginlik", "işgal", "isgal"],
+    "rate_hike": ["faiz", "fed", "merkez bankası", "merkez bankasi", "sıkı para", "siki para", "powell"],
+    "dollar_strength": ["dolar", "dxy", "dolar endeksi"],
+    "energy_crash": ["petrol", "enerji", "opec", "brent", "wti", "doğalgaz", "dogalgaz"],
+    "ai_investment_boom": ["yapay zeka", "ai yatırım", "ai yatirim", "nvidia", "veri merkezi", "gpu"],
+    "recession_yield_curve": ["resesyon", "durgunluk", "getiri eğrisi", "getiri egrisi", "tahvil", "işsizlik", "issizlik"],
+    "agri_supply_shock": ["tarım", "tarim", "gıda", "gida", "buğday", "bugday", "kuraklık", "kuraklik", "hasat"],
+    "crypto_regulation_crackdown": ["kripto regülasyon", "kripto regulasyon", "sec", "yasak", "düzenleme", "duzenleme", "kripto yasağı", "kripto yasagi"],
+    "pandemic_lockdown": ["pandemi", "salgın", "salgin", "karantina", "lockdown", "virüs", "virus"],
+}
+
+
+def analyze_user_scenario(scenario_text: str) -> Dict[str, Any]:
+    """Kullanicinin dd AI analizi ekranina yazdigi serbest metin senaryoyu
+    (ornegin 'Fed faiz indirirse BTC, altin ve Nasdaq nasil etkilenir?') analiz
+    eder. Onceden sabit/hardcoded bir metin donduruluyordu; artik metindeki
+    anahtar kelimeler _SECTOR_SCENARIO_PLAYBOOK ile eslestirilip, eslesen
+    senaryolarin GERCEK guncel piyasa verisiyle hesaplanmis AKTIF/IZLENIYOR
+    durumu ve anlatimi kullanilarak, ayrica genel makro arka planla (VIX,
+    coküş riski, Korku/Acgozluluk endeksi) birlikte kisisellestirilmis bir
+    Turkce yanit uretilir."""
+    text_lower = (scenario_text or "").lower()
+
+    matched_ids: List[str] = []
+    for scenario_id, keywords in _SCENARIO_KEYWORDS.items():
+        if any(kw in text_lower for kw in keywords):
+            matched_ids.append(scenario_id)
+
+    try:
+        sector_data = get_sector_scenario_analysis()
+        scenarios_by_id = {s["id"]: s for s in sector_data.get("scenarios", [])}
+    except Exception:
+        scenarios_by_id = {}
+
+    try:
+        valuation = get_valuation_bubble_analysis()
+    except Exception:
+        valuation = {}
+
+    crash_level = valuation.get("crash_risk_level", "BİLİNMİYOR")
+    vix = safe_float(valuation.get("vix"))
+    fear_greed = safe_float(valuation.get("fear_greed_index"))
+    overheat_count = valuation.get("overheat_count", 0)
+
+    macro_backdrop = (
+        f"Güncel makro arka plan: VIX {vix:.1f}, Korku/Açgözlülük Endeksi {fear_greed:.0f}, "
+        f"genel çöküş riski '{crash_level}', {overheat_count} varlık/sektörde aşırı ısınma belirtisi var."
+    )
+
+    matched_blocks: List[str] = []
+    for sid in matched_ids:
+        s = scenarios_by_id.get(sid)
+        if not s:
+            continue
+        sector_lines = "\n".join(
+            f"   - {a['sector']}: {a['impact']} ({a['reason']})" for a in s.get("affected_sectors", [])
+        )
+        matched_blocks.append(
+            f"📌 {s['title']} [{s['status']}]\n{s['narrative']}\n{sector_lines}"
+        )
+
+    if matched_blocks:
+        result_text = (
+            "dd Senaryo Analizi (sorunuzla ilişkili gerçek zamanlı senaryolar bulundu):\n\n"
+            + "\n\n".join(matched_blocks)
+            + "\n\n"
+            + macro_backdrop
+            + "\n\nSonuç: Yukarıdaki senaryo(lar) şu an piyasada ölçülen gerçek veriye göre "
+            + ("AKTİF durumda - yani fiilen yaşanıyor olabilir." if any(scenarios_by_id.get(i, {}).get("status") == "AKTİF" for i in matched_ids) else "henüz tetiklenmemiş, izleniyor.")
+            + " İşlem açmadan önce güven skoru, kaldıraç ve hedge ihtiyacını ayrıca değerlendirin."
+        )
+    else:
+        result_text = (
+            "dd Senaryo Analizi (girdiğiniz metinde tanımlı bir senaryo şablonuyla doğrudan eşleşme bulunamadı, "
+            "genel güncel piyasa verisiyle değerlendirme yapıldı):\n\n"
+            + macro_backdrop
+            + "\n\nGenel değerlendirme:\n"
+            + ("• Risk-off/temkinli ortam: VIX yüksek, kaldıraç ve pozisyon büyüklüğü azaltılmalı.\n" if vix > 22 else "• Risk ortamı görece sakin (VIX normal seviyede).\n")
+            + ("• Aşırı ısınma/balon riski geniş tabanlı, yeni pozisyonlarda temkinli olunmalı.\n" if overheat_count >= 4 else "")
+            + "• Senaryonuzu daha spesifik anahtar kelimelerle (faiz, savaş, dolar, petrol, çip, resesyon, kripto regülasyon, pandemi, yapay zeka, tarım/gıda) yazarsanız ilgili gerçek zamanlı sektör etkisini de gösterebilirim."
+        )
+
+    return {
+        "ok": True,
+        "scenario_text": scenario_text,
+        "matched_scenarios": matched_ids,
+        "result_text": result_text,
+        "crash_risk_level": crash_level,
+        "vix": vix,
+        "fear_greed_index": fear_greed,
+        "time": now_text(),
+    }
+
+
 def get_sector_scenario_analysis() -> Dict[str, Any]:
     """Sektorler arasi neden-sonuc senaryo motoru: onceden tanimlanmis (yari
     iletken arz sikintisi, savas/jeopolitik kriz, faiz artisi, dolar guclenmesi,
@@ -5638,6 +5736,25 @@ def spot_auto_trader_positions():
         return jsonify({"ok": True, "positions": enriched, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "positions": [], "last_update": now_text()}), 200
+
+
+@app.route("/ai-scenario-analysis", methods=["POST"])
+def ai_scenario_analysis_endpoint():
+    """iOS 'DD AI analizi' (AICenterView) icin serbest metin senaryo analizi.
+    Body: {"scenario": "Fed faiz indirirse BTC, altin ve Nasdaq nasil etkilenir?"}
+    Onceden bu ekran her zaman ayni sabit metni donduruyordu (kullanici girdisi
+    tamamen goz ardi ediliyordu); artik kullanicinin yazdigi metin gercekten
+    okunup, ilgili senaryo(lar) ve guncel piyasa verisiyle kisisellestirilmis
+    bir yanit uretiliyor."""
+    try:
+        body = request.get_json(silent=True) or {}
+        scenario_text = str(body.get("scenario") or body.get("text") or "").strip()
+        if not scenario_text:
+            return jsonify({"ok": False, "error": "scenario metni bos olamaz"}), 400
+        result = analyze_user_scenario(scenario_text)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "result_text": "Analiz sırasında bir hata oluştu, lütfen tekrar deneyin."}), 200
 
 
 @app.route("/valuation-bubble-analysis", methods=["GET"])
