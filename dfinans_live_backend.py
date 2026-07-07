@@ -1167,7 +1167,7 @@ def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, curren
 
 
 _IBKR_SNAPSHOT_CACHE: Dict[str, Any] = {}
-_IBKR_SNAPSHOT_CACHE_TTL_SEC = 4.0
+_IBKR_SNAPSHOT_CACHE_TTL_SEC = 2.0
 
 # --- Toplu (batched) fiyat sorgulama ---
 # Mobil uygulama ayni anda (Piyasalar ekrani, Islem merkezi, Ekonomi Radari vb.)
@@ -1253,7 +1253,10 @@ def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
             except Exception as e:
                 item["error"] = str(e)
         if tickers:
-            ib.sleep(2.5)
+            # Onceden 2.5sn bekleniyordu; delayed (type 3) veri genelde 1-1.2sn
+            # icinde populate oluyor, gereksiz beklemeyi kisaltmak toplam
+            # gecikmeyi (cache TTL + bu bekleme) azaltir.
+            ib.sleep(1.2)
         for item in batch_items:
             key = item["cache_key"]
             if item.get("error"):
