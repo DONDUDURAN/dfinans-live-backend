@@ -1877,7 +1877,96 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
     return {"bias": max(-16, min(16, bias)), "notes": notes}
 
 
-def get_macro_regime() -> Dict[str, Any]:
+def get_macro_risk_bias(symbol: str, action: str) -> Dict[str, Any]:
+    """Balon/asiri degerleme, bilanco/nakit akis sagligi, short/long pozisyonlanma
+    ve manipulasyon taramasi, ve sektorler arasi senaryo analizini (hepsi
+    /valuation-bubble-analysis'te de gosterilen ayni veriler) AI karar mekanizmasina
+    baglar - boylece bu analizler sadece ekranda gorunmekle kalmaz, otomatik
+    alim-satim kararlarini da etkiler. Agir olan tum alt fonksiyonlar zaten
+    6-12 saat cache'li oldugu icin burada ek maliyet yaratmaz."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+
+    bias = 0
+    notes: List[str] = []
+
+    try:
+        valuation = get_valuation_bubble_analysis()
+        if valuation.get("crash_risk_level") == "YÜKSEK" and action == "BUY":
+            bias -= 8
+            notes.append(f"Genel piyasa çöküş/düzeltme riski YÜKSEK ({valuation.get('summary', '')}): yeni alım riskli.")
+        elif valuation.get("crash_risk_level") == "YÜKSEK" and action == "SELL":
+            bias += 3
+            notes.append("Genel piyasa çöküş/düzeltme riski YÜKSEK: SELL'i hafif destekler.")
+
+        asset_key = None
+        base_symbol = symbol.replace("USDT", "").replace("USD", "").upper()
+        if base_symbol == "BTC":
+            asset_key = "BTC"
+        for a in valuation.get("assets", []):
+            if a.get("key") == asset_key and action == "BUY" and a.get("overheat_score", 0) >= 3:
+                bias -= 5
+                notes.append(f"{a.get('name')} istatistiksel olarak aşırı ısınmış ({a.get('status')}): alım riski artıyor.")
+    except Exception:
+        pass
+
+    try:
+        book_val = get_fundamental_valuation_analysis()
+        for a in book_val.get("assets", []):
+            if a.get("symbol") == symbol and "PAHALI" in str(a.get("status", "")) and action == "BUY":
+                bias -= 4
+                notes.append(f"{symbol} defter değerine göre pahalı (P/B {a.get('price_to_book')}): alım riski artıyor.")
+    except Exception:
+        pass
+
+    try:
+        fin = get_financial_statement_analysis()
+        for a in fin.get("assets", []):
+            if a.get("symbol") == symbol and a.get("status") == "FİNANSAL RİSK YÜKSEK" and action == "BUY":
+                bias -= 5
+                notes.append(f"{symbol} bilanço/nakit akışı zayıf (Altman Z: {a.get('altman_z_score')}): alım riski artıyor.")
+    except Exception:
+        pass
+
+    try:
+        positioning = get_market_positioning_and_manipulation_analysis()
+        for a in positioning.get("crypto_positioning", []) + positioning.get("stock_positioning", []):
+            if a.get("symbol") == symbol and a.get("status") != "NORMAL":
+                bias -= 4
+                flag_text = "; ".join(a.get("flags", [])[:1])
+                notes.append(f"{symbol} için pozisyonlanma/manipülasyon uyarısı: {flag_text}")
+    except Exception:
+        pass
+
+    try:
+        scenarios = get_sector_scenario_analysis()
+        for s in scenarios.get("scenarios", []):
+            if s.get("status") != "AKTİF":
+                continue
+            for affected in s.get("affected_sectors", []):
+                sector_text = str(affected.get("sector", ""))
+                if base_symbol not in sector_text.upper() and symbol not in sector_text.upper():
+                    continue
+                impact = affected.get("impact")
+                if impact == "OLUMLU" and action == "BUY":
+                    bias += 3
+                    notes.append(f"Aktif senaryo '{s.get('title')}': {sector_text} için OLUMLU, BUY'ı destekler.")
+                elif impact == "OLUMSUZ" and action == "SELL":
+                    bias += 3
+                    notes.append(f"Aktif senaryo '{s.get('title')}': {sector_text} için OLUMSUZ, SELL'i destekler.")
+                elif impact == "OLUMSUZ" and action == "BUY":
+                    bias -= 3
+                    notes.append(f"Aktif senaryo '{s.get('title')}': {sector_text} için OLUMSUZ, alım riski artıyor.")
+                elif impact == "OLUMLU" and action == "SELL":
+                    bias -= 3
+                    notes.append(f"Aktif senaryo '{s.get('title')}': {sector_text} için OLUMLU, satış riski artıyor.")
+    except Exception:
+        pass
+
+    return {"bias": max(-16, min(16, bias)), "notes": notes}
+
+
+
     """SP500 ve Dolar Endeksi'nin son 5 islem gunu momentumuna gore 'risk rejimi' belirler.
     Tarihsel analize gore (bkz. 5 yillik senaryo calismasi):
       - Borsa YUKARI + Dolar ASAGI/notr  -> RISK_ON  (BTC ort. +1.20%/gun)
@@ -3349,6 +3438,14 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + ext["bias"]))
         if ext["notes"]:
             reason = (reason + " " + " ".join(ext["notes"])).strip()
+
+        # Balon/asiri degerleme, bilanco sagligi, short/long pozisyonlanma-manipulasyon
+        # ve sektorler arasi aktif senaryo analizini de karar mekanizmasina dahil et.
+        macro_risk = get_macro_risk_bias(symbol, action)
+        if macro_risk["bias"] != 0:
+            confidence = max(0, min(95, confidence + macro_risk["bias"]))
+        if macro_risk["notes"]:
+            reason = (reason + " " + " ".join(macro_risk["notes"])).strip()
     resolve_learning(symbol, price)
 
     with lock:
