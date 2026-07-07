@@ -279,6 +279,9 @@ MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "5"))
 LAST_ORDER_TIME: Dict[str, float] = {}
 MIN_ORDER_COOLDOWN_SEC = float(os.getenv("MIN_ORDER_COOLDOWN_SEC", "2.0"))
 BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "5.0"))
+BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
+IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "6.0"))
+IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
 
 # Varlik bazli pozisyon boyutlandirma: her BUY/SELL sinyalinde sabit miktar yerine,
 # bosta bekleyen (available) Binance futures USDT bakiyesinin belirli bir yuzdesi
@@ -2218,11 +2221,13 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
         if tp_execution:
             with lock:
                 fallback_symbol = symbols[0] if symbols else normalize_symbol(state.symbol)
-                state.last_action = "TAKE_PROFIT"
+                trigger_label = "STOP_LOSS" if tp_execution.get("trigger") == "stop_loss_roi_pct" else "TAKE_PROFIT"
+                state.last_action = trigger_label
                 state.last_confidence = 100
+                target_pct = tp_execution.get("target_pct", BINANCE_TAKE_PROFIT_PCT)
                 state.last_reason = (
                     f"{tp_execution.get('symbol', fallback_symbol)} için %"
-                    f"{tp_execution.get('target_pct', BINANCE_TAKE_PROFIT_PCT)} kâr hedefi tetiklendi."
+                    f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if trigger_label == 'STOP_LOSS' else 'kâr hedefi'} tetiklendi."
                 )
                 state.last_price = 0.0
                 state.last_update = now_text()
@@ -2234,7 +2239,7 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                         "time": state.last_update,
                         "broker": broker,
                         "symbol": tp_execution.get("symbol", fallback_symbol),
-                        "action": "TAKE_PROFIT",
+                        "action": trigger_label,
                         "confidence": 100,
                         "price": 0.0,
                         "reason": state.last_reason,
@@ -2245,11 +2250,53 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                 db_insert_auto_history(
                     broker=broker,
                     symbol=str(tp_execution.get("symbol", fallback_symbol)),
-                    action="TAKE_PROFIT",
+                    action=trigger_label,
                     confidence=100,
                     price=0.0,
                     reason=state.last_reason,
                     execution=tp_execution,
+                )
+            return
+
+    if broker == "IBKR":
+        ibkr_tp_execution = enforce_ibkr_take_profit_stop_loss(channel="auto_take_profit")
+        if ibkr_tp_execution:
+            with lock:
+                fallback_symbol = symbols[0] if symbols else normalize_symbol(state.symbol)
+                trigger_label = "STOP_LOSS" if ibkr_tp_execution.get("trigger") == "stop_loss_roi_pct" else "TAKE_PROFIT"
+                state.last_action = trigger_label
+                state.last_confidence = 100
+                target_pct = ibkr_tp_execution.get("target_pct", IBKR_TAKE_PROFIT_PCT)
+                state.last_reason = (
+                    f"{ibkr_tp_execution.get('symbol', fallback_symbol)} için %"
+                    f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if trigger_label == 'STOP_LOSS' else 'kâr hedefi'} tetiklendi."
+                )
+                state.last_price = 0.0
+                state.last_update = now_text()
+                state.last_error = str(ibkr_tp_execution.get("error", "") or "")
+                state.updated_at_epoch = time.time()
+                history.insert(
+                    0,
+                    {
+                        "time": state.last_update,
+                        "broker": broker,
+                        "symbol": ibkr_tp_execution.get("symbol", fallback_symbol),
+                        "action": trigger_label,
+                        "confidence": 100,
+                        "price": 0.0,
+                        "reason": state.last_reason,
+                        "execution": ibkr_tp_execution,
+                    },
+                )
+                del history[300:]
+                db_insert_auto_history(
+                    broker=broker,
+                    symbol=str(ibkr_tp_execution.get("symbol", fallback_symbol)),
+                    action=trigger_label,
+                    confidence=100,
+                    price=0.0,
+                    reason=state.last_reason,
+                    execution=ibkr_tp_execution,
                 )
             return
 
@@ -2774,7 +2821,10 @@ def binance_position_profit_pct(position: Dict[str, Any]) -> float:
 
 
 def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any]]:
-    if BINANCE_TAKE_PROFIT_PCT <= 0:
+    """Binance futures pozisyonlarinda hem kar-al (BINANCE_TAKE_PROFIT_PCT) hem de
+    zarar-kes (BINANCE_STOP_LOSS_PCT) esiklerini kontrol eder. Onceden sadece
+    kar-al vardi; hesap zarar yonunde sinirsiz acik kalabiliyordu."""
+    if BINANCE_TAKE_PROFIT_PCT <= 0 and BINANCE_STOP_LOSS_PCT <= 0:
         return None
     positions = [
         p for p in get_futures_positions()
@@ -2782,14 +2832,17 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
     ]
     for position in positions:
         profit_pct = binance_position_profit_pct(position)
-        if profit_pct < BINANCE_TAKE_PROFIT_PCT:
+        hit_take_profit = BINANCE_TAKE_PROFIT_PCT > 0 and profit_pct >= BINANCE_TAKE_PROFIT_PCT
+        hit_stop_loss = BINANCE_STOP_LOSS_PCT > 0 and profit_pct <= -BINANCE_STOP_LOSS_PCT
+        if not hit_take_profit and not hit_stop_loss:
             continue
         symbol = str(position.get("symbol", "")).upper()
         size = abs(safe_float(position.get("size")))
         if not symbol or size <= 0:
             continue
         close_side = "SELL" if str(position.get("side", "")).upper() == "LONG" else "BUY"
-        request_id = f"tp-{symbol}-{int(time.time())}"
+        trigger = "take_profit_roi_pct" if hit_take_profit else "stop_loss_roi_pct"
+        request_id = f"{'tp' if hit_take_profit else 'sl'}-{symbol}-{int(time.time())}"
         result = place_futures_order(
             symbol,
             close_side,
@@ -2798,9 +2851,72 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
             request_id=request_id,
             channel=channel,
         )
-        result["trigger"] = "take_profit_roi_pct"
+        result["trigger"] = trigger
         result["trigger_pct"] = round(profit_pct, 4)
-        result["target_pct"] = BINANCE_TAKE_PROFIT_PCT
+        result["target_pct"] = BINANCE_TAKE_PROFIT_PCT if hit_take_profit else -BINANCE_STOP_LOSS_PCT
+        return result
+    return None
+
+
+def ibkr_position_profit_pct(position: Dict[str, Any]) -> float:
+    """IBKR hisse pozisyonu icin maliyet bazli kar/zarar yuzdesini hesaplar."""
+    avg_cost = safe_float(position.get("avgCost") or position.get("entry_price"))
+    pnl = safe_float(position.get("pnl"))
+    qty = abs(safe_float(position.get("position") or position.get("size")))
+    if avg_cost > 0 and qty > 0:
+        cost_basis = avg_cost * qty
+        if cost_basis > 0:
+            return (pnl / cost_basis) * 100.0
+    mark = safe_float(position.get("mark_price"))
+    if avg_cost > 0 and mark > 0:
+        side = str(position.get("side", "LONG")).upper()
+        raw_pct = ((mark - avg_cost) / avg_cost) * 100.0
+        return raw_pct if side == "LONG" else -raw_pct
+    return 0.0
+
+
+def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Optional[Dict[str, Any]]:
+    """IBKR hisse pozisyonlarinda kar-al (IBKR_TAKE_PROFIT_PCT) ve zarar-kes
+    (IBKR_STOP_LOSS_PCT) esiklerini kontrol eder, esik asilirsa pozisyonu piyasa
+    emriyle kapatir. Onceden IBKR icin HICBIR otomatik kar-al/zarar-kes mekanizmasi
+    yoktu - pozisyonlar sinirsiz acik kalabiliyordu."""
+    if IBKR_TAKE_PROFIT_PCT <= 0 and IBKR_STOP_LOSS_PCT <= 0:
+        return None
+    if not bool(IBKR_RUNTIME.get("connected")):
+        return None
+    try:
+        positions = ibkr_positions_snapshot()
+    except Exception:
+        return None
+    for position in positions:
+        qty = abs(safe_float(position.get("position") or position.get("size")))
+        if qty <= 0:
+            continue
+        profit_pct = ibkr_position_profit_pct(position)
+        hit_take_profit = IBKR_TAKE_PROFIT_PCT > 0 and profit_pct >= IBKR_TAKE_PROFIT_PCT
+        hit_stop_loss = IBKR_STOP_LOSS_PCT > 0 and profit_pct <= -IBKR_STOP_LOSS_PCT
+        if not hit_take_profit and not hit_stop_loss:
+            continue
+        symbol = str(position.get("symbol", "")).upper()
+        if not symbol:
+            continue
+        side = str(position.get("side", "LONG")).upper()
+        close_side = "SELL" if side == "LONG" else "BUY"
+        asset_type = str(position.get("asset_type") or position.get("secType") or "STK").upper()
+        exchange = str(position.get("exchange") or "SMART").upper()
+        currency = str(position.get("currency") or "USD").upper()
+        trigger = "take_profit_roi_pct" if hit_take_profit else "stop_loss_roi_pct"
+        try:
+            result = ibkr_place_market_order(
+                symbol, close_side, qty, asset_type, exchange, currency,
+                request_id=f"ibkr-{'tp' if hit_take_profit else 'sl'}-{symbol}-{int(time.time())}",
+            )
+        except Exception as e:
+            result = {"simulated": False, "broker": "IBKR", "symbol": symbol, "error": str(e), "time": now_text()}
+        result["trigger"] = trigger
+        result["trigger_pct"] = round(profit_pct, 4)
+        result["target_pct"] = IBKR_TAKE_PROFIT_PCT if hit_take_profit else -IBKR_STOP_LOSS_PCT
+        result["symbol"] = symbol
         return result
     return None
 
