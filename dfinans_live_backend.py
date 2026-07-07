@@ -239,6 +239,29 @@ IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower()
 IBKR_AUTO_LOCK = threading.Lock()
 IBKR_AUTO_HISTORY: List[Dict[str, Any]] = []
 
+# Binance SPOT icin de Futures'tan tamamen bagimsiz ucuncu bir auto-trader ornegi.
+# Futures kaldiracli/short calisirken, spot sadece "elde tutulan varligi al/sat"
+# mantigiyla calisir: BUY -> USDT ile varlik satin alinir (pozisyon acilir),
+# SELL -> sadece zaten sahip olunan miktar varsa satilir (short mumkun degil).
+SPOT_AUTO_TRADER = AutoTraderState()
+SPOT_AUTO_TRADER.broker = "BINANCE_SPOT"
+SPOT_AUTO_TRADER.market = "SPOT"
+SPOT_AUTO_TRADER.symbol = "ETHUSDT"
+SPOT_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_SPOT_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
+SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "67"))
+SPOT_AUTO_TRADER.interval_sec = int(os.getenv("BINANCE_SPOT_AUTO_INTERVAL_SEC", "25"))
+SPOT_AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_SPOT_AUTO_MAX_DAILY_TRADES", "5"))
+SPOT_AUTO_TRADER.mode = AUTO_TRADER.mode
+SPOT_AUTO_TRADER.enabled = os.getenv("BINANCE_SPOT_AUTO_TRADER_ENABLED", "true").lower() == "true"
+SPOT_AUTO_LOCK = threading.Lock()
+SPOT_AUTO_HISTORY: List[Dict[str, Any]] = []
+# Her sembol icin bosta bekleyen spot USDT bakiyesinin ne kadari kullanilsin
+# (Futures'taki AUTO_TRADER_SIZE_PCT_* mantiginin spot karsiligi).
+SPOT_AUTO_SIZE_PCT_BTC = float(os.getenv("BINANCE_SPOT_SIZE_PCT_BTC", "20.0")) / 100.0
+SPOT_AUTO_SIZE_PCT_ETH = float(os.getenv("BINANCE_SPOT_SIZE_PCT_ETH", "15.0")) / 100.0
+SPOT_AUTO_SIZE_PCT_DEFAULT = float(os.getenv("BINANCE_SPOT_SIZE_PCT_DEFAULT", "8.0")) / 100.0
+
+
 # Mobil uygulamanin /ai-status ve /ai-control endpoint'lerinin bekledigi basit
 # 3 durumlu (off/watch/auto) mod. AUTO_TRADER.enabled sadece acik/kapali bilgisini
 # tasidigi icin "watch" (izleme, emir yok) durumunu ayrica saklamamiz gerekiyor.
@@ -394,6 +417,17 @@ def init_runtime_db() -> None:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS spot_positions (
+                    symbol TEXT PRIMARY KEY,
+                    quantity REAL NOT NULL,
+                    avg_cost REAL NOT NULL,
+                    opened_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -516,6 +550,61 @@ def db_insert_auto_history(
             conn.commit()
         finally:
             conn.close()
+
+
+def db_get_spot_position(symbol: str) -> Optional[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT symbol, quantity, avg_cost, opened_at, updated_at FROM spot_positions WHERE symbol = ?",
+                (symbol,),
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
+def db_upsert_spot_position(symbol: str, quantity: float, avg_cost: float, opened_at: Optional[str] = None) -> None:
+    now = now_text()
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO spot_positions(symbol, quantity, avg_cost, opened_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET quantity=excluded.quantity, avg_cost=excluded.avg_cost, updated_at=excluded.updated_at
+                """,
+                (symbol, quantity, avg_cost, opened_at or now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_delete_spot_position(symbol: str) -> None:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute("DELETE FROM spot_positions WHERE symbol = ?", (symbol,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_list_spot_positions() -> List[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("SELECT symbol, quantity, avg_cost, opened_at, updated_at FROM spot_positions").fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
@@ -2300,6 +2389,48 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
                 )
             return
 
+    if broker == "BINANCE_SPOT":
+        spot_tp_execution = enforce_spot_take_profit_stop_loss(channel="auto_take_profit")
+        if spot_tp_execution:
+            with lock:
+                fallback_symbol = symbols[0] if symbols else normalize_symbol(state.symbol)
+                trigger_label = "STOP_LOSS" if spot_tp_execution.get("trigger") == "stop_loss_roi_pct" else "TAKE_PROFIT"
+                state.last_action = trigger_label
+                state.last_confidence = 100
+                target_pct = spot_tp_execution.get("target_pct", BINANCE_TAKE_PROFIT_PCT)
+                state.last_reason = (
+                    f"{spot_tp_execution.get('symbol', fallback_symbol)} için %"
+                    f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if trigger_label == 'STOP_LOSS' else 'kâr hedefi'} tetiklendi (Spot)."
+                )
+                state.last_price = 0.0
+                state.last_update = now_text()
+                state.last_error = str(spot_tp_execution.get("error", "") or "")
+                state.updated_at_epoch = time.time()
+                history.insert(
+                    0,
+                    {
+                        "time": state.last_update,
+                        "broker": broker,
+                        "symbol": spot_tp_execution.get("symbol", fallback_symbol),
+                        "action": trigger_label,
+                        "confidence": 100,
+                        "price": 0.0,
+                        "reason": state.last_reason,
+                        "execution": spot_tp_execution,
+                    },
+                )
+                del history[300:]
+                db_insert_auto_history(
+                    broker=broker,
+                    symbol=str(spot_tp_execution.get("symbol", fallback_symbol)),
+                    action=trigger_label,
+                    confidence=100,
+                    price=0.0,
+                    reason=state.last_reason,
+                    execution=spot_tp_execution,
+                )
+            return
+
     # Cok sembollu tarama: watchlist'teki HER sembol icin ayri sinyal uretilir ve
     # uygun olanlarda ayri ayri islem acilir. Gunluk islem limiti (max_daily_trades)
     # tum semboller arasinda PAYLASILIR (tek bir hesap risk butcesi gibi calisir).
@@ -2405,7 +2536,68 @@ def _auto_trader_run_symbol(
         )
         do_live = mode == "live" and ((broker == "IBKR" and IBKR_LIVE_TRADING) or (broker != "IBKR" and LIVE_TRADING))
         if allow_trade:
-            if broker == "IBKR":
+            if broker == "BINANCE_SPOT":
+                # Spot'ta short mumkun degil: SELL sadece zaten sahip oldugumuz
+                # (kendi izledigimiz spot_positions tablosundaki) pozisyon varsa
+                # yapilir; BUY ise zaten acik pozisyon varken tekrar alim yapmaz
+                # (ust uste ortalama yerine tek pozisyon takip edilir).
+                existing_position = db_get_spot_position(symbol)
+                spot_skip_reason = ""
+                if action == "SELL":
+                    if not existing_position or safe_float(existing_position.get("quantity")) <= 0:
+                        spot_skip_reason = "Spot'ta short mümkün değil ve elde pozisyon yok, SELL sinyali atlandı."
+                        qty = 0
+                    else:
+                        qty = safe_float(existing_position.get("quantity"))
+                else:
+                    if existing_position and safe_float(existing_position.get("quantity")) > 0:
+                        spot_skip_reason = "Zaten açık spot pozisyon var, üst üste alım yapılmadı."
+                        qty = 0
+                    elif price > 0:
+                        available_usdt = get_spot_available_usdt()
+                        if available_usdt > 0:
+                            pct = spot_auto_trader_size_pct(symbol)
+                            sized_qty = round((available_usdt * pct) / price, 6)
+                            min_notional = 11.0  # Binance spot min ~10 USD + güvenlik payı
+                            if sized_qty * price < min_notional:
+                                sized_qty = round(math.ceil((min_notional / price) * 1_000_000) / 1_000_000, 6)
+                            qty = sized_qty
+                            reason = (
+                                reason
+                                + f" (Spot pozisyon büyüklüğü: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i -> {sized_qty:.6f} {symbol}.)"
+                            ).strip()
+                        else:
+                            spot_skip_reason = "Spot USDT bakiyesi alınamadı, alım yapılmadı."
+                            qty = 0
+                if spot_skip_reason:
+                    execution = {
+                        "simulated": True,
+                        "broker": "BINANCE_SPOT",
+                        "symbol": symbol,
+                        "side": action,
+                        "quantity": 0,
+                        "message": spot_skip_reason,
+                        "time": now_text(),
+                    }
+                elif qty > 0:
+                    if do_live:
+                        execution = place_spot_order(symbol, action, qty)
+                        if not execution.get("error"):
+                            if action == "BUY":
+                                db_upsert_spot_position(symbol, qty, price)
+                            else:
+                                db_delete_spot_position(symbol)
+                    else:
+                        execution = {
+                            "simulated": True,
+                            "broker": "BINANCE_SPOT",
+                            "symbol": symbol,
+                            "side": action,
+                            "quantity": qty,
+                            "message": "Paper mode: Spot gerçek emir kapalı.",
+                            "time": now_text(),
+                        }
+            elif broker == "IBKR":
                 if do_live:
                     # Sabit miktarli (ör. 1 hisse) emir, hesaptaki diger pozisyonlarin
                     # kullandigi marj yuzunden 'Available Funds insufficient' hatasiyla
@@ -2573,6 +2765,19 @@ def _auto_trader_loop():
                     IBKR_AUTO_TRADER.last_error = str(e)
                     IBKR_AUTO_TRADER.last_update = now_text()
                     IBKR_AUTO_TRADER.updated_at_epoch = time.time()
+
+        with SPOT_AUTO_LOCK:
+            spot_enabled = SPOT_AUTO_TRADER.enabled
+            spot_interval_sec = max(8, SPOT_AUTO_TRADER.interval_sec)
+            spot_elapsed = time.time() - SPOT_AUTO_TRADER.updated_at_epoch if SPOT_AUTO_TRADER.updated_at_epoch else 10_000
+        if spot_enabled and spot_elapsed >= spot_interval_sec:
+            try:
+                auto_trader_cycle(SPOT_AUTO_TRADER, SPOT_AUTO_LOCK, SPOT_AUTO_HISTORY)
+            except Exception as e:
+                with SPOT_AUTO_LOCK:
+                    SPOT_AUTO_TRADER.last_error = str(e)
+                    SPOT_AUTO_TRADER.last_update = now_text()
+                    SPOT_AUTO_TRADER.updated_at_epoch = time.time()
 
         time.sleep(1.0)
 
@@ -2933,6 +3138,168 @@ def get_futures_available_usdt() -> float:
         return 0.0
     except Exception:
         return 0.0
+
+
+def get_spot_available_usdt() -> float:
+    """Binance spot cuzdanindaki bosta bekleyen (free) USDT miktarini dondurur.
+    Spot auto-trader'in BUY pozisyon boyutlandirmasi bu deger uzerinden yapilir."""
+    try:
+        data = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
+        for b in data.get("balances", []):
+            if str(b.get("asset", "")).upper() == "USDT":
+                return safe_float(b.get("free"))
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def get_spot_asset_free_qty(asset: str) -> float:
+    """Belirtilen varligin (ör. ETH, BTC - USDT'siz) spot cuzdanindaki bosta
+    bekleyen miktarini dondurur. SELL islemi acmadan once elde ne kadar oldugunu
+    kontrol etmek icin kullanilir (spot'ta short mumkun degil)."""
+    try:
+        data = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
+        for b in data.get("balances", []):
+            if str(b.get("asset", "")).upper() == asset.upper():
+                return safe_float(b.get("free"))
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def spot_auto_trader_size_pct(symbol: str) -> float:
+    sym = normalize_symbol(symbol)
+    if sym.startswith("BTC"):
+        return SPOT_AUTO_SIZE_PCT_BTC
+    if sym.startswith("ETH"):
+        return SPOT_AUTO_SIZE_PCT_ETH
+    return SPOT_AUTO_SIZE_PCT_DEFAULT
+
+
+def place_spot_order(
+    symbol: str,
+    side: str,
+    quantity: float,
+    request_id: Optional[str] = None,
+    channel: str = "auto_spot",
+) -> Dict[str, Any]:
+    """Binance SPOT piyasa emri gonderir (dogrudan imzali istek - futures'taki
+    gibi VPS proxy'ye ihtiyac yok, cunku spot /api/v3/order Railway IP'sinden
+    zaten dogrudan calisiyor - bkz. mevcut manuel spot emir yolu _resolve_place_order_market)."""
+    request_id = str(request_id or uuid.uuid4())
+
+    if quantity <= 0:
+        return {"error": "Miktar 0'dan büyük olmalı.", "request_id": request_id, "simulated": False}
+
+    if DAILY_REALIZED_PNL < MAX_DAILY_LOSS:
+        error = f"Max daily loss exceeded. Current PnL: {DAILY_REALIZED_PNL} < {MAX_DAILY_LOSS}"
+        db_insert_trade_journal(
+            broker="Binance", channel=channel, symbol=symbol, side=side, quantity=quantity,
+            status="REJECTED", simulated=False, payload={"reason": "max_daily_loss"},
+            error_text=error, request_id=request_id,
+        )
+        return {"error": error, "request_id": request_id, "simulated": False}
+
+    last_order_time = LAST_ORDER_TIME.get(f"SPOT_{symbol}", 0)
+    if time.time() - last_order_time < MIN_ORDER_COOLDOWN_SEC:
+        error = f"Order cooldown in effect for {symbol}. Min wait: {MIN_ORDER_COOLDOWN_SEC}s"
+        return {"error": error, "request_id": request_id, "simulated": False}
+
+    if request_id_seen(request_id):
+        return {"error": "Request already seen (duplicate)", "request_id": request_id, "simulated": False}
+
+    if not LIVE_TRADING:
+        simulated = {
+            "simulated": True,
+            "message": "LIVE_TRADING=false olduğu için gerçek emir gönderilmedi.",
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "time": now_text(),
+            "request_id": request_id,
+        }
+        db_insert_trade_journal(
+            broker="Binance", channel=channel, symbol=symbol, side=side, quantity=quantity,
+            status="SIMULATED", simulated=True, payload=simulated, request_id=request_id,
+        )
+        TRADE_LOG.insert(0, simulated)
+        return simulated
+
+    try:
+        params = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity}
+        data = signed_request("POST", SPOT_BASE, "/api/v3/order", params)
+        result = dict(data) if isinstance(data, dict) else {"raw": data}
+        result["simulated"] = False
+        result["request_id"] = request_id
+        db_insert_trade_journal(
+            broker="Binance", channel=channel, symbol=symbol, side=side, quantity=quantity,
+            status="FILLED", simulated=False, payload=result, request_id=request_id,
+        )
+        TRADE_LOG.insert(0, {"simulated": False, "time": now_text(), "order": result, "request_id": request_id})
+        LAST_ORDER_TIME[f"SPOT_{symbol}"] = time.time()
+        return result
+    except Exception as e:
+        error = str(e)
+        db_insert_trade_journal(
+            broker="Binance", channel=channel, symbol=symbol, side=side, quantity=quantity,
+            status="ERROR", simulated=False, payload={}, error_text=error, request_id=request_id,
+        )
+        return {"error": error, "request_id": request_id, "simulated": False}
+
+
+def spot_position_profit_pct(position: Dict[str, Any], current_price: float) -> float:
+    avg_cost = safe_float(position.get("avg_cost"))
+    if avg_cost <= 0 or current_price <= 0:
+        return 0.0
+    return ((current_price - avg_cost) / avg_cost) * 100.0
+
+
+def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Optional[Dict[str, Any]]:
+    """Takip edilen spot pozisyonlarda (biz kendi acilislarimizi izliyoruz -
+    spot_positions tablosu) kar-al/zarar-kes esiklerini kontrol eder, esik
+    asilirsa piyasa emriyle satar (short yok, sadece elimizdeki miktar kadar)."""
+    if BINANCE_TAKE_PROFIT_PCT <= 0 and BINANCE_STOP_LOSS_PCT <= 0:
+        return None
+    try:
+        positions = db_list_spot_positions()
+    except Exception:
+        return None
+    for pos in positions:
+        symbol = str(pos.get("symbol", "")).upper()
+        qty = safe_float(pos.get("quantity"))
+        if not symbol or qty <= 0:
+            continue
+        try:
+            snap = get_market_snapshot(symbol, "SPOT")
+            price = safe_float(snap.get("price"))
+        except Exception:
+            continue
+        if price <= 0:
+            continue
+        profit_pct = spot_position_profit_pct(pos, price)
+        hit_take_profit = BINANCE_TAKE_PROFIT_PCT > 0 and profit_pct >= BINANCE_TAKE_PROFIT_PCT
+        hit_stop_loss = BINANCE_STOP_LOSS_PCT > 0 and profit_pct <= -BINANCE_STOP_LOSS_PCT
+        if not hit_take_profit and not hit_stop_loss:
+            continue
+        asset = symbol.replace("USDT", "")
+        free_qty = get_spot_asset_free_qty(asset)
+        sell_qty = min(qty, free_qty) if free_qty > 0 else qty
+        if sell_qty <= 0:
+            continue
+        trigger = "take_profit_roi_pct" if hit_take_profit else "stop_loss_roi_pct"
+        result = place_spot_order(
+            symbol, "SELL", sell_qty,
+            request_id=f"spot-{'tp' if hit_take_profit else 'sl'}-{symbol}-{int(time.time())}",
+            channel=channel,
+        )
+        if not result.get("error"):
+            db_delete_spot_position(symbol)
+        result["trigger"] = trigger
+        result["trigger_pct"] = round(profit_pct, 4)
+        result["target_pct"] = BINANCE_TAKE_PROFIT_PCT if hit_take_profit else -BINANCE_STOP_LOSS_PCT
+        result["symbol"] = symbol
+        return result
+    return None
 
 
 _LEVERAGE_APPLIED_CACHE: Dict[str, int] = {}
@@ -4214,6 +4581,76 @@ def ibkr_auto_trader_history():
         return jsonify({"ok": True, "history": db_records, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "history": [], "last_update": now_text()}), 200
+
+
+@app.route("/auto-trader/spot/start", methods=["POST"])
+def spot_auto_trader_start():
+    body = request.get_json(force=True) or {}
+    with SPOT_AUTO_LOCK:
+        SPOT_AUTO_TRADER.enabled = True
+        SPOT_AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", SPOT_AUTO_TRADER.symbol))
+        if "symbols" in body:
+            raw_symbols = body.get("symbols")
+            if isinstance(raw_symbols, list):
+                SPOT_AUTO_TRADER.symbols = [normalize_symbol(s) for s in raw_symbols if str(s).strip()]
+            else:
+                SPOT_AUTO_TRADER.symbols = _parse_symbol_list(str(raw_symbols))
+        SPOT_AUTO_TRADER.mode = "live" if str(body.get("mode", SPOT_AUTO_TRADER.mode)).lower() == "live" else "paper"
+        SPOT_AUTO_TRADER.interval_sec = max(8, int(safe_float(body.get("interval_sec"), SPOT_AUTO_TRADER.interval_sec)))
+        SPOT_AUTO_TRADER.min_confidence = max(50, min(95, int(safe_float(body.get("min_confidence"), SPOT_AUTO_TRADER.min_confidence))))
+        SPOT_AUTO_TRADER.max_daily_trades = max(1, int(safe_float(body.get("max_daily_trades"), SPOT_AUTO_TRADER.max_daily_trades)))
+        SPOT_AUTO_TRADER.last_update = now_text()
+        SPOT_AUTO_TRADER.updated_at_epoch = 0.0
+    return jsonify(asdict(SPOT_AUTO_TRADER))
+
+
+@app.route("/auto-trader/spot/stop", methods=["POST"])
+def spot_auto_trader_stop():
+    with SPOT_AUTO_LOCK:
+        SPOT_AUTO_TRADER.enabled = False
+        SPOT_AUTO_TRADER.last_update = now_text()
+        SPOT_AUTO_TRADER.last_reason = "Spot auto trader durduruldu."
+    return jsonify(asdict(SPOT_AUTO_TRADER))
+
+
+@app.route("/auto-trader/spot/status", methods=["GET"])
+def spot_auto_trader_status():
+    with SPOT_AUTO_LOCK:
+        payload = asdict(SPOT_AUTO_TRADER)
+    try:
+        payload["positions"] = db_list_spot_positions()
+    except Exception:
+        payload["positions"] = []
+    return jsonify(payload)
+
+
+@app.route("/auto-trader/spot/history", methods=["GET"])
+def spot_auto_trader_history():
+    try:
+        limit = max(1, min(int(request.args.get("limit", "120")), 500))
+        db_records = [r for r in db_recent_auto_history(limit * 2) if str(r.get("broker", "")).upper() == "BINANCE_SPOT"][:limit]
+        return jsonify({"ok": True, "history": db_records, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "history": [], "last_update": now_text()}), 200
+
+
+@app.route("/auto-trader/spot/positions", methods=["GET"])
+def spot_auto_trader_positions():
+    try:
+        positions = db_list_spot_positions()
+        enriched = []
+        for pos in positions:
+            symbol = str(pos.get("symbol", "")).upper()
+            try:
+                snap = get_market_snapshot(symbol, "SPOT")
+                price = safe_float(snap.get("price"))
+            except Exception:
+                price = 0.0
+            profit_pct = spot_position_profit_pct(pos, price) if price > 0 else 0.0
+            enriched.append({**pos, "current_price": price, "profit_pct": round(profit_pct, 3)})
+        return jsonify({"ok": True, "positions": enriched, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "positions": [], "last_update": now_text()}), 200
 
 
 @app.route("/market-signals/external", methods=["GET"])
