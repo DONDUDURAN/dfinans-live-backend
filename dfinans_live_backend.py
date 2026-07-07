@@ -3125,6 +3125,72 @@ def compute_correlation_matrix(symbols: List[str]) -> List[Dict[str, Any]]:
     return rows
 
 
+_CROSS_ASSET_PAIR_DEFS: List[Tuple[str, str, str, str]] = [
+    # (title, subtitle, yahoo_key_a, yahoo_key_b)
+    ("BTC ↔ Nasdaq", "Kripto ile teknoloji risk iştahı", "BTCUSDT", "NASDAQ"),
+    ("BTC ↔ DXY", "Dolar gücü ve kripto baskısı", "BTCUSDT", "DXY"),
+    ("BTC ↔ Altın", "Riskten korunma karşılaştırması", "BTCUSDT", "GOLD"),
+    ("ETH ↔ BTC", "Kripto içi göreli güç", "ETHUSDT", "BTCUSDT"),
+    ("Petrol ↔ ABD 10Y Tahvil", "Enerji fiyatı ve makro baskı", "OIL", "US10Y"),
+]
+
+
+def _yfinance_daily_returns(yahoo_symbol: str, days: int = 90) -> List[float]:
+    import yfinance as yf
+    hist = yf.Ticker(yahoo_symbol).history(period=f"{days}d", interval="1d")
+    if hist is None or hist.empty or "Close" not in hist:
+        return []
+    closes = [float(c) for c in hist["Close"].tolist() if c and c == c]
+    rets: List[float] = []
+    for i in range(1, len(closes)):
+        prev = closes[i - 1]
+        if prev > 0:
+            rets.append((closes[i] - prev) / prev)
+    return rets
+
+
+def get_cross_asset_correlations() -> Dict[str, Any]:
+    """iOS 'Piyasalar Arası Analiz' kartındaki BTC↔Nasdaq, BTC↔DXY, BTC↔Altın,
+    ETH↔BTC, Petrol↔ABD 10Y Tahvil ilişkilerini gerçek 90 günlük Yahoo Finance
+    günlük getiri verisiyle hesaplar (önceden bunlar sabit/hardcoded değerlerdi)."""
+
+    def _fetch() -> Dict[str, Any]:
+        results: List[Dict[str, Any]] = []
+        cache_returns: Dict[str, List[float]] = {}
+        for title, subtitle, key_a, key_b in _CROSS_ASSET_PAIR_DEFS:
+            try:
+                for k in (key_a, key_b):
+                    if k not in cache_returns:
+                        yahoo_symbol = YAHOO_MAP.get(k, k)
+                        cache_returns[k] = _yfinance_daily_returns(yahoo_symbol)
+                corr = _pearson_corr(cache_returns.get(key_a, []), cache_returns.get(key_b, []))
+                if corr is None:
+                    results.append({
+                        "title": title, "subtitle": subtitle,
+                        "correlation": None, "status": "Bekleniyor",
+                    })
+                    continue
+                strength = (
+                    "Güçlü pozitif" if corr >= 0.6 else
+                    "Güçlü negatif" if corr <= -0.6 else
+                    "Zayıf/nötr"
+                )
+                results.append({
+                    "title": title,
+                    "subtitle": subtitle,
+                    "correlation": round(corr, 3),
+                    "status": strength,
+                })
+            except Exception as exc:
+                results.append({
+                    "title": title, "subtitle": subtitle,
+                    "correlation": None, "status": "Bekleniyor", "error": str(exc),
+                })
+        return {"ok": True, "pairs": results, "time": now_text()}
+
+    return _cache_get_or_fetch("cross_asset_correlations", 21600, _fetch)
+
+
 def get_correlation_pair_signal(symbol: str, all_watchlist_symbols: List[str]) -> Dict[str, Any]:
     """Verilen sembol icin en guclu korele oldugu es (peer) varligi bulur;
     peer belirgin hareket ettiyse ama bu sembol henuz takip etmediyse bir
@@ -5736,9 +5802,11 @@ def intermarket_analysis():
                     "peer_move_pct": sig.get("peer_move_pct"),
                     "note": sig.get("note"),
                 })
+        cross_asset = get_cross_asset_correlations()
         return jsonify({
             "ok": True,
             "pairs": pairs[:30],
+            "cross_asset_pairs": cross_asset.get("pairs", []),
             "active_lag_signals": active_signals,
             "symbols_tracked": len(all_symbols),
             "time": now_text(),
