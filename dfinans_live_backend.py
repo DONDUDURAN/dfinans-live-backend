@@ -1947,6 +1947,37 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
     return {"bias": max(-16, min(16, bias)), "notes": notes}
 
 
+def get_macro_regime() -> Dict[str, Any]:
+    """SP500 ve Dolar Endeksi'nin son 5 islem gunu momentumuna gore 'risk rejimi' belirler.
+    Tarihsel analize gore (bkz. 5 yillik senaryo calismasi):
+      - Borsa YUKARI + Dolar ASAGI/notr  -> RISK_ON  (BTC ort. +1.20%/gun)
+      - Borsa ASAGI  + Dolar YUKARI      -> RISK_OFF (BTC ort. -1.13%/gun)
+      - Digerleri -> NOTR
+    yfinance Yahoo Finance'tan veri cektigi icin agir/yavas olabilir; bu yuzden sonuc
+    uzun sureli (4 saat) cache'lenir ve hata durumunda sessizce NOTR'e duser (fail-open)."""
+    def _fetch():
+        import yfinance as yf
+        data = yf.download(["^GSPC", "DX-Y.NYB"], period="15d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"].dropna()
+        if len(close) < 6:
+            raise RuntimeError("Yetersiz makro veri")
+        sp500_5d = (close["^GSPC"].iloc[-1] / close["^GSPC"].iloc[-6] - 1.0) * 100.0
+        dxy_5d = (close["DX-Y.NYB"].iloc[-1] / close["DX-Y.NYB"].iloc[-6] - 1.0) * 100.0
+        if sp500_5d > 0 and dxy_5d <= 0:
+            regime = "RISK_ON"
+        elif sp500_5d < 0 and dxy_5d > 0:
+            regime = "RISK_OFF"
+        else:
+            regime = "NEUTRAL"
+        return {
+            "sp500_5d_pct": round(float(sp500_5d), 2),
+            "dxy_5d_pct": round(float(dxy_5d), 2),
+            "regime": regime,
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch("macro_regime", 14400, _fetch)
+
+
 def get_macro_risk_bias(symbol: str, action: str) -> Dict[str, Any]:
     """Balon/asiri degerleme, bilanco/nakit akis sagligi, short/long pozisyonlanma
     ve manipulasyon taramasi, ve sektorler arasi senaryo analizini (hepsi
