@@ -1383,13 +1383,19 @@ def _ibkr_circuit_breaker_check() -> None:
     failed = int(IBKR_RUNTIME.get("failed_attempts", 0))
     last_fail = float(IBKR_RUNTIME.get("last_fail_time", 0))
     now = time.time()
-    
+
     # Circuit breaker: if >3 failures in last 60 seconds, open breaker for 30 seconds
     if failed >= 3 and (now - last_fail) < 60:
         IBKR_RUNTIME["circuit_breaker_open"] = True
         print(f"[IBKR] Circuit breaker OPEN after {failed} failures. Disabling orders for 30s.")
-    elif (now - last_fail) > 90:
-        # Reset after 90 seconds of no failures
+    elif failed > 0 and last_fail > 0 and (now - last_fail) > 90:
+        # Reset after 90 seconds of no failures. last_fail_time hic set
+        # edilmemisse (varsayilan 0) "now - 0" her zaman 90'dan buyuk olacagi
+        # icin bu blok ONCEDEN her cagride (hicbir hata yokken bile) tetiklenip
+        # "[IBKR] Circuit breaker reset." satirini surekli logluyor, gercek
+        # sorunlari fark etmeyi zorlastiriyordu - artik sadece gercekten
+        # sifirlanacak bir sey varsa (failed>0 ve last_fail gercekten set
+        # edilmisse) calisir ve loglar.
         IBKR_RUNTIME["failed_attempts"] = 0
         IBKR_RUNTIME["circuit_breaker_open"] = False
         print("[IBKR] Circuit breaker reset.")
