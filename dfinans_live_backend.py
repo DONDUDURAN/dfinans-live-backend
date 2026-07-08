@@ -4236,9 +4236,63 @@ def _auto_trader_run_symbol(
                     adj_qty = math.ceil((min_notional / price) * 1000) / 1000.0
                     reason = (reason + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: min. işlem tutarı {min_notional}$ altında kalıyordu.)").strip()
                     qty = adj_qty
+                # AI'nin bu SELL/BUY karari mevcut acik bir futures pozisyonunu
+                # (LONG icin SELL, SHORT icin BUY) kapatiyor/azaltiyor mu diye
+                # onceden kontrol ediyoruz - hem gunluk gecici bir dususte erken
+                # kapanmayi engellemek icin, hem de emir basarili olursa
+                # position_closures'a kaydedebilmek icin (TP/SL disi AI kararlari
+                # onceden hic izlenmiyordu).
+                pre_close_futures_position = None
+                try:
+                    for p in get_futures_positions():
+                        if p.get("id") == "error":
+                            continue
+                        if str(p.get("symbol", "")).upper() == symbol:
+                            p_side = str(p.get("side", "")).upper()
+                            if (p_side == "LONG" and action == "SELL") or (p_side == "SHORT" and action == "BUY"):
+                                pre_close_futures_position = p
+                            break
+                except Exception:
+                    pre_close_futures_position = None
+                if pre_close_futures_position:
+                    current_loss_pct = binance_position_profit_pct(pre_close_futures_position)
+                    if current_loss_pct < 0 and abs(current_loss_pct) < BINANCE_AI_SELL_MIN_LOSS_PCT:
+                        reason = (
+                            reason
+                            + f" (AI kapanış sinyali ertelendi: mevcut zarar %{abs(current_loss_pct):.1f}, "
+                            f"minimum %{BINANCE_AI_SELL_MIN_LOSS_PCT:.1f} zarar eşiğinin altında kaldığı için pozisyon açık tutuldu.)"
+                        ).strip()
+                        qty = 0
+                        pre_close_futures_position = None
                 if do_live:
                     ensure_binance_leverage(symbol, leverage)
-                    execution = place_futures_order(symbol, action, qty, reduce_only=False)
+                    if qty > 0:
+                        execution = place_futures_order(symbol, action, qty, reduce_only=False)
+                        if pre_close_futures_position and not execution.get("error"):
+                            existing_size = abs(safe_float(pre_close_futures_position.get("size")))
+                            closed_qty = min(qty, existing_size) if existing_size > 0 else qty
+                            entry_price = safe_float(pre_close_futures_position.get("entry_price"))
+                            exit_price = price
+                            existing_side = str(pre_close_futures_position.get("side", "")).upper()
+                            if existing_side == "LONG":
+                                pnl_amount = (exit_price - entry_price) * closed_qty
+                            else:
+                                pnl_amount = (entry_price - exit_price) * closed_qty
+                            pnl_pct = ((exit_price - entry_price) / entry_price * 100.0) if entry_price else 0.0
+                            if existing_side == "SHORT":
+                                pnl_pct = -pnl_pct
+                            db_record_position_closure(
+                                broker="BINANCE_FUTURES",
+                                symbol=symbol,
+                                side=existing_side,
+                                qty=closed_qty,
+                                entry_price=entry_price,
+                                exit_price=exit_price,
+                                realized_pnl=pnl_amount,
+                                realized_pnl_pct=pnl_pct,
+                                close_reason="AI_KARARI",
+                                detail=f"AI {action} kararıyla kapandı: {reason[:200]}",
+                            )
                 else:
                     execution = {
                         "simulated": True,
