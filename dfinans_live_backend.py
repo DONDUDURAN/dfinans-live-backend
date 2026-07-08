@@ -707,6 +707,51 @@ NOTIFY_EMAIL_PASSWORD = os.environ.get("NOTIFY_EMAIL_PASSWORD", "")
 NOTIFY_EMAIL_RECIPIENT = os.environ.get("NOTIFY_EMAIL_RECIPIENT", "")
 
 
+def _build_and_send_closure_email(
+    broker: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    realized_pnl: float,
+    realized_pnl_pct: float,
+    close_reason: str,
+    detail: str,
+) -> None:
+    """Senkron gonderim; hata olursa exception fırlatır (cagiran taraf yakalar)."""
+    reason_label = CLOSE_REASON_LABELS_TR.get(str(close_reason).upper(), str(close_reason))
+    is_profit = realized_pnl >= 0
+    subject = (
+        f"[DFinans] {symbol} pozisyonu kapandı - "
+        f"{'KÂR' if is_profit else 'ZARAR'} ({reason_label})"
+    )
+    body = (
+        f"Pozisyon kapandı.\n\n"
+        f"Sembol: {symbol}\n"
+        f"Borsa: {broker}\n"
+        f"Yön: {side}\n"
+        f"Miktar: {qty}\n"
+        f"Giriş Fiyatı: {entry_price}\n"
+        f"Çıkış Fiyatı: {exit_price}\n"
+        f"Kapanma Nedeni: {reason_label}\n"
+        f"Gerçekleşen K/Z: {'+' if is_profit else ''}{realized_pnl:.2f} "
+        f"(%{realized_pnl_pct:.2f})\n"
+        f"Detay: {detail}\n\n"
+        f"Zaman: {now_text()}\n"
+    )
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = NOTIFY_EMAIL_SENDER
+    msg["To"] = NOTIFY_EMAIL_RECIPIENT
+
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+        server.starttls()
+        server.login(NOTIFY_EMAIL_SENDER, NOTIFY_EMAIL_PASSWORD)
+        server.sendmail(NOTIFY_EMAIL_SENDER, [NOTIFY_EMAIL_RECIPIENT], msg.as_string())
+    print(f"[EMAIL] Kapanış maili gönderildi: {symbol} ({close_reason})", flush=True)
+
+
 def send_position_closure_email(
     broker: str,
     symbol: str,
@@ -730,37 +775,12 @@ def send_position_closure_email(
 
     def _send():
         try:
-            reason_label = CLOSE_REASON_LABELS_TR.get(str(close_reason).upper(), str(close_reason))
-            is_profit = realized_pnl >= 0
-            subject = (
-                f"[DFinans] {symbol} pozisyonu kapandı - "
-                f"{'KÂR' if is_profit else 'ZARAR'} ({reason_label})"
+            _build_and_send_closure_email(
+                broker, symbol, side, qty, entry_price, exit_price,
+                realized_pnl, realized_pnl_pct, close_reason, detail,
             )
-            body = (
-                f"Pozisyon kapandı.\n\n"
-                f"Sembol: {symbol}\n"
-                f"Borsa: {broker}\n"
-                f"Yön: {side}\n"
-                f"Miktar: {qty}\n"
-                f"Giriş Fiyatı: {entry_price}\n"
-                f"Çıkış Fiyatı: {exit_price}\n"
-                f"Kapanma Nedeni: {reason_label}\n"
-                f"Gerçekleşen K/Z: {'+' if is_profit else ''}{realized_pnl:.2f} "
-                f"(%{realized_pnl_pct:.2f})\n"
-                f"Detay: {detail}\n\n"
-                f"Zaman: {now_text()}\n"
-            )
-            msg = MIMEText(body, "plain", "utf-8")
-            msg["Subject"] = subject
-            msg["From"] = NOTIFY_EMAIL_SENDER
-            msg["To"] = NOTIFY_EMAIL_RECIPIENT
-
-            with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
-                server.starttls()
-                server.login(NOTIFY_EMAIL_SENDER, NOTIFY_EMAIL_PASSWORD)
-                server.sendmail(NOTIFY_EMAIL_SENDER, [NOTIFY_EMAIL_RECIPIENT], msg.as_string())
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[EMAIL] Mail gönderilemedi: {type(e).__name__}: {e}", flush=True)
 
     threading.Thread(target=_send, daemon=True).start()
 
@@ -6622,19 +6642,22 @@ def position_closures_test_email():
             "ok": False,
             "error": "E-posta ayarları eksik (NOTIFY_EMAIL_ENABLED/SENDER/PASSWORD/RECIPIENT).",
         }), 200
-    send_position_closure_email(
-        broker="TEST",
-        symbol="TESTUSDT",
-        side="LONG",
-        qty=1.0,
-        entry_price=100.0,
-        exit_price=105.0,
-        realized_pnl=5.0,
-        realized_pnl_pct=5.0,
-        close_reason="TAKE_PROFIT",
-        detail="Bu bir test mailidir; ayarların doğru çalıştığını kontrol etmek için gönderildi.",
-    )
-    return jsonify({"ok": True, "message": "Test maili gönderildi (birkaç saniye içinde gelmeli).", "time": now_text()})
+    try:
+        _build_and_send_closure_email(
+            broker="TEST",
+            symbol="TESTUSDT",
+            side="LONG",
+            qty=1.0,
+            entry_price=100.0,
+            exit_price=105.0,
+            realized_pnl=5.0,
+            realized_pnl_pct=5.0,
+            close_reason="TAKE_PROFIT",
+            detail="Bu bir test mailidir; ayarların doğru çalıştığını kontrol etmek için gönderildi.",
+        )
+        return jsonify({"ok": True, "message": "Test maili gönderildi.", "time": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}", "time": now_text()}), 200
 
 
 # ---------------------------------------------------------------------------
