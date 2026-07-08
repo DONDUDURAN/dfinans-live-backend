@@ -6519,7 +6519,7 @@ def position_closures_alias():
                 "close_reason": reason,
                 "close_reason_label": reason_labels.get(reason, reason),
                 "is_profit": pnl >= 0,
-                "detail": r.get("detail"),
+                "detail": r.get("detail") or "",
                 "summary": (
                     f"{r.get('symbol')} ({r.get('broker')}) pozisyonu "
                     f"{reason_labels.get(reason, reason)} nedeniyle kapandı: "
