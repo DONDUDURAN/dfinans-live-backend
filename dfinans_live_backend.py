@@ -6075,6 +6075,183 @@ def optimize_stock_backtest_tp_sl(
     }
 
 
+def calculate_rsi(closes: List[float], period: int = 14) -> Optional[float]:
+    """Klasik Wilder RSI (Relative Strength Index). Son degeri dondurur."""
+    if len(closes) < period + 1:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+
+def _ema_series(values: List[float], period: int) -> List[float]:
+    if not values:
+        return []
+    k = 2 / (period + 1)
+    ema = [values[0]]
+    for v in values[1:]:
+        ema.append(v * k + ema[-1] * (1 - k))
+    return ema
+
+
+def calculate_macd(
+    closes: List[float], fast: int = 12, slow: int = 26, signal: int = 9
+) -> Optional[Dict[str, float]]:
+    """MACD (12/26/9 varsayilan). MACD hatti, sinyal hatti ve histogram
+    (fark) son degerlerini dondurur."""
+    if len(closes) < slow + signal:
+        return None
+    ema_fast = _ema_series(closes, fast)
+    ema_slow = _ema_series(closes, slow)
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+    signal_line = _ema_series(macd_line, signal)
+    histogram = macd_line[-1] - signal_line[-1]
+    return {
+        "macd": round(macd_line[-1], 6),
+        "signal": round(signal_line[-1], 6),
+        "histogram": round(histogram, 6),
+    }
+
+
+def calculate_atr(
+    highs: List[float], lows: List[float], closes: List[float], period: int = 14
+) -> Optional[float]:
+    """Average True Range - volatilite olcusu (Wilder yontemi)."""
+    if len(closes) < period + 1:
+        return None
+    true_ranges = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        true_ranges.append(tr)
+    atr = sum(true_ranges[:period]) / period
+    for tr in true_ranges[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return round(atr, 6)
+
+
+def technical_indicators_for_crypto(
+    symbol: str, market: str = "SPOT", interval: str = "1h", candles: int = 200
+) -> Dict[str, Any]:
+    """Binance gecmis mum verisinden RSI/MACD/ATR hesaplayip canli AI sinyaliyle
+    (calculate_ai_signal) karsilastirma yapmak icin ek/dogrulama katmani sunar.
+    Bu fonksiyon mevcut canli alim/satim karar mekanizmasini DEGISTIRMEZ; sadece
+    bilgi amacli capraz kontrol saglar."""
+    symbol = symbol.upper()
+    bars = fetch_binance_klines(symbol, market=market, interval=interval, total_candles=max(60, candles))
+    if len(bars) < 30:
+        return {"error": "Yeterli mum verisi alinamadi.", "symbol": symbol}
+    closes = [b["close"] for b in bars]
+    highs = [b["high"] for b in bars]
+    lows = [b["low"] for b in bars]
+
+    rsi = calculate_rsi(closes)
+    macd = calculate_macd(closes)
+    atr = calculate_atr(highs, lows, closes)
+    last_price = closes[-1]
+
+    rsi_signal = "NOTR"
+    if rsi is not None:
+        if rsi >= 70:
+            rsi_signal = "ASIRI_ALIM (SAT egilimi)"
+        elif rsi <= 30:
+            rsi_signal = "ASIRI_SATIM (AL egilimi)"
+
+    macd_signal = "NOTR"
+    if macd is not None:
+        macd_signal = "AL (MACD > Sinyal)" if macd["histogram"] > 0 else "SAT (MACD < Sinyal)"
+
+    ai_signal_result = None
+    try:
+        ai_signal_result = calculate_ai_signal(symbol, market=market)
+    except Exception:
+        ai_signal_result = None
+
+    return {
+        "symbol": symbol,
+        "market": market,
+        "interval": interval,
+        "last_price": last_price,
+        "rsi_14": rsi,
+        "rsi_signal": rsi_signal,
+        "macd": macd,
+        "macd_signal": macd_signal,
+        "atr_14": atr,
+        "atr_pct_of_price": round((atr / last_price) * 100, 3) if atr and last_price else None,
+        "ai_signal": (ai_signal_result or {}).get("signal") if isinstance(ai_signal_result, dict) else None,
+        "note": (
+            "RSI/MACD/ATR sadece bilgilendirme/capraz-kontrol amaclidir; canli "
+            "alim-satim karari calculate_ai_signal() (momentum + emir defteri "
+            "baskisi) tarafindan verilmeye devam eder. Farkli sinyaller "
+            "cakisirsa ihtiyatli olunmasi onerilir."
+        ),
+    }
+
+
+def technical_indicators_for_stock(symbol: str, days: int = 200) -> Dict[str, Any]:
+    """IBKR hisseleri icin Yahoo Finance gunluk verisinden RSI/MACD/ATR hesaplar."""
+    symbol = symbol.upper()
+    import yfinance as yf
+    ticker = yf.Ticker(symbol)
+    hist = ticker.history(period=f"{max(60, min(days, 3650))}d", interval="1d")
+    if hist is None or hist.empty or "Close" not in hist:
+        return {"error": "Yeterli gecmis gunluk veri alinamadi.", "symbol": symbol}
+
+    closes = [float(v) for v in hist["Close"].tolist() if v == v]
+    highs = [float(v) for v in hist["High"].tolist() if v == v]
+    lows = [float(v) for v in hist["Low"].tolist() if v == v]
+    if len(closes) < 30:
+        return {"error": "Yeterli gecmis gunluk veri alinamadi.", "symbol": symbol}
+
+    rsi = calculate_rsi(closes)
+    macd = calculate_macd(closes)
+    atr = calculate_atr(highs, lows, closes)
+    last_price = closes[-1]
+
+    rsi_signal = "NOTR"
+    if rsi is not None:
+        if rsi >= 70:
+            rsi_signal = "ASIRI_ALIM (SAT egilimi)"
+        elif rsi <= 30:
+            rsi_signal = "ASIRI_SATIM (AL egilimi)"
+
+    macd_signal = "NOTR"
+    if macd is not None:
+        macd_signal = "AL (MACD > Sinyal)" if macd["histogram"] > 0 else "SAT (MACD < Sinyal)"
+
+    return {
+        "symbol": symbol,
+        "market": "IBKR",
+        "last_price": last_price,
+        "rsi_14": rsi,
+        "rsi_signal": rsi_signal,
+        "macd": macd,
+        "macd_signal": macd_signal,
+        "atr_14": atr,
+        "atr_pct_of_price": round((atr / last_price) * 100, 3) if atr and last_price else None,
+        "note": (
+            "RSI/MACD/ATR sadece bilgilendirme/capraz-kontrol amaclidir; canli "
+            "alim-satim karari gunluk kapanis momentumu tarafindan verilmeye "
+            "devam eder."
+        ),
+    }
+
+
 def place_futures_order(
     symbol: str,
     side: str,
@@ -8018,6 +8195,28 @@ def backtest_stock_optimize_route():
     min_trades = int(safe_float(request.args.get("min_trades", 5), 5))
     try:
         result = optimize_stock_backtest_tp_sl(symbol=symbol, days=days, min_trades=min_trades)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "symbol": symbol}), 500
+
+
+@app.route("/technical-indicators", methods=["GET"])
+def technical_indicators_route():
+    """RSI/MACD/ATR capraz kontrolu. Kripto icin:
+    /technical-indicators?symbol=BTCUSDT&market=SPOT&interval=1h
+    Hisse (IBKR) icin:
+    /technical-indicators?symbol=AAPL&type=stock"""
+    symbol = request.args.get("symbol", "BTCUSDT").upper()
+    asset_type = request.args.get("type", "crypto").lower()
+    try:
+        if asset_type == "stock":
+            days = int(safe_float(request.args.get("days", 200), 200))
+            result = technical_indicators_for_stock(symbol, days=days)
+        else:
+            market = request.args.get("market", "SPOT").upper()
+            interval = request.args.get("interval", "1h")
+            candles = int(safe_float(request.args.get("candles", 200), 200))
+            result = technical_indicators_for_crypto(symbol, market=market, interval=interval, candles=candles)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "symbol": symbol}), 500
