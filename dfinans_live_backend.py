@@ -210,7 +210,97 @@ AUTO_HISTORY: List[Dict[str, Any]] = []
 # Kullanici basta "havuzdaki tum varliklar taransin" seklinde kurulmasini istemisti;
 # tek sembole (ETHUSDT/AAPL) daralmis olmasi bir gerileme idi - simdi geri getirildi.
 _BINANCE_WATCHLIST_DEFAULT = "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT"
-_IBKR_WATCHLIST_DEFAULT = "AAPL,MSFT,NVDA,AMD,TSLA,F,T,IBKR"
+
+# --- COK ULKELI IBKR HISSE HAVUZU + TURKIYE YASAK KURALI --------------------
+# Kullanicinin acik talebi: sistem SADECE ABD borsalarina bagli kalmamali,
+# Ingiltere (LSE) ve Hong Kong (SEHK) gibi farkli saat dilimlerinde acik olan
+# borsalardan da hisse icermeli - boylece Asya kapanirken Londra, Londra
+# kapanirken ABD acik oluyor ve sistem gun icinde daha surekli/kesintisiz
+# calisabiliyor (tek bir borsanin kapali oldugu saatlerde bekleme kalmiyor).
+#
+# GUVENLIK KURALI (kullanicinin acik ve kesin talimati): Turkiye'de (BIST)
+# veya TRY para biriminde KESINLIKLE islem yapilmaz. Bu kural en alt seviyede,
+# build_ibkr_contract() icinde (TUM emir/sinyal yollarinin - manuel emir,
+# auto-trader, TP/SL kapatma - tek gectigi nokta) uygulanir; boylece hicbir
+# ust seviye kod yolu bu kurali atlayamaz.
+IBKR_FORBIDDEN_EXCHANGES = {"BIST", "IST", "ISE", "ISTANBUL"}
+IBKR_FORBIDDEN_CURRENCIES = {"TRY"}
+
+
+def assert_ibkr_market_allowed(exchange: str, currency: str, symbol: str = "") -> None:
+    ex = str(exchange or "").upper()
+    cur = str(currency or "").upper()
+    if ex in IBKR_FORBIDDEN_EXCHANGES or cur in IBKR_FORBIDDEN_CURRENCIES:
+        raise RuntimeError(
+            f"GUVENLIK KURALI: Turkiye borsasinda/TRY para biriminde KESINLIKLE islem "
+            f"yapilmaz ({symbol or '?'} - {ex}/{cur}). Emir reddedildi."
+        )
+
+
+# sembol -> {exchange, currency, region} eslemesi. region: seans-sirali risk
+# sinyali (bkz. get_cross_session_bias) icin kullanilir: ASIA (SEHK) gunun en
+# erken kapanan seansi, ardindan UK (LSE), en son US (SMART) kapanir/acilir.
+# "IBKR" hissesi bilincli olarak burada YOK - o, aracı kurumdan islem yapabilmek
+# icin zorunlu tutulan bir pay oldugu icin auto-trader tarafindan asla
+# alinip-satilmamali (kullanici talebiyle havuzdan cikarildi).
+IBKR_SYMBOL_MARKET_INFO: Dict[str, Dict[str, str]] = {
+    # --- ABD (SMART / USD) ---
+    "AAPL": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "MSFT": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "NVDA": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "AMD": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "TSLA": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "F": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "T": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "GOOGL": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "AMZN": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "META": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    # --- Ingiltere (LSE / GBP) ---
+    "SHEL": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
+    "AZN": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
+    "HSBA": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
+    "ULVR": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
+    "RIO": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
+    # --- Hong Kong (SEHK / HKD) ---
+    "700": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},   # Tencent
+    "9988": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},  # Alibaba
+    "5": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},     # HSBC (HK listesi)
+    "1299": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},  # AIA
+    "3690": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},  # Meituan
+}
+
+_IBKR_WATCHLIST_DEFAULT = ",".join(IBKR_SYMBOL_MARKET_INFO.keys())
+
+# Seans sirasi: Asya en erken kapanir, ardindan Londra, en son ABD. Her
+# bolgenin "onceki" seansi, o gun icin cross-session risk sinyali uretir.
+IBKR_SESSION_SEQUENCE = {"ASIA": None, "UK": "ASIA", "US": "UK"}
+
+
+def get_ibkr_symbol_market_info(symbol: str) -> Dict[str, str]:
+    """Sembolun hangi borsada/para biriminde islem gordugunu dondurur. Bilinmeyen
+    (ozel/manuel girilen) semboller icin geriye donuk uyumluluk amaciyla
+    varsayilan SMART/USD/US kullanilir."""
+    sym = str(symbol or "").upper().replace("/", "").replace("-", "").strip()
+    info = IBKR_SYMBOL_MARKET_INFO.get(sym)
+    if info:
+        return info
+    return {"exchange": "SMART", "currency": "USD", "region": "US"}
+
+
+def to_yfinance_symbol(symbol: str) -> str:
+    """IBKR sembolunu yfinance'in bekledigi formata cevirir. ABD hisseleri
+    degismeden kalir; Ingiltere (LSE) hisselerine '.L', Hong Kong (SEHK)
+    hisselerine ise 4 haneli sifir-doldurma + '.HK' eklenir (ör. '700' ->
+    '0700.HK', 'SHEL' -> 'SHEL.L'). Bu olmadan yfinance.info cagrisi bu
+    uluslararasi hisseler icin veri donmuyor/hata veriyordu."""
+    sym = str(symbol or "").upper().strip()
+    info = get_ibkr_symbol_market_info(sym)
+    region = info.get("region", "US")
+    if region == "UK":
+        return f"{sym}.L"
+    if region == "ASIA":
+        return f"{sym.zfill(4)}.HK"
+    return sym
 
 
 def _parse_symbol_list(raw: str) -> List[str]:
@@ -890,10 +980,18 @@ def db_recent_position_closures(limit: int = 50) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def db_all_position_closures(days: Optional[int] = None, broker: Optional[str] = None) -> List[Dict[str, Any]]:
+def db_all_position_closures(
+    days: Optional[int] = None, broker: Optional[str] = None, include_mandatory_holdings: bool = False
+) -> List[Dict[str, Any]]:
     """Performans istatistikleri icin TUM kapanis kayitlarini (trade_journal'daki
     500 satir sinirinin aksine, position_closures hicbir zaman silinmedigi icin
-    burada boyle bir kisitlama yok) eskiden-yeniye sirali doner."""
+    burada boyle bir kisitlama yok) eskiden-yeniye sirali doner.
+
+    Varsayilan olarak "IBKR" (Interactive Brokers Group hissesi, ticker: IBKR)
+    disariya alinir: bu hisse, aracı kurumdan (IBKR) islem yapabilmek icin
+    zorunlu tutulan bir pay - gercek bir AI alim-satim karari degil, bu yuzden
+    kar/zarari performans istatistiklerini carpitmasin diye haric tutuluyor.
+    include_mandatory_holdings=True verilirse bu filtre kaldirilir."""
     where_clauses = []
     params: List[Any] = []
     if days and days > 0:
@@ -903,6 +1001,9 @@ def db_all_position_closures(days: Optional[int] = None, broker: Optional[str] =
     if broker and broker.upper() != "ALL":
         where_clauses.append("UPPER(broker) LIKE ?")
         params.append(f"%{broker.upper()}%")
+    if not include_mandatory_holdings:
+        where_clauses.append("UPPER(symbol) != ?")
+        params.append("IBKR")
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     with DB_LOCK:
@@ -1571,6 +1672,7 @@ def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, curren
     kind = str(asset_type or "STK").upper()
     cur = str(currency or "USD").upper()
     ex = str(exchange or "SMART").upper()
+    assert_ibkr_market_allowed(ex, cur, sym)
 
     if kind == "STK":
         return ibs.Stock(sym, ex, cur)
@@ -1612,6 +1714,24 @@ def _clean_float(v: Any) -> float:
     return f if f == f and f not in (float("inf"), float("-inf")) else 0.0
 
 
+def _is_outside_regular_trading_hours(exchange: str) -> bool:
+    """Verilen borsanin normal seans saatleri disinda (pre-market/after-hours)
+    olup olmadigimizi kabaca (DST hassasiyeti olmadan, UTC saat araligiyla)
+    tahmin eder. Kesin bir takvim degil - sadece AI'nin karar gerekcesine
+    'bu fiyat off-market/mesai-disi olusmus olabilir' notu eklemek icindir
+    (kullanicinin talebi: 'off market işlemlerinin de referans alınması')."""
+    ex = str(exchange or "SMART").upper()
+    now_utc = datetime.now(timezone.utc)
+    minute_of_day = now_utc.hour * 60 + now_utc.minute
+    if ex == "LSE":
+        start, end = 8 * 60, 16 * 60 + 30       # 08:00-16:30 UTC (Londra, GMT yaklasik)
+    elif ex == "SEHK":
+        start, end = 1 * 60 + 30, 8 * 60         # 01:30-08:00 UTC (Hong Kong, UTC+8 yaklasik)
+    else:
+        start, end = 13 * 60 + 30, 20 * 60       # 13:30-20:00 UTC (ABD, ET yaklasik)
+    return not (start <= minute_of_day <= end)
+
+
 def _build_snapshot_from_ticker(ticker, symbol: str, asset_type: str, exchange: str, currency: str) -> Dict[str, Any]:
     price = _clean_float(ticker.marketPrice())
     last_price = _clean_float(getattr(ticker, "last", 0))
@@ -1634,6 +1754,12 @@ def _build_snapshot_from_ticker(ticker, symbol: str, asset_type: str, exchange: 
                 order_flow_signal = "BUY"
             elif bid_ratio < 0.42:
                 order_flow_signal = "SELL"
+    # Off-market/mesai-disi (pre-market, after-hours) referans: IBKR'nin canli
+    # ticker fiyati (marketPrice/last) normal seans disindaki islemleri de
+    # yansitir - AI kararinda bu fiyatin off-market mi yoksa normal seansta mi
+    # olustugunu belirtmek icin bir bayrak ekleniyor (kullanicinin talebi:
+    # 'off market işlemlerinin de referans alınması').
+    is_extended_hours = _is_outside_regular_trading_hours(exchange)
     return {
         "symbol": normalize_symbol(symbol),
         "asset_type": str(asset_type or "STK").upper(),
@@ -1646,6 +1772,7 @@ def _build_snapshot_from_ticker(ticker, symbol: str, asset_type: str, exchange: 
         "bid_size": bid_size,
         "ask_size": ask_size,
         "order_flow_signal": order_flow_signal,
+        "is_extended_hours": is_extended_hours,
         "last_update": now_text(),
     }
 
@@ -1862,6 +1989,75 @@ def get_ibkr_available_funds() -> float:
                 return safe_float(r.get("value"))
         return 0.0
     return _cache_get_or_fetch("ibkr_available_funds", 20, _fetch)
+
+
+def get_ibkr_cash_balance(currency: str) -> float:
+    """IBKR hesabindaki belirli bir para biriminden (ör. GBP, HKD) elde bulunan
+    nakit bakiyeyi dondurur. Coklu-borsa alimlarinda (Ingiltere/Hong Kong) once
+    o para biriminde yeterli nakit olup olmadigini kontrol etmek icin kullanilir."""
+    cur = str(currency or "USD").upper()
+
+    def _fetch():
+        try:
+            rows = ibkr_account_summary_snapshot()
+        except Exception:
+            return 0.0
+        for r in rows:
+            if str(r.get("tag", "")) == "CashBalance" and str(r.get("currency", "")).upper() == cur:
+                return safe_float(r.get("value"))
+        return 0.0
+    return _cache_get_or_fetch(f"ibkr_cash_balance_{cur}", 20, _fetch)
+
+
+def ensure_ibkr_currency_funds(target_currency: str, needed_amount: float) -> Dict[str, Any]:
+    """Hedef para biriminde (ör. GBP/HKD) bir hisse alimi yapabilmek icin nakit
+    yetersizse, USD nakitten IDEALPRO uzerinden otomatik doviz cevrimi (FX market
+    emri) yaparak eksigi tamamlar. Kullanicinin talebi: 'sistemi nakit parayi
+    gerektiginde farkli para birimine donusturup islem yapabilecek sekilde ayarla'.
+    USD hedefse hicbir sey yapmaz (zaten ana para birimi)."""
+    cur = str(target_currency or "USD").upper()
+    if cur == "USD" or needed_amount <= 0:
+        return {"converted": False, "reason": "USD hedef veya miktar sifir, cevrime gerek yok."}
+
+    assert_ibkr_market_allowed("IDEALPRO", cur, "FX")
+
+    current_balance = get_ibkr_cash_balance(cur)
+    if current_balance >= needed_amount:
+        return {"converted": False, "reason": f"Yeterli {cur} bakiyesi zaten mevcut.", "balance": current_balance}
+
+    shortfall = needed_amount - current_balance
+    # Kur hareketi/slipaj icin %3 tampon payi ekleniyor.
+    buy_amount = round(shortfall * 1.03, 2)
+
+    def _run(ib, ibs):
+        pair = ibs.Forex(f"{cur}USD", exchange="IDEALPRO")
+        qualified = ib.qualifyContracts(pair)
+        if not qualified:
+            raise RuntimeError(f"IDEALPRO {cur}USD kontrati dogrulanamadi.")
+        order = ibs.MarketOrder("BUY", buy_amount)
+        order.tif = "DAY"
+        if IBKR_ACCOUNT:
+            order.account = IBKR_ACCOUNT
+        trade = ib.placeOrder(qualified[0], order)
+        for _ in range(40):
+            status = str(getattr(trade.orderStatus, "status", ""))
+            if status in ibs.OrderStatus.DoneStates:
+                break
+            ib.sleep(0.25)
+        return {
+            "converted": True,
+            "pair": f"{cur}USD",
+            "amount_bought": buy_amount,
+            "status": getattr(trade.orderStatus, "status", ""),
+            "avg_fill_price": safe_float(getattr(trade.orderStatus, "avgFillPrice", 0)),
+        }
+
+    try:
+        result = ibkr_execute(_run)
+        _invalidate_cache(f"ibkr_cash_balance_{cur}")
+        return result
+    except Exception as exc:
+        return {"converted": False, "error": str(exc)}
 
 
 def ibkr_place_market_order(
@@ -2334,6 +2530,67 @@ def get_macro_regime() -> Dict[str, Any]:
     return _cache_get_or_fetch("macro_regime", 14400, _fetch)
 
 
+def get_region_session_bias(region: str) -> Dict[str, Any]:
+    """Bir bolgenin (ASIA/UK/US) o gunku ortalama fiyat degisimini (change_24h)
+    IBKR_SYMBOL_MARKET_INFO'daki o bolgeye ait semboller uzerinden hesaplar.
+    Kullanicinin talebi: 'Asya borsalari kotu acildi/kapandi ya da gun ici
+    dustuyse, ABD veya daha sonra acilan borsalarda buna gore pozisyon al'."""
+    region_symbols = [s for s, info in IBKR_SYMBOL_MARKET_INFO.items() if info.get("region") == region]
+
+    def _fetch():
+        changes = []
+        for sym in region_symbols:
+            try:
+                info = IBKR_SYMBOL_MARKET_INFO[sym]
+                snap = ibkr_market_snapshot(sym, "STK", info["exchange"], info["currency"])
+                changes.append(safe_float(snap.get("change_24h")))
+            except Exception:
+                continue
+        if not changes:
+            return {"region": region, "avg_change_pct": 0.0, "bias_label": "NEUTRAL", "sample_size": 0}
+        avg = sum(changes) / len(changes)
+        if avg > 1.0:
+            label = "RISK_ON"
+        elif avg < -1.0:
+            label = "RISK_OFF"
+        else:
+            label = "NEUTRAL"
+        return {
+            "region": region,
+            "avg_change_pct": round(avg, 3),
+            "bias_label": label,
+            "sample_size": len(changes),
+        }
+    return _cache_get_or_fetch(f"region_session_bias_{region}", 900, _fetch)
+
+
+def get_cross_session_bias(region: str) -> Dict[str, Any]:
+    """Seans sirasindaki (ASIA -> UK -> US) bir onceki bolgenin risk yonunu
+    bugunku sinyale kucuk bir guven yanliligi (bias) olarak yansitir. Ornegin
+    Asya borsalari sert dusmusse (RISK_OFF), henuz acilmamis/yeni acilan
+    ABD/Ingiltere sembollerinde bu, hafif bir SELL egilimi (negatif bias) olarak
+    dikkate alinir; Asya guclu acilmissa (RISK_ON) hafif bir BUY egilimi (pozitif
+    bias) eklenir. Boylece bolgeler arasi 'bulasma/sürüklenme' etkisi otomatik
+    sekilde islem kararina yansitilmis olur."""
+    prior_region = IBKR_SESSION_SEQUENCE.get(region)
+    if not prior_region:
+        return {"bias": 0, "note": ""}
+    prior = get_region_session_bias(prior_region)
+    label = prior.get("bias_label", "NEUTRAL")
+    avg = safe_float(prior.get("avg_change_pct"))
+    if label == "RISK_OFF":
+        return {
+            "bias": -8,
+            "note": f"[Seans-Sirasi] {prior_region} seansı %{avg:.2f} ile RISK_OFF kapandı, {region} seansında temkinli davranılıyor.",
+        }
+    if label == "RISK_ON":
+        return {
+            "bias": 8,
+            "note": f"[Seans-Sirasi] {prior_region} seansı %{avg:.2f} ile RISK_ON kapandı, {region} seansına olumlu momentum aktarılıyor.",
+        }
+    return {"bias": 0, "note": ""}
+
+
 def get_macro_risk_bias(symbol: str, action: str) -> Dict[str, Any]:
     """Balon/asiri degerleme, bilanco/nakit akis sagligi, short/long pozisyonlanma
     ve manipulasyon taramasi, ve sektorler arasi senaryo analizini (hepsi
@@ -2648,7 +2905,7 @@ def get_fundamental_valuation_analysis() -> Dict[str, Any]:
         results: List[Dict[str, Any]] = []
         for sym in symbols:
             try:
-                info = yf.Ticker(sym).info or {}
+                info = yf.Ticker(to_yfinance_symbol(sym)).info or {}
                 pb = safe_float(info.get("priceToBook"))
                 if pb <= 0:
                     continue
@@ -2733,7 +2990,7 @@ def get_financial_statement_analysis() -> Dict[str, Any]:
         results: List[Dict[str, Any]] = []
         for sym in symbols:
             try:
-                tk = yf.Ticker(sym)
+                tk = yf.Ticker(to_yfinance_symbol(sym))
                 bs = tk.balance_sheet
                 cf = tk.cashflow
                 inc = tk.financials
@@ -2968,7 +3225,7 @@ def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
         results: List[Dict[str, Any]] = []
         for sym in symbols:
             try:
-                info = yf.Ticker(sym).info or {}
+                info = yf.Ticker(to_yfinance_symbol(sym)).info or {}
                 short_pct_float = safe_float(info.get("shortPercentOfFloat")) * 100.0
                 short_ratio_days = safe_float(info.get("shortRatio"))
                 institutional_pct = safe_float(info.get("heldPercentInstitutions")) * 100.0
@@ -4088,6 +4345,22 @@ def _auto_trader_run_symbol(
     execution: Dict[str, Any] = {"simulated": True, "message": "Emir yok"}
 
     if broker == "IBKR":
+        # Cok-borsali havuz destegi: her sembolun kendi borsa/para birimi vardir
+        # (ör. AAPL->SMART/USD, SHEL->LSE/GBP, 700->SEHK/HKD). Global auto-trader
+        # ayarlari (exchange/currency) yerine sembole ozel bilgi kullanilir - bu
+        # sayede tek bir tarama dongusu ABD/Ingiltere/Hong Kong hisselerini ayni
+        # anda dogru borsa/para birimiyle isleyebilir. IBKR_SYMBOL_MARKET_INFO
+        # icinde tanimli olmayan (manuel/ozel) semboller icin eski davranisa
+        # (state uzerindeki asset_type/exchange/currency) geri donulur.
+        market_info = get_ibkr_symbol_market_info(symbol)
+        if normalize_symbol(symbol) in IBKR_SYMBOL_MARKET_INFO:
+            exchange = market_info["exchange"]
+            currency = market_info["currency"]
+        symbol_region = market_info.get("region", "US")
+        # Guvenlik: her ihtimale karsi burada da Turkiye/TRY kontrolu (build_ibkr_contract
+        # zaten en alt seviyede engelliyor, ama erken tespit daha net bir hata verir).
+        assert_ibkr_market_allowed(exchange, currency, symbol)
+
         # IBKR icin iki bagimsiz sinyal kullanilir: (1) fiyat momentumu (change_24h),
         # (2) emir defteri bid/ask boyut dengesi (order_flow_signal). Ikisi ayni yonde
         # BUY/SELL derse islem acilir; biri WAIT/NEUTRAL ise digeri tek basina yeterlidir
@@ -4126,6 +4399,12 @@ def _auto_trader_run_symbol(
                 reason = f"IBKR emir akışı sinyali: bid/ask dengesi {order_flow} yönünde, momentum nötr."
             else:
                 reason = f"IBKR: net sinyal yok (24s değişim %{change:.2f})."
+
+        if snap.get("is_extended_hours"):
+            reason = (
+                reason + " [Not: Bu fiyat mesai-dışı (off-market/pre-post-market) işlemlere dayanıyor, "
+                "normal seans açılışında oynaklık farklı olabilir.]"
+            ).strip()
     else:
         ai = calculate_ai_signal(symbol, market)
         action = str(ai.get("signal", "WAIT")).upper()
@@ -4169,6 +4448,16 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + macro_risk["bias"]))
         if macro_risk["notes"]:
             reason = (reason + " " + " ".join(macro_risk["notes"])).strip()
+
+        # Bolgeler-arasi seans sirasi sinyali: sadece IBKR (hisse) sembolleri icin
+        # anlamlidir - Asya kotu/iyi kapanmissa bu, Ingiltere/ABD seansindaki
+        # karara hafif bir yanlilik (bias) olarak yansitilir.
+        if broker == "IBKR":
+            cross_session = get_cross_session_bias(symbol_region)
+            if cross_session["bias"] != 0:
+                confidence = max(0, min(95, confidence + cross_session["bias"]))
+            if cross_session["note"]:
+                reason = (reason + " " + cross_session["note"]).strip()
     resolve_learning(symbol, price)
 
     with lock:
@@ -4351,6 +4640,20 @@ def _auto_trader_run_symbol(
                                 qty = 0
                                 pre_close_position = None
                     if qty > 0 and "error" not in execution:
+                        # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
+                        # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
+                        # USD nakitten otomatik IDEALPRO FX cevrimi yap. Kullanicinin talebi:
+                        # 'nakit parayi gerektiginde farkli para birimine donusturup islem
+                        # yapabilecek sekilde ayarla'.
+                        if action == "BUY" and currency.upper() != "USD" and price > 0:
+                            fx_result = ensure_ibkr_currency_funds(currency, qty * price)
+                            if fx_result.get("converted"):
+                                reason = (
+                                    reason
+                                    + f" (Otomatik FX: {fx_result.get('amount_bought', 0):.2f} {currency} USD'den satın alındı.)"
+                                ).strip()
+                            elif fx_result.get("error"):
+                                reason = (reason + f" (FX cevrim uyarisi: {fx_result['error']})").strip()
                         execution = ibkr_place_market_order(symbol, action, qty, asset_type, exchange, currency)
                         # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
                         # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
@@ -7786,14 +8089,18 @@ def performance_stats_route():
     """Kapanmis pozisyonlardan (position_closures - hicbir zaman silinmez, 500
     satir sinirina tabi degildir) gercek performans metriklerini (win rate,
     profit factor, maksimum dusus, kapanis nedeni/broker/sembol kirilimi)
-    hesaplar. Ornek: /performance-stats?days=30&broker=ALL"""
+    hesaplar. Ornek: /performance-stats?days=30&broker=ALL
+
+    IBKR hissesi (aracı kurumdan islem yapabilmek icin zorunlu tutulan pay)
+    varsayilan olarak haric tutulur; dahil etmek icin include_mandatory=1."""
     days_param = request.args.get("days")
     days = int(safe_float(days_param)) if days_param else None
     broker = request.args.get("broker", "ALL")
+    include_mandatory = str(request.args.get("include_mandatory", "0")).lower() in ("1", "true", "yes")
     try:
-        rows = db_all_position_closures(days=days, broker=broker)
+        rows = db_all_position_closures(days=days, broker=broker, include_mandatory_holdings=include_mandatory)
         stats = compute_performance_stats(rows)
-        stats["filter"] = {"days": days, "broker": broker}
+        stats["filter"] = {"days": days, "broker": broker, "include_mandatory_holdings": include_mandatory}
         stats["time"] = now_text()
         return jsonify(stats)
     except Exception as e:
