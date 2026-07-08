@@ -35,7 +35,9 @@ import uuid
 import queue
 import sqlite3
 import hashlib
+import smtplib
 import threading
+from email.mime.text import MIMEText
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -692,6 +694,77 @@ def db_closest_balance_snapshot(hours_ago: float) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+CLOSE_REASON_LABELS_TR = {
+    "TAKE_PROFIT": "Kâr Al",
+    "STOP_LOSS": "Zarar Kes",
+    "MANUAL": "Manuel Kapatma",
+    "AI_KARARI": "AI Kararı",
+}
+
+NOTIFY_EMAIL_ENABLED = os.environ.get("NOTIFY_EMAIL_ENABLED", "true").lower() not in ("false", "0", "")
+NOTIFY_EMAIL_SENDER = os.environ.get("NOTIFY_EMAIL_SENDER", "")
+NOTIFY_EMAIL_PASSWORD = os.environ.get("NOTIFY_EMAIL_PASSWORD", "")
+NOTIFY_EMAIL_RECIPIENT = os.environ.get("NOTIFY_EMAIL_RECIPIENT", "")
+
+
+def send_position_closure_email(
+    broker: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    realized_pnl: float,
+    realized_pnl_pct: float,
+    close_reason: str,
+    detail: str,
+) -> None:
+    """Bir pozisyon kapandiginda kullaniciya mail atar; boylece son 100 kayitla
+    sinirli AI gunlugunu takip etmek zorunda kalmadan (kacirma riski olmadan)
+    kapanisi (kar mi zarar mi, neden) aninda gorur. Ayarlar eksikse veya SMTP
+    basarisiz olursa sessizce gecilir - trading akisini asla bloklamaz/bozmaz."""
+    if not NOTIFY_EMAIL_ENABLED:
+        return
+    if not (NOTIFY_EMAIL_SENDER and NOTIFY_EMAIL_PASSWORD and NOTIFY_EMAIL_RECIPIENT):
+        return
+
+    def _send():
+        try:
+            reason_label = CLOSE_REASON_LABELS_TR.get(str(close_reason).upper(), str(close_reason))
+            is_profit = realized_pnl >= 0
+            subject = (
+                f"[DFinans] {symbol} pozisyonu kapandı - "
+                f"{'KÂR' if is_profit else 'ZARAR'} ({reason_label})"
+            )
+            body = (
+                f"Pozisyon kapandı.\n\n"
+                f"Sembol: {symbol}\n"
+                f"Borsa: {broker}\n"
+                f"Yön: {side}\n"
+                f"Miktar: {qty}\n"
+                f"Giriş Fiyatı: {entry_price}\n"
+                f"Çıkış Fiyatı: {exit_price}\n"
+                f"Kapanma Nedeni: {reason_label}\n"
+                f"Gerçekleşen K/Z: {'+' if is_profit else ''}{realized_pnl:.2f} "
+                f"(%{realized_pnl_pct:.2f})\n"
+                f"Detay: {detail}\n\n"
+                f"Zaman: {now_text()}\n"
+            )
+            msg = MIMEText(body, "plain", "utf-8")
+            msg["Subject"] = subject
+            msg["From"] = NOTIFY_EMAIL_SENDER
+            msg["To"] = NOTIFY_EMAIL_RECIPIENT
+
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+                server.starttls()
+                server.login(NOTIFY_EMAIL_SENDER, NOTIFY_EMAIL_PASSWORD)
+                server.sendmail(NOTIFY_EMAIL_SENDER, [NOTIFY_EMAIL_RECIPIENT], msg.as_string())
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
 def db_record_position_closure(
     broker: str,
     symbol: str,
@@ -740,6 +813,19 @@ def db_record_position_closure(
                 conn.close()
     except Exception:
         pass
+
+    send_position_closure_email(
+        broker=broker,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        realized_pnl=realized_pnl,
+        realized_pnl_pct=realized_pnl_pct,
+        close_reason=close_reason,
+        detail=detail,
+    )
 
 
 def db_recent_position_closures(limit: int = 50) -> List[Dict[str, Any]]:
@@ -6494,12 +6580,7 @@ def position_closures_alias():
         limit = max(1, min(int(request.args.get("limit", "50")), 200))
     except Exception:
         limit = 50
-    reason_labels = {
-        "TAKE_PROFIT": "Kâr Al",
-        "STOP_LOSS": "Zarar Kes",
-        "MANUAL": "Manuel Kapatma",
-        "AI_KARARI": "AI Kararı",
-    }
+    reason_labels = CLOSE_REASON_LABELS_TR
     try:
         rows = db_recent_position_closures(limit)
         items = []
@@ -6529,6 +6610,31 @@ def position_closures_alias():
         return jsonify({"ok": True, "items": items, "time": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "items": [], "error": str(e), "time": now_text()}), 200
+
+
+@app.route("/position-closures/test-email", methods=["POST", "GET"])
+def position_closures_test_email():
+    """Mail ayarlarinin (NOTIFY_EMAIL_*) dogru calistigini canli olarak
+    dogrulamak icin ornek bir kapanis maili gonderir. Kayit olusturmaz,
+    sadece mail atar."""
+    if not (NOTIFY_EMAIL_ENABLED and NOTIFY_EMAIL_SENDER and NOTIFY_EMAIL_PASSWORD and NOTIFY_EMAIL_RECIPIENT):
+        return jsonify({
+            "ok": False,
+            "error": "E-posta ayarları eksik (NOTIFY_EMAIL_ENABLED/SENDER/PASSWORD/RECIPIENT).",
+        }), 200
+    send_position_closure_email(
+        broker="TEST",
+        symbol="TESTUSDT",
+        side="LONG",
+        qty=1.0,
+        entry_price=100.0,
+        exit_price=105.0,
+        realized_pnl=5.0,
+        realized_pnl_pct=5.0,
+        close_reason="TAKE_PROFIT",
+        detail="Bu bir test mailidir; ayarların doğru çalıştığını kontrol etmek için gönderildi.",
+    )
+    return jsonify({"ok": True, "message": "Test maili gönderildi (birkaç saniye içinde gelmeli).", "time": now_text()})
 
 
 # ---------------------------------------------------------------------------
