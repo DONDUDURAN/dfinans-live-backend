@@ -3350,13 +3350,12 @@ def build_dd_ai_dashboard() -> Dict[str, Any]:
         return f"{prefix}{val:,.{decimals}f}"
 
     def _fmt_rate(key: str) -> str:
-        # Yahoo'nun ^TNX (ABD 10 yillik tahvil getirisi) endeksi getiriyi 10 ile
-        # carpilmis olarak verir (ornegin gercek getiri %4.25 ise deger 42.5
-        # gelir) - gercek yuzdeye cevirmek icin 10'a bolunur.
+        # ^TNX (ABD 10 yillik tahvil getirisi) Yahoo'dan dogrudan yuzde olarak
+        # gelir (ornegin 4.53 -> %4.53), ekstra bir olcek donusumu gerekmez.
         t = macro_raw.get(key)
         if not t or safe_float(t.get("price")) <= 0:
             return "-"
-        val = safe_float(t.get("price")) / 10.0
+        val = safe_float(t.get("price"))
         return f"%{val:,.2f}"
 
     vix_val = safe_float((macro_raw.get("VIX") or {}).get("price"))
