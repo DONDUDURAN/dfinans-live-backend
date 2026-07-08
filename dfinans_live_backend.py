@@ -1120,6 +1120,151 @@ def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# --- STRATEJI PERFORMANS ANALIZI --------------------------------------------
+# Kullanicinin talebi: 'onumuzdeki bir ay icinde yapilan tum islemleri analiz
+# edip, hangi stratejiyi kullanmak faydali onu hesaplayalim'. AI, her karar
+# gerekcesine (reason/detail metni) hangi sinyal turlerinin katkida bulundugunu
+# zaten yaziyor (momentum, emir akisi, cift teyit, korelasyon, dis sinyal,
+# makro risk, seans-sirasi). Bu etiketler position_closures.detail metninden
+# geriye donuk olarak cikarilip, her sinyal turunun gercek kapanmis
+# pozisyonlardaki basari oranina (win rate) ve karina gore karsilastirilir.
+_STRATEGY_SIGNAL_TAGS: Dict[str, List[str]] = {
+    "CIFT_TEYIT": ["çift teyit", "cift teyit"],
+    "MOMENTUM": ["momentum sinyali", "momentum (24s"],
+    "EMIR_AKISI": ["emir akışı sinyali", "emir akışı"],
+    "KORELASYON_LAG": ["korelasyon", "lag", "hedge"],
+    "DIS_SINYAL": ["sec dosyalama", "haber sentiment", "fear", "greed", "funding", "whale", "jeopolitik"],
+    "MAKRO_RISK": ["makro", "balon", "asiri deger", "aşırı değer", "manipulasyon", "manipülasyon"],
+    "SEANS_SIRASI": ["seans-sırası", "seans-sirasi", "risk_on", "risk_off"],
+    "OFF_MARKET": ["mesai-dışı", "mesai-disi", "off-market"],
+    "FX_DONUSUM": ["otomatik fx", "fx cevrim", "fx çevrim"],
+    "TP_SL": ["kâr hedefi", "kar hedefi", "zarar-kes"],
+}
+
+
+def compute_strategy_analysis(rows: List[Dict[str, Any]], base_stats: Dict[str, Any]) -> Dict[str, Any]:
+    """Verilen kapanis kayitlarini (position_closures) sinyal turune gore
+    etiketler ve her turun win rate / profit factor / ortalama PNL degerlerini
+    hesaplayip, en yuksek performansli stratejiyi (ve en zayifini) belirler.
+    Ayni kapanis birden fazla sinyal etiketi tasiyabilir (ör. hem momentum hem
+    disaridan teyit) - bu yuzden etiketler birbirini DISLAMAZ, her biri
+    kendi grubunda ayri ayri degerlendirilir."""
+    if not rows:
+        return {"note": "Analiz için yeterli kapanmış pozisyon kaydı yok.", "recommendation": ""}
+
+    by_tag: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        detail_text = str(r.get("detail", "")).lower()
+        pnl = safe_float(r.get("realized_pnl"))
+        matched_any = False
+        for tag, keywords in _STRATEGY_SIGNAL_TAGS.items():
+            if any(kw in detail_text for kw in keywords):
+                matched_any = True
+                bucket = by_tag.setdefault(tag, {"count": 0, "wins": 0, "total_pnl": 0.0, "win_pnl": 0.0, "loss_pnl": 0.0})
+                bucket["count"] += 1
+                bucket["total_pnl"] += pnl
+                if pnl > 0:
+                    bucket["wins"] += 1
+                    bucket["win_pnl"] += pnl
+                else:
+                    bucket["loss_pnl"] += abs(pnl)
+        if not matched_any:
+            bucket = by_tag.setdefault("DIGER_GENEL", {"count": 0, "wins": 0, "total_pnl": 0.0, "win_pnl": 0.0, "loss_pnl": 0.0})
+            bucket["count"] += 1
+            bucket["total_pnl"] += pnl
+            if pnl > 0:
+                bucket["wins"] += 1
+                bucket["win_pnl"] += pnl
+            else:
+                bucket["loss_pnl"] += abs(pnl)
+
+    for tag, bucket in by_tag.items():
+        bucket["win_rate_pct"] = round((bucket["wins"] / bucket["count"]) * 100.0, 2) if bucket["count"] else 0.0
+        bucket["total_pnl"] = round(bucket["total_pnl"], 2)
+        bucket["profit_factor"] = round(bucket["win_pnl"] / bucket["loss_pnl"], 2) if bucket["loss_pnl"] > 0 else (round(bucket["win_pnl"], 2) if bucket["win_pnl"] > 0 else 0.0)
+        bucket["avg_pnl_per_trade"] = round(bucket["total_pnl"] / bucket["count"], 2) if bucket["count"] else 0.0
+        del bucket["win_pnl"]
+        del bucket["loss_pnl"]
+
+    # Guvenilir bir karsilastirma icin en az 3 islemi olan etiketler dikkate
+    # alinir (tek/iki islemlik "sansli" sonuclar oneriyi carpitmasin diye).
+    reliable_tags = {tag: b for tag, b in by_tag.items() if b["count"] >= 3}
+    ranking_pool = reliable_tags if reliable_tags else by_tag
+
+    best_tag, best_bucket, worst_tag, worst_bucket = None, None, None, None
+    if ranking_pool:
+        best_tag, best_bucket = max(ranking_pool.items(), key=lambda kv: (kv[1]["profit_factor"], kv[1]["win_rate_pct"]))
+        worst_tag, worst_bucket = min(ranking_pool.items(), key=lambda kv: (kv[1]["profit_factor"], kv[1]["win_rate_pct"]))
+
+    by_broker = base_stats.get("by_broker", {})
+    reliable_brokers = {b: v for b, v in by_broker.items() if v.get("count", 0) >= 3} or by_broker
+    best_broker, best_broker_bucket = (None, None)
+    if reliable_brokers:
+        best_broker, best_broker_bucket = max(
+            reliable_brokers.items(),
+            key=lambda kv: (kv[1].get("total_pnl", 0), kv[1].get("win_rate_pct", 0)),
+        )
+
+    top_symbols = base_stats.get("top_5_symbols_by_pnl", [])
+    worst_symbols = base_stats.get("worst_5_symbols_by_pnl", [])
+
+    tag_labels_tr = {
+        "CIFT_TEYIT": "İkili teyitli sinyal (momentum + emir akışı aynı yönde)",
+        "MOMENTUM": "Sadece fiyat momentumu sinyali",
+        "EMIR_AKISI": "Sadece emir defteri (bid/ask) sinyali",
+        "KORELASYON_LAG": "Korelasyon/lag/hedge motoru sinyali",
+        "DIS_SINYAL": "Dış sinyaller (haber, Fear&Greed, funding, jeopolitik)",
+        "MAKRO_RISK": "Makro/balon/manipülasyon riski sinyali",
+        "SEANS_SIRASI": "Bölgeler-arası seans-sırası (Asya→UK→ABD) sinyali",
+        "OFF_MARKET": "Mesai-dışı (off-market) fiyat referanslı kararlar",
+        "FX_DONUSUM": "Otomatik döviz (FX) çevrimli işlemler",
+        "TP_SL": "Kâr-al / Zarar-kes tetiklemeli kapanışlar",
+        "DIGER_GENEL": "Diğer/genel AI kararları (özel etiket yok)",
+    }
+
+    recommendation_lines = []
+    if best_tag:
+        label = tag_labels_tr.get(best_tag, best_tag)
+        recommendation_lines.append(
+            f"En verimli sinyal stratejisi: '{label}' — {best_bucket['count']} işlemde "
+            f"%{best_bucket['win_rate_pct']:.1f} kazanma oranı, {best_bucket['profit_factor']:.2f} profit factor, "
+            f"toplam {best_bucket['total_pnl']:.2f} gerçekleşen K/Z."
+        )
+    if worst_tag and worst_tag != best_tag:
+        label = tag_labels_tr.get(worst_tag, worst_tag)
+        recommendation_lines.append(
+            f"En zayıf performans: '{label}' — {worst_bucket['count']} işlemde "
+            f"%{worst_bucket['win_rate_pct']:.1f} kazanma oranı, {worst_bucket['profit_factor']:.2f} profit factor. "
+            f"Bu tür sinyallerde güven eşiği (min_confidence) yükseltilmesi düşünülebilir."
+        )
+    if best_broker:
+        recommendation_lines.append(
+            f"En kârlı broker/piyasa: {best_broker} — toplam {best_broker_bucket.get('total_pnl', 0):.2f} K/Z, "
+            f"%{best_broker_bucket.get('win_rate_pct', 0):.1f} kazanma oranı ({best_broker_bucket.get('count', 0)} işlem)."
+        )
+    if top_symbols:
+        recommendation_lines.append(
+            "En kârlı semboller: " + ", ".join(f"{s['symbol']} ({s['pnl']:+.2f})" for s in top_symbols[:3])
+        )
+    if worst_symbols:
+        recommendation_lines.append(
+            "Gözden geçirilmesi gereken semboller (zarar): " + ", ".join(f"{s['symbol']} ({s['pnl']:+.2f})" for s in worst_symbols[:3])
+        )
+
+    return {
+        "by_signal_tag": by_tag,
+        "tag_labels": tag_labels_tr,
+        "best_strategy_tag": best_tag,
+        "worst_strategy_tag": worst_tag,
+        "best_broker": best_broker,
+        "recommendation": " ".join(recommendation_lines) if recommendation_lines else "Yeterli veri birikmedi, öneri için daha fazla kapanmış işlem gerekiyor.",
+        "recommendation_lines": recommendation_lines,
+        "analyzed_trades": len(rows),
+        "analysis_window_days": 30,
+        "generated_at": now_text(),
+    }
+
+
 def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
     with DB_LOCK:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
@@ -8168,6 +8313,32 @@ def performance_stats_route():
         return jsonify(stats)
     except Exception as e:
         return jsonify({"error": str(e), "total_trades": 0, "time": now_text()}), 200
+
+
+@app.route("/strategy-analysis", methods=["GET"])
+def strategy_analysis_route():
+    """Son N gundeki (varsayilan 30 - 'onumuzdeki/gecen bir ay') TUM kapanmis
+    islemleri broker, sembol VE sinyal-turu kirilimina gore analiz edip hangi
+    stratejinin (momentum/emir akisi/cift teyit/korelasyon/dis sinyal/makro
+    risk/seans-sirasi vb.) en kazandiran oldugunu hesaplar ve Turkce bir
+    tavsiye metni doner. Ornek: /strategy-analysis?days=30&broker=ALL"""
+    days_param = request.args.get("days")
+    days = int(safe_float(days_param)) if days_param else 30
+    broker = request.args.get("broker", "ALL")
+    include_mandatory = str(request.args.get("include_mandatory", "0")).lower() in ("1", "true", "yes")
+    try:
+        rows = db_all_position_closures(days=days, broker=broker, include_mandatory_holdings=include_mandatory)
+        base_stats = compute_performance_stats(rows)
+        strategy = compute_strategy_analysis(rows, base_stats)
+        response = {
+            "performance": base_stats,
+            "strategy": strategy,
+            "filter": {"days": days, "broker": broker, "include_mandatory_holdings": include_mandatory},
+            "time": now_text(),
+        }
+        return jsonify(response)
+    except Exception as e:
+        return jsonify({"error": str(e), "time": now_text()}), 200
 
 
 @app.route("/position-closures/test-email", methods=["POST", "GET"])
