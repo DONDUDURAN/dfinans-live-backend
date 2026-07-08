@@ -5626,6 +5626,218 @@ def optimize_backtest_tp_sl(
     }
 
 
+def fetch_yahoo_daily_closes(symbol: str, days: int = 400) -> List[Dict[str, Any]]:
+    """IBKR hisseleri icin gecmis gunluk kapanis fiyatlarini Yahoo Finance
+    (yfinance) uzerinden ceker. IBKR'in kendisi ucretsiz/pratik gecmis veri
+    sunmadigi icin, canli sistemde zaten korelasyon motorunda (_yfinance_daily_returns)
+    kullanilan ayni veri kaynagi tercih edildi."""
+    import yfinance as yf
+    ticker = yf.Ticker(symbol)
+    hist = ticker.history(period=f"{max(30, min(days, 3650))}d", interval="1d")
+    if hist is None or hist.empty or "Close" not in hist:
+        return []
+    out = []
+    for ts, row in hist.iterrows():
+        close = float(row["Close"])
+        if close and close == close:  # NaN kontrolu
+            out.append({"date": str(ts.date()), "close": close})
+    return out
+
+
+def run_stock_backtest(
+    symbol: str,
+    days: int = 400,
+    take_profit_pct: Optional[float] = None,
+    stop_loss_pct: Optional[float] = None,
+    min_loss_pct: Optional[float] = None,
+    fee_pct: float = 0.05,
+    _prefetched_bars: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """IBKR (hisse) icin canli sistemin momentum bacagini (gunluk kapanis-kapanis
+    degisimi > %0.6 -> BUY, < -%0.6 -> SELL) gecmis Yahoo Finance gunluk verisinde
+    tekrar oynatir. Canli sistemdeki ikinci sinyal (emir defteri bid/ask dengesi -
+    order_flow_signal) gecmis derinlik verisi bulunmadigi icin dahil edilmemistir;
+    yani bu backtest sadece momentum bacagini test eder, IBKR'in "cift teyit"
+    ozelligini degil."""
+    symbol = symbol.upper()
+    take_profit_pct = IBKR_TAKE_PROFIT_PCT if take_profit_pct is None else take_profit_pct
+    stop_loss_pct = IBKR_STOP_LOSS_PCT if stop_loss_pct is None else stop_loss_pct
+    min_loss_pct = IBKR_AI_SELL_MIN_LOSS_PCT if min_loss_pct is None else min_loss_pct
+
+    bars = _prefetched_bars if _prefetched_bars is not None else fetch_yahoo_daily_closes(symbol, days)
+    if len(bars) < 10:
+        return {"error": "Yeterli gecmis gunluk veri alinamadi.", "symbol": symbol}
+
+    closes = [b["close"] for b in bars]
+    position: Optional[Dict[str, Any]] = None
+    trades: List[Dict[str, Any]] = []
+    equity = 100.0
+    equity_curve = [equity]
+
+    def _fee(pct_move: float) -> float:
+        return pct_move - 2 * fee_pct
+
+    for i in range(1, len(bars)):
+        price = closes[i]
+        prev_price = closes[i - 1]
+        if prev_price <= 0:
+            continue
+        change = ((price - prev_price) / prev_price) * 100.0
+
+        signal = "WAIT"
+        if change > 0.6:
+            signal = "BUY"
+        elif change < -0.6:
+            signal = "SELL"
+
+        if position is not None:
+            entry_price = position["entry_price"]
+            pnl_pct = ((price - entry_price) / entry_price) * 100.0
+            close_reason = None
+            if pnl_pct >= take_profit_pct:
+                close_reason = "TP"
+            elif pnl_pct <= -stop_loss_pct:
+                close_reason = "SL"
+            elif signal == "SELL":
+                if pnl_pct < 0 and abs(pnl_pct) < min_loss_pct:
+                    pass
+                else:
+                    close_reason = "AI_KARARI"
+
+            if close_reason:
+                net_pnl_pct = _fee(pnl_pct)
+                equity *= (1 + net_pnl_pct / 100.0)
+                trades.append({
+                    "entry_date": position["entry_date"],
+                    "exit_date": bars[i]["date"],
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(price, 4),
+                    "pnl_pct": round(net_pnl_pct, 3),
+                    "close_reason": close_reason,
+                })
+                position = None
+
+        if position is None and signal == "BUY":
+            position = {"entry_date": bars[i]["date"], "entry_price": price}
+
+        equity_curve.append(equity)
+
+    open_position = None
+    if position is not None:
+        last_price = closes[-1]
+        open_pnl_pct = ((last_price - position["entry_price"]) / position["entry_price"]) * 100.0
+        open_position = {
+            "entry_date": position["entry_date"],
+            "entry_price": round(position["entry_price"], 4),
+            "current_price": round(last_price, 4),
+            "unrealized_pnl_pct": round(open_pnl_pct, 3),
+        }
+
+    wins = [t for t in trades if t["pnl_pct"] > 0]
+    losses = [t for t in trades if t["pnl_pct"] <= 0]
+    total_trades = len(trades)
+    win_rate = round((len(wins) / total_trades) * 100.0, 2) if total_trades else 0.0
+    sum_wins = sum(t["pnl_pct"] for t in wins)
+    sum_losses_abs = abs(sum(t["pnl_pct"] for t in losses))
+    profit_factor = round(sum_wins / sum_losses_abs, 2) if sum_losses_abs > 0 else (round(sum_wins, 2) if sum_wins > 0 else 0.0)
+    avg_win_pct = round(sum_wins / len(wins), 3) if wins else 0.0
+    avg_loss_pct = round(sum(t["pnl_pct"] for t in losses) / len(losses), 3) if losses else 0.0
+
+    peak = equity_curve[0]
+    max_drawdown_pct = 0.0
+    for v in equity_curve:
+        peak = max(peak, v)
+        if peak > 0:
+            dd = (peak - v) / peak * 100.0
+            max_drawdown_pct = max(max_drawdown_pct, dd)
+
+    trade_returns = [t["pnl_pct"] for t in trades]
+    sharpe_like = 0.0
+    if len(trade_returns) > 1:
+        mean_r = statistics.mean(trade_returns)
+        stdev_r = statistics.pstdev(trade_returns)
+        if stdev_r > 0:
+            sharpe_like = round((mean_r / stdev_r) * math.sqrt(len(trade_returns)), 3)
+
+    total_return_pct = round(equity - 100.0, 3)
+
+    return {
+        "symbol": symbol,
+        "market": "IBKR",
+        "days_used": len(bars),
+        "take_profit_pct": take_profit_pct,
+        "stop_loss_pct": stop_loss_pct,
+        "min_loss_pct": min_loss_pct,
+        "total_trades": total_trades,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": win_rate,
+        "avg_win_pct": avg_win_pct,
+        "avg_loss_pct": avg_loss_pct,
+        "profit_factor": profit_factor,
+        "max_drawdown_pct": round(max_drawdown_pct, 3),
+        "total_return_pct": total_return_pct,
+        "sharpe_like_ratio": sharpe_like,
+        "open_position_at_end": open_position,
+        "last_10_trades": trades[-10:],
+        "note": (
+            "Bu simulasyon sadece momentum bacagini test eder; canli sistemdeki "
+            "emir defteri bid/ask dengesi (order_flow_signal) gecmis derinlik "
+            "verisi olmadigi icin dahil edilmemistir. Korelasyon/makro/sentiment "
+            "bias katmanlari da yoktur. Komisyon kabaca sabit oranla modellenmistir."
+        ),
+    }
+
+
+def optimize_stock_backtest_tp_sl(
+    symbol: str,
+    days: int = 750,
+    tp_values: Optional[List[float]] = None,
+    sl_values: Optional[List[float]] = None,
+    min_trades: int = 5,
+) -> Dict[str, Any]:
+    """IBKR (hisse) icin TP/SL kombinasyonlarini gecmis gunluk veride tarayarak
+    en iyi esik ciftini bulur (Binance tarafindaki optimize_backtest_tp_sl ile
+    ayni yaklasim, sadece veri kaynagi Yahoo Finance gunluk kapanis fiyatlari)."""
+    symbol = symbol.upper()
+    tp_values = tp_values or [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+    sl_values = sl_values or [3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+
+    bars = fetch_yahoo_daily_closes(symbol, days)
+    if len(bars) < 10:
+        return {"error": "Yeterli gecmis gunluk veri alinamadi.", "symbol": symbol}
+
+    all_results = []
+    for tp in tp_values:
+        for sl in sl_values:
+            res = run_stock_backtest(
+                symbol=symbol, days=days, take_profit_pct=tp, stop_loss_pct=sl, _prefetched_bars=bars,
+            )
+            if "error" in res:
+                continue
+            all_results.append(res)
+
+    eligible = [r for r in all_results if r["total_trades"] >= min_trades]
+    ranked_pool = eligible if eligible else all_results
+    ranked = sorted(ranked_pool, key=lambda r: r["total_return_pct"], reverse=True)
+
+    return {
+        "symbol": symbol,
+        "market": "IBKR",
+        "days_used": len(bars),
+        "combinations_tested": len(all_results),
+        "min_trades_filter": min_trades,
+        "best": ranked[0] if ranked else None,
+        "top_5": ranked[:5],
+        "worst": ranked[-1] if ranked else None,
+        "note": (
+            "Az islem sayisiyla cikan asiri iyi sonuclar (overfitting) elenmeye "
+            f"calisildi (min {min_trades} islem sarti). Sadece momentum bacagini "
+            "test eder, order_flow_signal dahil degildir."
+        ),
+    }
+
+
 def place_futures_order(
     symbol: str,
     side: str,
@@ -7498,6 +7710,44 @@ def backtest_optimize_route():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "symbol": symbol, "market": market}), 500
+
+
+@app.route("/backtest-stock", methods=["GET"])
+def backtest_stock_route():
+    """IBKR hisseleri icin momentum backtest. Ornek:
+    /backtest-stock?symbol=AAPL&days=400"""
+    symbol = request.args.get("symbol", "AAPL").upper()
+    days = int(safe_float(request.args.get("days", 400), 400))
+    days = max(30, min(days, 3650))
+    tp = request.args.get("tp")
+    sl = request.args.get("sl")
+    min_loss = request.args.get("min_loss")
+    try:
+        result = run_stock_backtest(
+            symbol=symbol,
+            days=days,
+            take_profit_pct=safe_float(tp) if tp else None,
+            stop_loss_pct=safe_float(sl) if sl else None,
+            min_loss_pct=safe_float(min_loss) if min_loss else None,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "symbol": symbol}), 500
+
+
+@app.route("/backtest-stock-optimize", methods=["GET"])
+def backtest_stock_optimize_route():
+    """IBKR hisseleri icin TP/SL grid-search. Ornek:
+    /backtest-stock-optimize?symbol=AAPL&days=750"""
+    symbol = request.args.get("symbol", "AAPL").upper()
+    days = int(safe_float(request.args.get("days", 750), 750))
+    days = max(60, min(days, 3650))
+    min_trades = int(safe_float(request.args.get("min_trades", 5), 5))
+    try:
+        result = optimize_stock_backtest_tp_sl(symbol=symbol, days=days, min_trades=min_trades)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "symbol": symbol}), 500
 
 
 @app.route("/status", methods=["GET"])
