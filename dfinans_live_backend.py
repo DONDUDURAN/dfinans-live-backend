@@ -307,6 +307,16 @@ BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "5.0"))
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "6.0"))
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
+# Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
+# yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
+# dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
+# pozisyonun erken ve gereksiz yere kapatilmasina yol aciyordu. Bu esikler,
+# AI'nin zarardayken SAT karari verebilmesi icin gereken minimum zarar
+# yuzdesini belirler; esigin altindaki zararlarda AI'nin SAT sinyali
+# yoksayilip pozisyon acik tutulur (yalnizca STOP_LOSS_PCT'e ulasilirsa
+# veya pozisyon karda ise satis yapilir).
+IBKR_AI_SELL_MIN_LOSS_PCT = float(os.getenv("IBKR_AI_SELL_MIN_LOSS_PCT", "10.0"))
+BINANCE_AI_SELL_MIN_LOSS_PCT = float(os.getenv("BINANCE_AI_SELL_MIN_LOSS_PCT", "10.0"))
 
 # Varlik bazli pozisyon boyutlandirma: her BUY/SELL sinyalinde sabit miktar yerine,
 # bosta bekleyen (available) Binance futures USDT bakiyesinin belirli bir yuzdesi
@@ -4026,6 +4036,16 @@ def _auto_trader_run_symbol(
                         qty = 0
                     else:
                         qty = safe_float(existing_position.get("quantity"))
+                        # Gunluk gecici bir dususte AI'nin erken SAT karari vermesini
+                        # engellemek icin: pozisyon zarardaysa ve zarar
+                        # BINANCE_AI_SELL_MIN_LOSS_PCT esiginin altindaysa satisi atla.
+                        current_loss_pct = spot_position_profit_pct(existing_position, price)
+                        if current_loss_pct < 0 and abs(current_loss_pct) < BINANCE_AI_SELL_MIN_LOSS_PCT:
+                            spot_skip_reason = (
+                                f"AI SAT sinyali ertelendi: mevcut zarar %{abs(current_loss_pct):.1f}, "
+                                f"minimum %{BINANCE_AI_SELL_MIN_LOSS_PCT:.1f} zarar eşiğinin altında kaldığı için pozisyon açık tutuldu."
+                            )
+                            qty = 0
                 else:
                     if existing_position and safe_float(existing_position.get("quantity")) > 0:
                         spot_skip_reason = "Zaten açık spot pozisyon var, üst üste alım yapılmadı."
@@ -4141,6 +4161,23 @@ def _auto_trader_run_symbol(
                                     break
                         except Exception:
                             pre_close_position = None
+                        # Gunluk gecici bir dususte (ornegin bugun %5-10 dusup ertesi gun
+                        # toparlanabilecek bir hissede) AI'nin erken ve gereksiz SAT karari
+                        # vermesini engellemek icin: pozisyon zarardaysa ve zarar
+                        # IBKR_AI_SELL_MIN_LOSS_PCT esiginin altindaysa satisi atla, pozisyonu
+                        # acik tut - sadece esik asilirsa (ya da STOP_LOSS_PCT'e ulasilirsa)
+                        # veya pozisyon karda ise AI satisina izin ver.
+                        if pre_close_position:
+                            current_loss_pct = ibkr_position_profit_pct(pre_close_position)
+                            if current_loss_pct < 0 and abs(current_loss_pct) < IBKR_AI_SELL_MIN_LOSS_PCT:
+                                reason = (
+                                    reason
+                                    + f" (AI SAT sinyali ertelendi: mevcut zarar %{abs(current_loss_pct):.1f}, "
+                                    f"minimum %{IBKR_AI_SELL_MIN_LOSS_PCT:.1f} zarar eşiğinin altında kaldığı için pozisyon açık tutuldu.)"
+                                ).strip()
+                                action = "WAIT"
+                                qty = 0
+                                pre_close_position = None
                     if qty > 0 and "error" not in execution:
                         execution = ibkr_place_market_order(symbol, action, qty, asset_type, exchange, currency)
                         # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
