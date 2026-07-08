@@ -4063,6 +4063,22 @@ def _auto_trader_run_symbol(
                             if action == "BUY":
                                 db_upsert_spot_position(symbol, qty, price)
                             else:
+                                avg_cost = safe_float(existing_position.get("avg_cost")) if existing_position else 0.0
+                                exit_price = safe_float(execution.get("avg_fill_price")) or price
+                                pnl_amount = (exit_price - avg_cost) * qty if avg_cost else 0.0
+                                pnl_pct = ((exit_price - avg_cost) / avg_cost * 100.0) if avg_cost else 0.0
+                                db_record_position_closure(
+                                    broker="BINANCE_SPOT",
+                                    symbol=symbol,
+                                    side="LONG",
+                                    qty=qty,
+                                    entry_price=avg_cost,
+                                    exit_price=exit_price,
+                                    realized_pnl=pnl_amount,
+                                    realized_pnl_pct=pnl_pct,
+                                    close_reason="AI_KARARI",
+                                    detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
+                                )
                                 db_delete_spot_position(symbol)
                     else:
                         execution = {
@@ -4110,12 +4126,45 @@ def _auto_trader_run_symbol(
                                     + f" (Miktar {qty} -> {affordable_qty} olarak düşürüldü (kesirli hisse): kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
                                 ).strip()
                                 qty = affordable_qty
+                    # AI'nin SELL karariyla mevcut acik (LONG) bir IBKR pozisyonunu kapatip
+                    # kapatmadigini anlamak icin emirden ONCE mevcut pozisyonu (varsa) kaydediyoruz.
+                    # Boylece emir basariyla dolarsa gerceklesen kar/zarari hesaplayip
+                    # position_closures'a "AI_KARARI" nedeniyle kaydedebiliyoruz - onceden
+                    # sadece TP/SL tetiklemeli kapanislar kaydediliyordu, normal AI SELL
+                    # kararlariyla kapanan pozisyonlar (ornegin AMD) hic izlenmiyordu.
+                    pre_close_position = None
+                    if action == "SELL" and qty > 0:
+                        try:
+                            for p in ibkr_positions_snapshot():
+                                if str(p.get("symbol", "")).upper() == symbol and str(p.get("side", "")).upper() == "LONG":
+                                    pre_close_position = p
+                                    break
+                        except Exception:
+                            pre_close_position = None
                     if qty > 0 and "error" not in execution:
                         execution = ibkr_place_market_order(symbol, action, qty, asset_type, exchange, currency)
                         # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
                         # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
                         # cache'i temizliyoruz.
                         _invalidate_cache("ibkr_available_funds")
+                        if pre_close_position and not execution.get("error") and safe_float(execution.get("filled")) > 0:
+                            filled_qty = safe_float(execution.get("filled"))
+                            entry_price = safe_float(pre_close_position.get("avgCost") or pre_close_position.get("entry_price"))
+                            exit_price = safe_float(execution.get("avg_fill_price")) or price
+                            pnl_amount = (exit_price - entry_price) * filled_qty
+                            pnl_pct = ((exit_price - entry_price) / entry_price * 100.0) if entry_price else 0.0
+                            db_record_position_closure(
+                                broker="IBKR",
+                                symbol=symbol,
+                                side="LONG",
+                                qty=filled_qty,
+                                entry_price=entry_price,
+                                exit_price=exit_price,
+                                realized_pnl=pnl_amount,
+                                realized_pnl_pct=pnl_pct,
+                                close_reason="AI_KARARI",
+                                detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
+                            )
                 else:
                     execution = {
                         "simulated": True,
