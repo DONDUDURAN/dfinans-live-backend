@@ -443,6 +443,24 @@ def init_runtime_db() -> None:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_balance_snapshots_ts ON balance_snapshots(ts)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS position_closures (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    broker TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL NOT NULL,
+                    realized_pnl REAL NOT NULL,
+                    realized_pnl_pct REAL NOT NULL,
+                    close_reason TEXT NOT NULL,
+                    detail TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -674,6 +692,76 @@ def db_closest_balance_snapshot(hours_ago: float) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def db_record_position_closure(
+    broker: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    realized_pnl: float,
+    realized_pnl_pct: float,
+    close_reason: str,
+    detail: str = "",
+) -> None:
+    """Bir pozisyon (kismen degil, kapanis emriyle) kapandiginda neden kapandigini
+    (KAR_AL / ZARAR_KES / MANUEL / AI_KARARI) ve gerceklesen kar/zarari kalici olarak
+    kaydeder. Kullanici 'IBKR'de AMD pozisyonu neden kapandi, kar mi zarar mi
+    bilmiyorum' dedigi icin eklendi - onceden bu bilgi sadece auto_history'nin
+    serbest metin 'reason' alaninda gomulu ve kolayca bulunamayan sekildeydi."""
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO position_closures
+                        (id, created_at, broker, symbol, side, qty, entry_price, exit_price,
+                         realized_pnl, realized_pnl_pct, close_reason, detail)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        now_text(),
+                        str(broker).upper(),
+                        str(symbol).upper(),
+                        str(side).upper(),
+                        float(qty),
+                        float(entry_price),
+                        float(exit_price),
+                        float(realized_pnl),
+                        float(realized_pnl_pct),
+                        str(close_reason).upper(),
+                        str(detail),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+def db_recent_position_closures(limit: int = 50) -> List[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT created_at, broker, symbol, side, qty, entry_price, exit_price,
+                       realized_pnl, realized_pnl_pct, close_reason, detail
+                FROM position_closures
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(limit, 200)),),
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
 def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
     with DB_LOCK:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
@@ -742,6 +830,7 @@ def build_ai_log_entries(limit: int = 100) -> List[Dict[str, Any]]:
         execution = row.get("execution") or {}
         simulated = bool(execution.get("simulated", True)) if isinstance(execution, dict) else True
         err = str(execution.get("error", "") or "") if isinstance(execution, dict) else ""
+        pnl_amount = safe_float(execution.get("pnl")) if isinstance(execution, dict) else 0.0
         if err:
             status = "error"
         elif action in ["BUY", "SELL"] and not simulated:
@@ -749,15 +838,19 @@ def build_ai_log_entries(limit: int = 100) -> List[Dict[str, Any]]:
         elif action in ["BUY", "SELL"] and simulated:
             status = "waitingConfirmation"
         elif action == "TAKE_PROFIT":
-            status = "opened"
+            status = "closedProfit"
+        elif action == "STOP_LOSS":
+            status = "closedLoss"
         else:
             status = "scan"
         reason = str(row.get("reason", ""))
+        if action in ("TAKE_PROFIT", "STOP_LOSS") and pnl_amount != 0.0:
+            reason = f"{reason} (Gerçekleşen K/Z: {'+' if pnl_amount >= 0 else ''}{pnl_amount:.2f})"
         if "açık" in reason.lower() and "pozisyon" in reason.lower() and action == "WAIT":
             status = "protectedPosition"
         entries.append({
             "symbol": row.get("symbol", "-"),
-            "side": action if action in ["BUY", "SELL"] else "-",
+            "side": action if action in ["BUY", "SELL"] else ("SELL" if status == "closedProfit" or status == "closedLoss" else "-"),
             "status": status,
             "confidence": int(safe_float(row.get("confidence"), 0)),
             "reason": reason or "-",
@@ -4337,6 +4430,26 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
         result["trigger"] = trigger
         result["trigger_pct"] = round(profit_pct, 4)
         result["target_pct"] = BINANCE_TAKE_PROFIT_PCT if hit_take_profit else -BINANCE_STOP_LOSS_PCT
+        result["pnl"] = safe_float(position.get("pnl"))
+        if not result.get("error"):
+            entry_price = safe_float(position.get("entry_price"))
+            exit_price = safe_float(position.get("mark_price"))
+            pnl_amount = safe_float(position.get("pnl"))
+            db_record_position_closure(
+                broker="BINANCE_FUTURES",
+                symbol=symbol,
+                side=str(position.get("side", "")).upper(),
+                qty=size,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                realized_pnl=pnl_amount,
+                realized_pnl_pct=profit_pct,
+                close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
+                detail=(
+                    f"%{BINANCE_TAKE_PROFIT_PCT:.1f} kâr hedefi tetiklendi." if hit_take_profit
+                    else f"%{BINANCE_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
+                ),
+            )
         return result
     return None
 
@@ -4400,6 +4513,26 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         result["trigger_pct"] = round(profit_pct, 4)
         result["target_pct"] = IBKR_TAKE_PROFIT_PCT if hit_take_profit else -IBKR_STOP_LOSS_PCT
         result["symbol"] = symbol
+        result["pnl"] = safe_float(position.get("pnl"))
+        if not result.get("error"):
+            entry_price = safe_float(position.get("avgCost") or position.get("entry_price"))
+            exit_price = safe_float(position.get("mark_price"))
+            pnl_amount = safe_float(position.get("pnl"))
+            db_record_position_closure(
+                broker="IBKR",
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                realized_pnl=pnl_amount,
+                realized_pnl_pct=profit_pct,
+                close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
+                detail=(
+                    f"%{IBKR_TAKE_PROFIT_PCT:.1f} kâr hedefi tetiklendi." if hit_take_profit
+                    else f"%{IBKR_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
+                ),
+            )
         return result
     return None
 
@@ -4576,6 +4709,25 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         result["trigger_pct"] = round(profit_pct, 4)
         result["target_pct"] = BINANCE_TAKE_PROFIT_PCT if hit_take_profit else -BINANCE_STOP_LOSS_PCT
         result["symbol"] = symbol
+        if not result.get("error"):
+            avg_cost = safe_float(pos.get("avg_cost"))
+            pnl_amount = (price - avg_cost) * sell_qty
+            result["pnl"] = pnl_amount
+            db_record_position_closure(
+                broker="BINANCE_SPOT",
+                symbol=symbol,
+                side="LONG",
+                qty=sell_qty,
+                entry_price=avg_cost,
+                exit_price=price,
+                realized_pnl=pnl_amount,
+                realized_pnl_pct=profit_pct,
+                close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
+                detail=(
+                    f"%{BINANCE_TAKE_PROFIT_PCT:.1f} kâr hedefi tetiklendi." if hit_take_profit
+                    else f"%{BINANCE_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
+                ),
+            )
         return result
     return None
 
@@ -6315,9 +6467,68 @@ def close_position():
         )
         if result.get("error"):
             return jsonify(result), 400
+        db_record_position_closure(
+            broker="BINANCE_FUTURES",
+            symbol=symbol,
+            side=str(target.get("side", "")).upper(),
+            qty=size,
+            entry_price=safe_float(target.get("entry_price")),
+            exit_price=safe_float(target.get("mark_price")),
+            realized_pnl=safe_float(target.get("pnl")),
+            realized_pnl_pct=binance_position_profit_pct(target),
+            close_reason="MANUAL",
+            detail="Kullanıcı manuel olarak pozisyonu kapattı.",
+        )
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "time": now_text()}), 500
+
+
+@app.route("/position-closures", methods=["GET"])
+def position_closures_alias():
+    """Bir pozisyon kapandiginda 'neden kapandi (kar al/zarar kes/manuel), kar mi
+    zarar mi, ne kadar' sorusuna net cevap veren rapor listesi. Kullanici
+    'IBKR'de AMD pozisyonu kapandi, neden kapandigini/kar mi zarar mi bilmiyorum'
+    dedigi icin eklendi."""
+    try:
+        limit = max(1, min(int(request.args.get("limit", "50")), 200))
+    except Exception:
+        limit = 50
+    reason_labels = {
+        "TAKE_PROFIT": "Kâr Al",
+        "STOP_LOSS": "Zarar Kes",
+        "MANUAL": "Manuel Kapatma",
+        "AI_KARARI": "AI Kararı",
+    }
+    try:
+        rows = db_recent_position_closures(limit)
+        items = []
+        for r in rows:
+            reason = str(r.get("close_reason", "-"))
+            pnl = safe_float(r.get("realized_pnl"))
+            items.append({
+                "time": r.get("created_at"),
+                "broker": r.get("broker"),
+                "symbol": r.get("symbol"),
+                "side": r.get("side"),
+                "qty": r.get("qty"),
+                "entry_price": r.get("entry_price"),
+                "exit_price": r.get("exit_price"),
+                "realized_pnl": pnl,
+                "realized_pnl_pct": r.get("realized_pnl_pct"),
+                "close_reason": reason,
+                "close_reason_label": reason_labels.get(reason, reason),
+                "is_profit": pnl >= 0,
+                "detail": r.get("detail"),
+                "summary": (
+                    f"{r.get('symbol')} ({r.get('broker')}) pozisyonu "
+                    f"{reason_labels.get(reason, reason)} nedeniyle kapandı: "
+                    f"{'+' if pnl >= 0 else ''}{pnl:.2f} ({safe_float(r.get('realized_pnl_pct')):.2f}%)."
+                ),
+            })
+        return jsonify({"ok": True, "items": items, "time": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "items": [], "error": str(e), "time": now_text()}), 200
 
 
 # ---------------------------------------------------------------------------
