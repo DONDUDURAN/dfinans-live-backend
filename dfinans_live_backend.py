@@ -4844,6 +4844,98 @@ def spot_auto_trader_size_pct(symbol: str) -> float:
     return SPOT_AUTO_SIZE_PCT_DEFAULT
 
 
+# ---------------------------------------------------------------------------
+# SEMBOL HASSASIYETI (LOT_SIZE / MIN_NOTIONAL) DUZELTME KATMANI
+# ---------------------------------------------------------------------------
+# Sabit "round(qty, 6)" / "round(qty, 3)" varsayimlari her sembolde gecerli
+# degil (orn. DOGEUSDT/AVAXUSDT gibi bazi semboller farkli ondalik basamak
+# adimina/stepSize'a sahip) - bu, gecmiste tekrarlayan "precision over maximum
+# defined" hatalarinin kok nedeniydi. Bu katman Binance'in kendi exchangeInfo
+# filtrelerini (LOT_SIZE stepSize/minQty, MIN_NOTIONAL) sembol basina onbellege
+# alip miktarlari dogru adima yuvarlar.
+_SYMBOL_FILTERS_CACHE: Dict[str, Dict[str, Any]] = {}
+_SYMBOL_FILTERS_CACHE_TTL_SEC = 6 * 3600.0  # borsa filtreleri nadiren degisir
+
+
+def get_symbol_filters(symbol: str, market: str = "SPOT") -> Dict[str, Any]:
+    """Binance exchangeInfo'dan bir sembolun LOT_SIZE (stepSize/minQty) ve
+    MIN_NOTIONAL/NOTIONAL filtrelerini ceker, 6 saat onbellege alir. Hata
+    durumunda guvenli/gevsek varsayimlar doner (eski davranisla ayni,
+    boylece bu katman ekstra bir kirilma noktasi yaratmaz)."""
+    market = market.upper()
+    cache_key = f"{market}:{symbol}"
+    cached = _SYMBOL_FILTERS_CACHE.get(cache_key)
+    if cached and (time.time() - cached.get("_ts", 0)) < _SYMBOL_FILTERS_CACHE_TTL_SEC:
+        return cached
+
+    result = {
+        "step_size": 0.000001 if market != "FUTURES" else 0.001,
+        "min_qty": 0.0,
+        "min_notional": 5.0,
+        "_ts": time.time(),
+    }
+    try:
+        base = FUTURES_BASE if market == "FUTURES" else SPOT_BASE
+        path = "/fapi/v1/exchangeInfo" if market == "FUTURES" else "/api/v3/exchangeInfo"
+        data = public_get(base, path, {"symbol": symbol})
+        symbols = data.get("symbols", [])
+        info = symbols[0] if symbols else None
+        if info:
+            for f in info.get("filters", []):
+                ftype = f.get("filterType")
+                if ftype == "LOT_SIZE" or ftype == "MARKET_LOT_SIZE":
+                    step = safe_float(f.get("stepSize"))
+                    if step > 0:
+                        result["step_size"] = step
+                    min_qty = safe_float(f.get("minQty"))
+                    if min_qty > 0:
+                        result["min_qty"] = min_qty
+                elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
+                    min_notional = safe_float(f.get("minNotional") or f.get("notional"))
+                    if min_notional > 0:
+                        result["min_notional"] = min_notional
+    except Exception:
+        pass  # onbellek doldurulamadi, varsayimlarla devam
+
+    result["_ts"] = time.time()
+    _SYMBOL_FILTERS_CACHE[cache_key] = result
+    return result
+
+
+def round_quantity_to_step(
+    symbol: str, market: str, quantity: float, price: float = 0.0,
+) -> "Tuple[float, Optional[str]]":
+    """Verilen miktari borsanin stepSize'ina asagi yuvarlar (Binance emirleri
+    stepSize'in tam kati olmayan miktarlari reddeder). minQty/minNotional
+    saglanmiyorsa (0.0, hata mesaji) doner - boylece cagiran taraf Binance'in
+    kriptik "precision over maximum defined" hatasi yerine anlasilir bir
+    mesajla erken cikabilir."""
+    filters = get_symbol_filters(symbol, market)
+    step = filters.get("step_size", 0.0) or 0.0
+    min_qty = filters.get("min_qty", 0.0) or 0.0
+    min_notional = filters.get("min_notional", 0.0) or 0.0
+
+    if step > 0:
+        decimals = max(0, -int(round(math.log10(step)))) if step < 1 else 0
+        # Kayan nokta hatasi (orn. 0.1+0.2) stepSize kati sanilip yukari
+        # yuvarlanmasin diye kucuk bir epsilon ekleyip asagi (floor) yuvarla.
+        steps_count = math.floor((quantity / step) + 1e-9)
+        rounded = round(steps_count * step, decimals)
+    else:
+        rounded = quantity
+
+    if rounded <= 0:
+        return 0.0, f"{symbol}: hesaplanan miktar stepSize (%s) sonrasi 0'a yuvarlandi." % step
+    if min_qty > 0 and rounded < min_qty:
+        return 0.0, f"{symbol}: miktar {rounded} borsanin minimum miktarinin ({min_qty}) altinda kaldi."
+    if min_notional > 0 and price > 0 and (rounded * price) < min_notional:
+        return 0.0, (
+            f"{symbol}: işlem büyüklüğü {rounded * price:.2f} USDT, borsanın minimum "
+            f"işlem büyüklüğünün ({min_notional} USDT) altında kaldı."
+        )
+    return rounded, None
+
+
 def place_spot_order(
     symbol: str,
     side: str,
@@ -4858,6 +4950,22 @@ def place_spot_order(
 
     if quantity <= 0:
         return {"error": "Miktar 0'dan büyük olmalı.", "request_id": request_id, "simulated": False}
+
+    # Borsanin LOT_SIZE/MIN_NOTIONAL kurallarina gore miktari dogru adima
+    # yuvarla - bu, gecmiste tekrarlayan "precision over maximum defined"
+    # hatalarinin onune gecer (bkz. round_quantity_to_step() dokumani).
+    try:
+        current_price = get_price(symbol, "SPOT") if quantity > 0 else 0.0
+    except Exception:
+        current_price = 0.0
+    quantity, precision_error = round_quantity_to_step(symbol, "SPOT", quantity, current_price)
+    if precision_error:
+        db_insert_trade_journal(
+            broker="Binance", channel=channel, symbol=symbol, side=side, quantity=quantity,
+            status="REJECTED", simulated=False, payload={"reason": "precision_or_min_notional"},
+            error_text=precision_error, request_id=request_id,
+        )
+        return {"error": precision_error, "request_id": request_id, "simulated": False}
 
     if DAILY_REALIZED_PNL < MAX_DAILY_LOSS:
         error = f"Max daily loss exceeded. Current PnL: {DAILY_REALIZED_PNL} < {MAX_DAILY_LOSS}"
@@ -5849,7 +5957,24 @@ def place_futures_order(
     use_proxy: bool = True,
 ) -> Dict[str, Any]:
     request_id = str(request_id or uuid.uuid4())
-    
+
+    # Borsanin LOT_SIZE/MIN_NOTIONAL kurallarina gore miktari dogru adima
+    # yuvarla - bu, gecmiste tekrarlayan "precision over maximum defined"
+    # hatalarinin onune gecer (bkz. round_quantity_to_step() dokumani).
+    if quantity > 0:
+        try:
+            current_price = get_price(symbol, "FUTURES")
+        except Exception:
+            current_price = 0.0
+        quantity, precision_error = round_quantity_to_step(symbol, "FUTURES", quantity, current_price)
+        if precision_error:
+            db_insert_trade_journal(
+                broker="Binance", channel=channel, symbol=symbol, side=side, quantity=quantity,
+                status="REJECTED", simulated=False, payload={"reason": "precision_or_min_notional"},
+                error_text=precision_error, request_id=request_id,
+            )
+            return {"error": precision_error, "request_id": request_id, "simulated": False}
+
     # Risk check: max daily loss
     if DAILY_REALIZED_PNL < MAX_DAILY_LOSS:
         error = f"Max daily loss exceeded. Current PnL: {DAILY_REALIZED_PNL} < {MAX_DAILY_LOSS}"
