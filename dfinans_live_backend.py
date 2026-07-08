@@ -879,6 +879,135 @@ def db_recent_position_closures(limit: int = 50) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def db_all_position_closures(days: Optional[int] = None, broker: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Performans istatistikleri icin TUM kapanis kayitlarini (trade_journal'daki
+    500 satir sinirinin aksine, position_closures hicbir zaman silinmedigi icin
+    burada boyle bir kisitlama yok) eskiden-yeniye sirali doner."""
+    where_clauses = []
+    params: List[Any] = []
+    if days and days > 0:
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        where_clauses.append("created_at >= ?")
+        params.append(cutoff)
+    if broker and broker.upper() != "ALL":
+        where_clauses.append("UPPER(broker) LIKE ?")
+        params.append(f"%{broker.upper()}%")
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT created_at, broker, symbol, side, qty, entry_price, exit_price,
+                       realized_pnl, realized_pnl_pct, close_reason, detail
+                FROM position_closures
+                {where_sql}
+                ORDER BY created_at ASC
+                """,
+                params,
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Kapanmis pozisyon kayitlarindan (position_closures) win rate, profit
+    factor, ortalama kazanc/kayip, en iyi/en kotu islem, kapanis nedeni
+    dagilimi ve gerceklesen PNL uzerinden maksimum dususu hesaplar."""
+    total_trades = len(rows)
+    if total_trades == 0:
+        return {
+            "total_trades": 0,
+            "note": "Henüz kapanmış pozisyon kaydı yok.",
+        }
+
+    wins = [r for r in rows if safe_float(r.get("realized_pnl")) > 0]
+    losses = [r for r in rows if safe_float(r.get("realized_pnl")) <= 0]
+    win_rate = round((len(wins) / total_trades) * 100.0, 2)
+
+    sum_win_amount = sum(safe_float(r.get("realized_pnl")) for r in wins)
+    sum_loss_amount = abs(sum(safe_float(r.get("realized_pnl")) for r in losses))
+    total_pnl = round(sum_win_amount - sum_loss_amount, 2)
+    profit_factor = round(sum_win_amount / sum_loss_amount, 2) if sum_loss_amount > 0 else (round(sum_win_amount, 2) if sum_win_amount > 0 else 0.0)
+
+    avg_win = round(sum_win_amount / len(wins), 2) if wins else 0.0
+    avg_loss = round(-sum_loss_amount / len(losses), 2) if losses else 0.0
+
+    best_trade = max(rows, key=lambda r: safe_float(r.get("realized_pnl")))
+    worst_trade = min(rows, key=lambda r: safe_float(r.get("realized_pnl")))
+
+    # Gerceklesen PNL uzerinden kumulatif egri ve maksimum dusus.
+    cumulative = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for r in rows:
+        cumulative += safe_float(r.get("realized_pnl"))
+        peak = max(peak, cumulative)
+        drawdown = peak - cumulative
+        max_drawdown = max(max_drawdown, drawdown)
+
+    by_reason: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        reason = str(r.get("close_reason", "-"))
+        bucket = by_reason.setdefault(reason, {"count": 0, "total_pnl": 0.0})
+        bucket["count"] += 1
+        bucket["total_pnl"] += safe_float(r.get("realized_pnl"))
+    for reason, bucket in by_reason.items():
+        bucket["total_pnl"] = round(bucket["total_pnl"], 2)
+        bucket["label"] = CLOSE_REASON_LABELS_TR.get(reason.upper(), reason)
+
+    by_broker: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        broker = str(r.get("broker", "-"))
+        bucket = by_broker.setdefault(broker, {"count": 0, "total_pnl": 0.0, "wins": 0})
+        bucket["count"] += 1
+        pnl = safe_float(r.get("realized_pnl"))
+        bucket["total_pnl"] += pnl
+        if pnl > 0:
+            bucket["wins"] += 1
+    for broker, bucket in by_broker.items():
+        bucket["total_pnl"] = round(bucket["total_pnl"], 2)
+        bucket["win_rate_pct"] = round((bucket["wins"] / bucket["count"]) * 100.0, 2) if bucket["count"] else 0.0
+
+    by_symbol_pnl: Dict[str, float] = {}
+    for r in rows:
+        sym = str(r.get("symbol", "-"))
+        by_symbol_pnl[sym] = by_symbol_pnl.get(sym, 0.0) + safe_float(r.get("realized_pnl"))
+    top_symbols = sorted(by_symbol_pnl.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    worst_symbols = sorted(by_symbol_pnl.items(), key=lambda kv: kv[1])[:5]
+
+    return {
+        "total_trades": total_trades,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": win_rate,
+        "total_realized_pnl": total_pnl,
+        "profit_factor": profit_factor,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "max_drawdown": round(max_drawdown, 2),
+        "best_trade": {
+            "symbol": best_trade.get("symbol"), "broker": best_trade.get("broker"),
+            "pnl": round(safe_float(best_trade.get("realized_pnl")), 2),
+            "pnl_pct": best_trade.get("realized_pnl_pct"), "date": best_trade.get("created_at"),
+        },
+        "worst_trade": {
+            "symbol": worst_trade.get("symbol"), "broker": worst_trade.get("broker"),
+            "pnl": round(safe_float(worst_trade.get("realized_pnl")), 2),
+            "pnl_pct": worst_trade.get("realized_pnl_pct"), "date": worst_trade.get("created_at"),
+        },
+        "by_close_reason": by_reason,
+        "by_broker": by_broker,
+        "top_5_symbols_by_pnl": [{"symbol": s, "pnl": round(p, 2)} for s, p in top_symbols],
+        "worst_5_symbols_by_pnl": [{"symbol": s, "pnl": round(p, 2)} for s, p in worst_symbols],
+        "first_trade_date": rows[0].get("created_at"),
+        "last_trade_date": rows[-1].get("created_at"),
+    }
+
+
 def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
     with DB_LOCK:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
@@ -7422,6 +7551,25 @@ def position_closures_alias():
         return jsonify({"ok": True, "items": items, "time": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "items": [], "error": str(e), "time": now_text()}), 200
+
+
+@app.route("/performance-stats", methods=["GET"])
+def performance_stats_route():
+    """Kapanmis pozisyonlardan (position_closures - hicbir zaman silinmez, 500
+    satir sinirina tabi degildir) gercek performans metriklerini (win rate,
+    profit factor, maksimum dusus, kapanis nedeni/broker/sembol kirilimi)
+    hesaplar. Ornek: /performance-stats?days=30&broker=ALL"""
+    days_param = request.args.get("days")
+    days = int(safe_float(days_param)) if days_param else None
+    broker = request.args.get("broker", "ALL")
+    try:
+        rows = db_all_position_closures(days=days, broker=broker)
+        stats = compute_performance_stats(rows)
+        stats["filter"] = {"days": days, "broker": broker}
+        stats["time"] = now_text()
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({"error": str(e), "total_trades": 0, "time": now_text()}), 200
 
 
 @app.route("/position-closures/test-email", methods=["POST", "GET"])
