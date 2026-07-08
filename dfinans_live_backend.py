@@ -785,13 +785,24 @@ def send_position_closure_email(
         return
 
     def _send():
-        try:
-            _build_and_send_closure_email(
-                broker, symbol, side, qty, entry_price, exit_price,
-                realized_pnl, realized_pnl_pct, close_reason, detail,
-            )
-        except Exception as e:
-            print(f"[EMAIL] Mail gönderilemedi: {type(e).__name__}: {e}", flush=True)
+        # SMTP baglantisi ozellikle Railway container agi gecici olarak kesildiginde
+        # ("Network is unreachable" - Errno 101) tek denemede basarisiz olabiliyor.
+        # Kritik bir bildirim (pozisyon kapanisi) kaybolmasin diye kisa bir bekleme
+        # ile 1 kez daha deneniyor; ikisi de basarisiz olursa sessizce loglanip
+        # gecilir (trading akisini asla bloklamaz/bozmaz).
+        last_error = None
+        for attempt in range(2):
+            try:
+                _build_and_send_closure_email(
+                    broker, symbol, side, qty, entry_price, exit_price,
+                    realized_pnl, realized_pnl_pct, close_reason, detail,
+                )
+                return
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    time.sleep(5)
+        print(f"[EMAIL] Mail gönderilemedi: {type(last_error).__name__}: {last_error}", flush=True)
 
     threading.Thread(target=_send, daemon=True).start()
 
@@ -4257,16 +4268,19 @@ def _auto_trader_run_symbol(
                     # iptal edilebiliyordu (gercek IBKR hatasi: Error 201 Order rejected -
                     # margin requirement). Emir gondermeden once kullanilabilir fonu kontrol
                     # edip, gerekirse miktari guvenli bir seviyeye (kullanilabilir fonun
-                    # %80'i) dusuruyoruz. IBKR kesirli (fractional) hisse alimini destekledigi
-                    # icin miktari tam sayiya yuvarlamiyoruz.
+                    # %80'i) dusuruyoruz. NOT: Canli loglarda tekrar tekrar "Error 10243:
+                    # Fractional-sized order cannot be placed via API" hatasi gorulduu icin
+                    # (bu hesap/API konfigurasyonu kesirli hisse emrini KABUL ETMIYOR),
+                    # miktar artik tam sayiya (whole share) yuvarlaniyor - eskiden kesirli
+                    # birakiliyordu ve bu, asla kapatilamayan "askida" pozisyonlara
+                    # (ornegin 0.0952 IBKR, 0.8682 AMD) yol aciyordu.
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
                         needed = qty * price
                         safe_budget = available_funds * 0.8
                         if available_funds > 0 and needed > safe_budget:
-                            affordable_qty = round(safe_budget / price, 4)
-                            min_fractional_qty = 0.01
-                            if affordable_qty < min_fractional_qty:
+                            affordable_qty = math.floor(safe_budget / price)
+                            if affordable_qty < 1:
                                 execution = {
                                     "simulated": False,
                                     "broker": "IBKR",
@@ -4275,7 +4289,7 @@ def _auto_trader_run_symbol(
                                     "quantity": 0,
                                     "error": (
                                         f"Yetersiz alım gücü: kullanılabilir fon {available_funds:.2f} USD, "
-                                        f"minimum kesirli hisse tutarını bile karşılamıyor. Emir gönderilmedi."
+                                        f"1 hisse dahi karşılamıyor. Emir gönderilmedi."
                                     ),
                                     "time": now_text(),
                                 }
@@ -4283,9 +4297,21 @@ def _auto_trader_run_symbol(
                             else:
                                 reason = (
                                     reason
-                                    + f" (Miktar {qty} -> {affordable_qty} olarak düşürüldü (kesirli hisse): kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
+                                    + f" (Miktar {qty} -> {affordable_qty} olarak düşürüldü (tam sayı): kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
                                 ).strip()
                                 qty = affordable_qty
+                        else:
+                            qty = math.floor(qty)
+                            if qty < 1:
+                                execution = {
+                                    "simulated": False,
+                                    "broker": "IBKR",
+                                    "symbol": symbol,
+                                    "side": action,
+                                    "quantity": 0,
+                                    "error": "IBKR API kesirli hisse emrini desteklemiyor, miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
+                                    "time": now_text(),
+                                }
                     # AI'nin SELL karariyla mevcut acik (LONG) bir IBKR pozisyonunu kapatip
                     # kapatmadigini anlamak icin emirden ONCE mevcut pozisyonu (varsa) kaydediyoruz.
                     # Boylece emir basariyla dolarsa gerceklesen kar/zarari hesaplayip
@@ -4882,6 +4908,25 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         symbol = str(position.get("symbol", "")).upper()
         if not symbol:
             continue
+        # IBKR API kesirli (fractional) hisse EMRINI KABUL ETMIYOR (canli loglarda
+        # tekrar tekrar "Error 10243: Fractional-sized order cannot be placed via
+        # API" goruldu). Kesirli bir pozisyon (ornegin 0.0952 hisse - muhtemelen
+        # gecmiste yanlislikla kesirli alinmis) varsa, tam sayiya yuvarlayip
+        # mumkun oldugunca kapatiyoruz (ornegin 1.8682 -> 1 hisse satilir, 0.8682
+        # acik kalir). Eger 1 hisseden bile azsa (ornegin 0.0952), API ile HICBIR
+        # sekilde kapatilamaz - tekrar tekrar denemek yerine (sonsuz Error 10243
+        # dongusu) atlanir ve masaustunden manuel kapatilmasi gerektigi loglanir.
+        whole_qty = math.floor(qty)
+        if whole_qty < 1:
+            log_line = (
+                f"[IBKR TP/SL] {symbol}: kesirli pozisyon ({qty:.4f} hisse) API "
+                f"uzerinden kapatilamiyor (Error 10243 riski) - IBKR masaustu "
+                f"uygulamasindan manuel kapatilmasi gerekiyor. Otomatik "
+                f"kar-al/zarar-kes bu pozisyon icin ATLANDI."
+            )
+            print(log_line)
+            continue
+        qty = whole_qty
         side = str(position.get("side", "LONG")).upper()
         close_side = "SELL" if side == "LONG" else "BUY"
         asset_type = str(position.get("asset_type") or position.get("secType") or "STK").upper()
