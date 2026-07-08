@@ -31,6 +31,7 @@ import hmac
 import time
 import json
 import math
+import statistics
 import uuid
 import queue
 import sqlite3
@@ -5321,6 +5322,244 @@ def calculate_ai_signal(symbol: str, market: str) -> Dict[str, Any]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# BACKTEST MOTORU
+# ---------------------------------------------------------------------------
+# calculate_ai_signal() ile TAM AYNI karar mantığını (momentum eşiği + emir
+# defteri baskısı) gecmis Binance mum verisi (klines) uzerinde tekrar oynatir.
+# Gercek gecmis emir defteri derinligi Binance'ta ucretsiz/pratik olarak
+# saklanmadigindan, canli sistemde zaten fallback olarak kullanilan
+# pressure_from_change() formulu ile "sentetik" baski hesaplanir - yani bu
+# backtest, canli sistemin veri kaynagi binance disi (yahoo/coinbase/coingecko)
+# oldugu her an zaten kullandigi AYNI yaklasimi kullanir, ekstra varsayim
+# eklemez.
+def fetch_binance_klines(
+    symbol: str,
+    market: str = "SPOT",
+    interval: str = "1h",
+    total_candles: int = 500,
+) -> List[Dict[str, Any]]:
+    """Binance public /klines uctan gecmis mum verisini ceker. Tek istekte
+    en fazla 1000 mum donuyor; daha fazlasi istenirse endTime geriye kaydirilarak
+    sayfalanir. Sonuc eskiden-yeniye siralidir."""
+    base = FUTURES_BASE if market.upper() == "FUTURES" else SPOT_BASE
+    path = "/fapi/v1/klines" if market.upper() == "FUTURES" else "/api/v3/klines"
+
+    candles: List[Dict[str, Any]] = []
+    end_time: Optional[int] = None
+    remaining = max(10, min(total_candles, 5000))
+
+    while remaining > 0:
+        batch_limit = min(1000, remaining)
+        params: Dict[str, Any] = {"symbol": symbol, "interval": interval, "limit": batch_limit}
+        if end_time is not None:
+            params["endTime"] = end_time
+        raw = public_get(base, path, params)
+        if not isinstance(raw, list) or not raw:
+            break
+        batch = [
+            {
+                "open_time": int(row[0]),
+                "open": safe_float(row[1]),
+                "high": safe_float(row[2]),
+                "low": safe_float(row[3]),
+                "close": safe_float(row[4]),
+                "volume": safe_float(row[5]),
+            }
+            for row in raw
+        ]
+        candles = batch + candles
+        if len(batch) < batch_limit:
+            break
+        end_time = batch[0]["open_time"] - 1
+        remaining -= len(batch)
+
+    # Ayni open_time'dan olusabilecek tekrarlari temizle, zaman sirasina koy.
+    seen_times = set()
+    deduped: List[Dict[str, Any]] = []
+    for c in sorted(candles, key=lambda r: r["open_time"]):
+        if c["open_time"] in seen_times:
+            continue
+        seen_times.add(c["open_time"])
+        deduped.append(c)
+    return deduped[-total_candles:] if total_candles else deduped
+
+
+def _lookback_steps_for_interval(interval: str) -> int:
+    """calculate_ai_signal() 24 saatlik degisimi kullanir; secilen mum araligina
+    gore kac mum geriye bakilmasi gerektigini hesaplar (orn. '1h' -> 24, '15m' -> 96,
+    '1d' -> 1)."""
+    unit = interval[-1]
+    try:
+        amount = int(interval[:-1])
+    except ValueError:
+        amount = 1
+    minutes_per_candle = {"m": amount, "h": amount * 60, "d": amount * 1440}.get(unit, 60)
+    steps = round((24 * 60) / minutes_per_candle)
+    return max(1, steps)
+
+
+def run_backtest(
+    symbol: str,
+    market: str = "SPOT",
+    interval: str = "1h",
+    candles: int = 500,
+    take_profit_pct: Optional[float] = None,
+    stop_loss_pct: Optional[float] = None,
+    min_loss_pct: Optional[float] = None,
+    fee_pct: float = 0.1,
+) -> Dict[str, Any]:
+    """calculate_ai_signal() mantigini (change_24h esigi + pressure_from_change
+    ile sentetik emir defteri baskisi) gecmis veride tekrar oynatarak basit bir
+    uzun-pozisyon (long-only, spot mantigina uygun) simulasyonu yapar.
+
+    Not: Bu, gercek zamanli sistemin harfiyen kopyasi degildir (orn. korelasyon/
+    makro/sentiment bias katmanlari, gercek emir defteri derinligi ve komisyon/
+    slipaj gibi bircok canli etken dahil edilmemistir). Amac, cekirdek
+    momentum+baski sinyalinin TARIHSEL olarak ne siklikta dogru yon verdigini
+    kabaca olcmektir - "kesin kar garantisi" degil, "bu mantik gecmiste iy mi
+    kotu mu calismis" sorusuna kaba bir cevaptir.
+    """
+    symbol = symbol.upper()
+    market = market.upper()
+    take_profit_pct = BINANCE_TAKE_PROFIT_PCT if take_profit_pct is None else take_profit_pct
+    stop_loss_pct = BINANCE_STOP_LOSS_PCT if stop_loss_pct is None else stop_loss_pct
+    min_loss_pct = BINANCE_AI_SELL_MIN_LOSS_PCT if min_loss_pct is None else min_loss_pct
+
+    lookback = _lookback_steps_for_interval(interval)
+    fetch_count = candles + lookback + 5
+    bars = fetch_binance_klines(symbol, market, interval, fetch_count)
+    if len(bars) <= lookback + 1:
+        return {"error": "Yeterli gecmis mum verisi alinamadi.", "symbol": symbol, "market": market}
+
+    closes = [b["close"] for b in bars]
+
+    position: Optional[Dict[str, Any]] = None
+    trades: List[Dict[str, Any]] = []
+    equity = 100.0  # yuzde bazli varsayimsal sermaye (compounding)
+    equity_curve = [equity]
+
+    def _fee(px_move_pct: float) -> float:
+        return px_move_pct - 2 * fee_pct  # giris + cikis komisyonu kabaca dus
+
+    for i in range(lookback, len(bars)):
+        price = closes[i]
+        prev_price = closes[i - lookback]
+        if prev_price <= 0:
+            continue
+        change = ((price - prev_price) / prev_price) * 100.0
+        pressure = pressure_from_change(change)
+        buy_pressure = pressure["buy_pressure"]
+        sell_pressure = pressure["sell_pressure"]
+
+        signal = "WAIT"
+        if change > 2.0 and buy_pressure > 58:
+            signal = "BUY"
+        elif change < -2.0 and sell_pressure > 58:
+            signal = "SELL"
+
+        if position is not None:
+            entry_price = position["entry_price"]
+            pnl_pct = ((price - entry_price) / entry_price) * 100.0
+            close_reason = None
+            if pnl_pct >= take_profit_pct:
+                close_reason = "TP"
+            elif pnl_pct <= -stop_loss_pct:
+                close_reason = "SL"
+            elif signal == "SELL":
+                if pnl_pct < 0 and abs(pnl_pct) < min_loss_pct:
+                    pass  # canli sistemdeki min-zarar esigi: erken satisi engelle
+                else:
+                    close_reason = "AI_KARARI"
+
+            if close_reason:
+                net_pnl_pct = _fee(pnl_pct)
+                equity *= (1 + net_pnl_pct / 100.0)
+                trades.append({
+                    "entry_time": position["entry_time"],
+                    "exit_time": bars[i]["open_time"],
+                    "entry_price": round(entry_price, 6),
+                    "exit_price": round(price, 6),
+                    "pnl_pct": round(net_pnl_pct, 3),
+                    "close_reason": close_reason,
+                })
+                position = None
+
+        if position is None and signal == "BUY":
+            position = {"entry_time": bars[i]["open_time"], "entry_price": price}
+
+        equity_curve.append(equity)
+
+    # Acik kalan pozisyon varsa son fiyattan realize edilmemis olarak isaretle (metriklere dahil etme).
+    open_position = None
+    if position is not None:
+        last_price = closes[-1]
+        open_pnl_pct = ((last_price - position["entry_price"]) / position["entry_price"]) * 100.0
+        open_position = {
+            "entry_time": position["entry_time"],
+            "entry_price": round(position["entry_price"], 6),
+            "current_price": round(last_price, 6),
+            "unrealized_pnl_pct": round(open_pnl_pct, 3),
+        }
+
+    wins = [t for t in trades if t["pnl_pct"] > 0]
+    losses = [t for t in trades if t["pnl_pct"] <= 0]
+    total_trades = len(trades)
+    win_rate = round((len(wins) / total_trades) * 100.0, 2) if total_trades else 0.0
+    sum_wins = sum(t["pnl_pct"] for t in wins)
+    sum_losses_abs = abs(sum(t["pnl_pct"] for t in losses))
+    profit_factor = round(sum_wins / sum_losses_abs, 2) if sum_losses_abs > 0 else (round(sum_wins, 2) if sum_wins > 0 else 0.0)
+    avg_win_pct = round(sum_wins / len(wins), 3) if wins else 0.0
+    avg_loss_pct = round(sum(t["pnl_pct"] for t in losses) / len(losses), 3) if losses else 0.0
+
+    # Maksimum dususu (drawdown) equity egrisinden hesapla.
+    peak = equity_curve[0]
+    max_drawdown_pct = 0.0
+    for v in equity_curve:
+        peak = max(peak, v)
+        if peak > 0:
+            dd = (peak - v) / peak * 100.0
+            max_drawdown_pct = max(max_drawdown_pct, dd)
+
+    trade_returns = [t["pnl_pct"] for t in trades]
+    sharpe_like = 0.0
+    if len(trade_returns) > 1:
+        mean_r = statistics.mean(trade_returns)
+        stdev_r = statistics.pstdev(trade_returns)
+        if stdev_r > 0:
+            sharpe_like = round((mean_r / stdev_r) * math.sqrt(len(trade_returns)), 3)
+
+    total_return_pct = round(equity - 100.0, 3)
+
+    return {
+        "symbol": symbol,
+        "market": market,
+        "interval": interval,
+        "candles_used": len(bars) - lookback,
+        "take_profit_pct": take_profit_pct,
+        "stop_loss_pct": stop_loss_pct,
+        "min_loss_pct": min_loss_pct,
+        "total_trades": total_trades,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": win_rate,
+        "avg_win_pct": avg_win_pct,
+        "avg_loss_pct": avg_loss_pct,
+        "profit_factor": profit_factor,
+        "max_drawdown_pct": round(max_drawdown_pct, 3),
+        "total_return_pct": total_return_pct,
+        "sharpe_like_ratio": sharpe_like,
+        "open_position_at_end": open_position,
+        "last_10_trades": trades[-10:],
+        "note": (
+            "Bu simulasyon sentetik emir defteri baskisi kullanir (gercek gecmis "
+            "derinlik verisi yok), korelasyon/makro/sentiment bias katmanlarini "
+            "icermez ve komisyon/slipaj kabaca sabit oranla modellenmistir. "
+            "Sadece cekirdek momentum sinyalinin tarihsel egilimini gosterir."
+        ),
+    }
+
+
 def place_futures_order(
     symbol: str,
     side: str,
@@ -7137,6 +7376,42 @@ def signal_alias():
         })
     except Exception as e:
         return jsonify({"symbol": symbol, "signal": "WAIT", "confidence": 50, "error": str(e)})
+
+
+@app.route("/backtest", methods=["GET"])
+def backtest_route():
+    """Cekirdek AI momentum sinyalini gecmis Binance mum verisi uzerinde
+    tekrar oynatir. Ornek: /backtest?symbol=BTCUSDT&market=SPOT&interval=1h&candles=500
+    Parametreler:
+      symbol   : Binance sembolu (varsayilan BTCUSDT)
+      market   : SPOT | FUTURES (varsayilan SPOT)
+      interval : Binance kline araligi - 15m, 1h, 4h, 1d vb. (varsayilan 1h)
+      candles  : Simule edilecek mum sayisi (varsayilan 500, maksimum 3000)
+      tp       : Take-profit yuzdesi (opsiyonel, varsayilan canli sistem ayari)
+      sl       : Stop-loss yuzdesi (opsiyonel, varsayilan canli sistem ayari)
+      min_loss : AI karariyla erken satisi engelleyen min-zarar esigi (opsiyonel)
+    """
+    symbol = normalize_symbol(request.args.get("symbol", "BTCUSDT"))
+    market = request.args.get("market", "SPOT")
+    interval = request.args.get("interval", "1h")
+    candles = int(safe_float(request.args.get("candles", 500), 500))
+    candles = max(30, min(candles, 3000))
+    tp = request.args.get("tp")
+    sl = request.args.get("sl")
+    min_loss = request.args.get("min_loss")
+    try:
+        result = run_backtest(
+            symbol=symbol,
+            market=market,
+            interval=interval,
+            candles=candles,
+            take_profit_pct=safe_float(tp) if tp else None,
+            stop_loss_pct=safe_float(sl) if sl else None,
+            min_loss_pct=safe_float(min_loss) if min_loss else None,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "symbol": symbol, "market": market}), 500
 
 
 @app.route("/status", methods=["GET"])
