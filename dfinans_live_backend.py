@@ -1265,6 +1265,109 @@ def compute_strategy_analysis(rows: List[Dict[str, Any]], base_stats: Dict[str, 
     }
 
 
+def _relative_time_tr(created_at_text: str) -> str:
+    """'2026-07-08 17:50:45' gibi bir zaman metnini 'X dk önce' / 'X sa önce'
+    gibi insan-okunur Turkce bagil zamana cevirir. iOS 'AI Karar Merkezi'
+    ekrani (AIDecisionCenterView) bu formatta hazir bir 'timeText' alani
+    bekledigi icin eklendi."""
+    try:
+        then = datetime.strptime(str(created_at_text), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "-"
+    delta = datetime.now() - then
+    seconds = int(delta.total_seconds())
+    if seconds < 0:
+        seconds = 0
+    if seconds < 60:
+        return "Az önce"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} dk önce"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} sa önce"
+    days = hours // 24
+    return f"{days} gün önce"
+
+
+_AI_DECISION_MARKET_LABELS: Dict[str, str] = {
+    "BINANCE": "Binance USDT-M",
+    "BINANCE_SPOT": "Binance Spot",
+    "IBKR": "IBKR Hisse",
+}
+
+
+def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
+    """iOS 'AI Karar Merkezi' (AIDecisionCenterView) ekraninin bekledigi
+    GET /ai-decision-center semasina uygun karar listesini auto_history'den
+    (her AI karar dongusu) uretir. Onceden bu endpoint hic yoktu, ekran
+    surekli seed/demo veriye dusuyordu - kullanicinin 'ai karar merkezi
+    sorunlu' bildirimi buradan kaynaklaniyordu."""
+    rows = db_recent_auto_history(limit)
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        action = str(r.get("action", "WAIT")).upper()
+        broker = str(r.get("broker", "-")).upper()
+        market_label = _AI_DECISION_MARKET_LABELS.get(broker, broker)
+        reason = str(r.get("reason", "")).strip() or "Gerekçe kaydedilmedi."
+        confidence = int(r.get("confidence", 0) or 0)
+        is_trade = action in ("BUY", "SELL")
+        status = "OPENED" if is_trade else "BLOCKED"
+        symbol = str(r.get("symbol", "-"))
+        result_text = (
+            f"{symbol} için {action} kararı verildi ve işleme geçildi: {reason}"
+            if is_trade
+            else f"{symbol} için net bir işlem sinyali bulunmadı, pas geçildi: {reason}"
+        )
+        out.append(
+            {
+                "id": str(r.get("id") or f"{r.get('time')}-{symbol}"),
+                "symbol": symbol,
+                "market": market_label,
+                "side": action,
+                "status": status,
+                "score": confidence,
+                "timeText": _relative_time_tr(r.get("time")),
+                "positiveReasons": [reason] if is_trade else [],
+                "negativeReasons": [] if is_trade else [reason],
+                "resultText": result_text,
+            }
+        )
+    return out
+
+
+def build_ai_performance_stats_payload() -> Dict[str, Any]:
+    """iOS 'AI Karar Merkezi' ekraninin bekledigi GET /ai-performance-stats
+    semasina uygun ozet uretir: karar sayilari auto_history'den, gercek
+    kar/zarar oranlari ise position_closures'dan (compute_performance_stats)
+    alinir - boylece 'kac karar acildi/bloklandi' ile 'gercekte ne kadar
+    kazandirdi' ayni ekranda tutarli sekilde gorunur."""
+    decisions = db_recent_auto_history(200)
+    total_decisions = len(decisions)
+    opened = sum(1 for d in decisions if str(d.get("action", "WAIT")).upper() in ("BUY", "SELL"))
+    blocked = total_decisions - opened
+
+    closures = db_all_position_closures(days=30, include_mandatory_holdings=False)
+    perf = compute_performance_stats(closures)
+    if perf.get("total_trades", 0) > 0:
+        success_rate = f"%{perf['win_rate_pct']:.1f}"
+        avg_profit = f"+{perf['avg_win']:.2f}"
+        avg_loss = f"{perf['avg_loss']:.2f}"
+    else:
+        success_rate = "-"
+        avg_profit = "-"
+        avg_loss = "-"
+
+    return {
+        "totalDecisions": total_decisions,
+        "openedTrades": opened,
+        "blockedTrades": blocked,
+        "successRate": success_rate,
+        "avgProfit": avg_profit,
+        "avgLoss": avg_loss,
+    }
+
+
 def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
     with DB_LOCK:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
@@ -8339,6 +8442,31 @@ def strategy_analysis_route():
         return jsonify(response)
     except Exception as e:
         return jsonify({"error": str(e), "time": now_text()}), 200
+
+
+@app.route("/ai-decision-center", methods=["GET"])
+def ai_decision_center_route():
+    """iOS 'AI Karar Merkezi' ekraninin (AIDecisionCenterView) canli veri
+    okudugu endpoint. Onceden bu route hic yoktu (404), ekran hep seed/demo
+    veriye dusuyordu."""
+    try:
+        limit_param = request.args.get("limit")
+        limit = max(1, min(int(safe_float(limit_param, 40)), 200)) if limit_param else 40
+        decisions = build_ai_decision_center_entries(limit)
+        return jsonify({"ok": True, "data": {"decisions": decisions}, "time": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "data": {"decisions": []}, "time": now_text()}), 200
+
+
+@app.route("/ai-performance-stats", methods=["GET"])
+def ai_performance_stats_route():
+    """iOS 'AI Karar Merkezi' ekraninin ozet performans panelinde kullandigi
+    endpoint. Onceden bu route hic yoktu (404)."""
+    try:
+        stats = build_ai_performance_stats_payload()
+        return jsonify({"ok": True, "data": stats, "time": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
 
 
 @app.route("/position-closures/test-email", methods=["POST", "GET"])
