@@ -2474,7 +2474,7 @@ def get_macro_dashboard_raw() -> Dict[str, Any]:
     hic yoktu - panel sonsuza dek 'veri bekleniyor' placeholder'inda kaliyordu."""
     def _fetch():
         out = {}
-        for key in ["VIX", "NASDAQ", "SP500", "DXY", "GOLD", "OIL"]:
+        for key in ["VIX", "NASDAQ", "SP500", "DXY", "GOLD", "OIL", "US10Y"]:
             try:
                 t = try_yahoo_ticker(key)
             except Exception:
@@ -3349,6 +3349,16 @@ def build_dd_ai_dashboard() -> Dict[str, Any]:
         val = safe_float(t.get("price"))
         return f"{prefix}{val:,.{decimals}f}"
 
+    def _fmt_rate(key: str) -> str:
+        # Yahoo'nun ^TNX (ABD 10 yillik tahvil getirisi) endeksi getiriyi 10 ile
+        # carpilmis olarak verir (ornegin gercek getiri %4.25 ise deger 42.5
+        # gelir) - gercek yuzdeye cevirmek icin 10'a bolunur.
+        t = macro_raw.get(key)
+        if not t or safe_float(t.get("price")) <= 0:
+            return "-"
+        val = safe_float(t.get("price")) / 10.0
+        return f"%{val:,.2f}"
+
     vix_val = safe_float((macro_raw.get("VIX") or {}).get("price"))
     regime = regime_info.get("regime", "NEUTRAL") if isinstance(regime_info, dict) else "NEUTRAL"
 
@@ -3410,6 +3420,7 @@ def build_dd_ai_dashboard() -> Dict[str, Any]:
             "dxy": _fmt("DXY"),
             "gold": _fmt("GOLD", prefix="$"),
             "oil": _fmt("OIL", prefix="$"),
+            "interest_rate": _fmt_rate("US10Y"),
         },
         "market_mood": {
             "general_mode": general_mode,
@@ -7058,7 +7069,7 @@ def dd_ai_dashboard_route():
     except Exception as e:
         return jsonify({
             "updated_at": now_text(), "ai_confidence": 0, "market_regime": "-",
-            "macro": {"vix": "-", "nasdaq": "-", "sp500": "-", "dxy": "-", "gold": "-", "oil": "-"},
+            "macro": {"vix": "-", "nasdaq": "-", "sp500": "-", "dxy": "-", "gold": "-", "oil": "-", "interest_rate": "-"},
             "market_mood": {"general_mode": "-", "risk_appetite": "-", "institutional_flow": "-", "bubble_risk": "-"},
             "institutional_scores": {}, "learning_rates": {},
             "last_decision": {"symbol": "-", "action": "-", "confidence": 0, "reason": str(e)},
