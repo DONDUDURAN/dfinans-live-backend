@@ -5408,6 +5408,7 @@ def run_backtest(
     stop_loss_pct: Optional[float] = None,
     min_loss_pct: Optional[float] = None,
     fee_pct: float = 0.1,
+    _prefetched_bars: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """calculate_ai_signal() mantigini (change_24h esigi + pressure_from_change
     ile sentetik emir defteri baskisi) gecmis veride tekrar oynatarak basit bir
@@ -5428,7 +5429,7 @@ def run_backtest(
 
     lookback = _lookback_steps_for_interval(interval)
     fetch_count = candles + lookback + 5
-    bars = fetch_binance_klines(symbol, market, interval, fetch_count)
+    bars = _prefetched_bars if _prefetched_bars is not None else fetch_binance_klines(symbol, market, interval, fetch_count)
     if len(bars) <= lookback + 1:
         return {"error": "Yeterli gecmis mum verisi alinamadi.", "symbol": symbol, "market": market}
 
@@ -5556,6 +5557,71 @@ def run_backtest(
             "derinlik verisi yok), korelasyon/makro/sentiment bias katmanlarini "
             "icermez ve komisyon/slipaj kabaca sabit oranla modellenmistir. "
             "Sadece cekirdek momentum sinyalinin tarihsel egilimini gosterir."
+        ),
+    }
+
+
+def optimize_backtest_tp_sl(
+    symbol: str,
+    market: str = "SPOT",
+    interval: str = "1h",
+    candles: int = 1000,
+    tp_values: Optional[List[float]] = None,
+    sl_values: Optional[List[float]] = None,
+    min_trades: int = 5,
+) -> Dict[str, Any]:
+    """Belirli bir sembol/zaman araligi icin TP/SL kombinasyonlarini tarayarak
+    (grid search) en iyi toplam getiriyi veren esik ciftini bulur. Mum verisi
+    tek seferde cekilip her kombinasyonda tekrar kullanilir (Binance'a gereksiz
+    tekrar istek atilmaz)."""
+    symbol = symbol.upper()
+    market = market.upper()
+    tp_values = tp_values or [2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+    sl_values = sl_values or [3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0]
+
+    lookback = _lookback_steps_for_interval(interval)
+    fetch_count = candles + lookback + 5
+    bars = fetch_binance_klines(symbol, market, interval, fetch_count)
+    if len(bars) <= lookback + 1:
+        return {"error": "Yeterli gecmis mum verisi alinamadi.", "symbol": symbol, "market": market}
+
+    all_results = []
+    for tp in tp_values:
+        for sl in sl_values:
+            res = run_backtest(
+                symbol=symbol,
+                market=market,
+                interval=interval,
+                candles=candles,
+                take_profit_pct=tp,
+                stop_loss_pct=sl,
+                _prefetched_bars=bars,
+            )
+            if "error" in res:
+                continue
+            all_results.append(res)
+
+    # Az sayida islemle "sansla" cikan asiri iyi sonuclari elemek icin
+    # min_trades esigini uygula (overfitting/az-ornek yanilgisini azaltmak icin).
+    eligible = [r for r in all_results if r["total_trades"] >= min_trades]
+    ranked_pool = eligible if eligible else all_results
+    ranked = sorted(ranked_pool, key=lambda r: r["total_return_pct"], reverse=True)
+
+    return {
+        "symbol": symbol,
+        "market": market,
+        "interval": interval,
+        "candles_used": len(bars) - lookback,
+        "combinations_tested": len(all_results),
+        "min_trades_filter": min_trades,
+        "best": ranked[0] if ranked else None,
+        "top_5": ranked[:5],
+        "worst": ranked[-1] if ranked else None,
+        "note": (
+            "Az islem sayisiyla cikan asiri iyi sonuclar (overfitting) elenmeye "
+            f"calisildi (min {min_trades} islem sarti). Yine de bu bir grid "
+            "search'tur; gelecekte de ayni sonucu verecegini garanti etmez - "
+            "duzenli araliklarla tekrar calistirilip izlenmelidir."
         ),
     }
 
@@ -7408,6 +7474,26 @@ def backtest_route():
             take_profit_pct=safe_float(tp) if tp else None,
             stop_loss_pct=safe_float(sl) if sl else None,
             min_loss_pct=safe_float(min_loss) if min_loss else None,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e), "symbol": symbol, "market": market}), 500
+
+
+@app.route("/backtest-optimize", methods=["GET"])
+def backtest_optimize_route():
+    """TP/SL kombinasyonlarini gecmis veride tarayarak en iyi esik ciftini bulur.
+    Ornek: /backtest-optimize?symbol=BTCUSDT&market=SPOT&interval=1h&candles=1000
+    """
+    symbol = normalize_symbol(request.args.get("symbol", "BTCUSDT"))
+    market = request.args.get("market", "SPOT")
+    interval = request.args.get("interval", "1h")
+    candles = int(safe_float(request.args.get("candles", 1000), 1000))
+    candles = max(100, min(candles, 3000))
+    min_trades = int(safe_float(request.args.get("min_trades", 5), 5))
+    try:
+        result = optimize_backtest_tp_sl(
+            symbol=symbol, market=market, interval=interval, candles=candles, min_trades=min_trades,
         )
         return jsonify(result)
     except Exception as e:
