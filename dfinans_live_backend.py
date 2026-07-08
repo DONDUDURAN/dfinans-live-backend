@@ -1166,6 +1166,59 @@ def _text_time_to_epoch(text: str) -> int:
         return int(time.time())
 
 
+def db_recent_unified_history(limit: int = 200) -> List[Dict[str, Any]]:
+    """Kullanicinin talebi: 'ana sayfadaki tüm ai işlem geçmişine girilmiyor, onu tek
+    bir yerde topla'. Onceden AI karar gecmisi (auto_history: her dongudeki BUY/SELL/WAIT
+    kararlari, tum brokerlar) ve gercek emir defteri (trade_journal: manuel API'den
+    gonderilen emirler + TP/SL tetiklemeleri) IKI AYRI tabloda/route'ta duruyordu; ana
+    sayfa hangisini cagirirsa sadece o kismi goruyordu, digeri 'kayip' gibi
+    gorunuyordu. Bu fonksiyon ikisini TEK bir zaman-sirali listede birlestirir,
+    her satira nereden geldigini gosteren bir 'source' etiketi ekler (ai_signal =
+    auto_history, order = trade_journal) ve en yeniden en eskiye siralar."""
+    signals = db_recent_auto_history(limit)
+    orders = db_recent_trade_journal(limit)
+
+    combined: List[Dict[str, Any]] = []
+    for row in signals:
+        combined.append({
+            "source": "ai_signal",
+            "id": row.get("id"),
+            "time": row.get("time"),
+            "epoch": _text_time_to_epoch(str(row.get("time", ""))),
+            "broker": row.get("broker"),
+            "symbol": row.get("symbol"),
+            "action": row.get("action"),
+            "confidence": row.get("confidence"),
+            "price": row.get("price"),
+            "reason": row.get("reason"),
+            "detail": row.get("execution"),
+        })
+    for row in orders:
+        combined.append({
+            "source": "order",
+            "id": row.get("id"),
+            "time": row.get("created_at"),
+            "epoch": _text_time_to_epoch(str(row.get("created_at", ""))),
+            "broker": row.get("broker"),
+            "symbol": row.get("symbol"),
+            "action": row.get("side"),
+            "confidence": None,
+            "price": None,
+            "reason": f"{row.get('channel', '')} - {row.get('status', '')}".strip(" -"),
+            "detail": {
+                "status": row.get("status"),
+                "quantity": row.get("quantity"),
+                "simulated": row.get("simulated"),
+                "error": row.get("error"),
+                "payload": row.get("payload"),
+                "request_id": row.get("request_id"),
+            },
+        })
+
+    combined.sort(key=lambda r: r["epoch"], reverse=True)
+    return combined[:limit]
+
+
 def build_ai_log_entries(limit: int = 100) -> List[Dict[str, Any]]:
     """iOS AITradeLogView.swift'in bekledigi RemoteAILog semasina (symbol, side,
     status, confidence, reason, market, created_at:epoch, extra) uygun kayitlar
@@ -1217,19 +1270,20 @@ def build_ai_log_entries(limit: int = 100) -> List[Dict[str, Any]]:
             "extra": {},
         })
 
-    for row in TRADE_LOG[:limit]:
-        order = row.get("order") or {}
-        symbol = str(order.get("symbol", row.get("symbol", "-"))) if isinstance(order, dict) else "-"
-        side = str(order.get("side", "-")) if isinstance(order, dict) else "-"
+    for row in db_recent_trade_journal(limit):
+        payload = row.get("payload") or {}
+        order = payload.get("order") if isinstance(payload, dict) else None
+        symbol = str(row.get("symbol") or (order.get("symbol") if isinstance(order, dict) else "") or "-")
+        side = str(row.get("side") or (order.get("side") if isinstance(order, dict) else "") or "-")
         status = "error" if row.get("error") else "opened"
         entries.append({
             "symbol": symbol,
             "side": side,
             "status": status,
-            "confidence": int(safe_float(row.get("confidence"), 80)),
-            "reason": str(row.get("message", row.get("reason", "Manuel/otomatik emir çalıştırıldı."))),
-            "market": str(row.get("market", "-")),
-            "created_at": _text_time_to_epoch(str(row.get("time", now_text()))),
+            "confidence": 80,
+            "reason": str(row.get("error") or f"{row.get('channel', '')} - {row.get('status', '')}".strip(" -") or "Manuel/otomatik emir çalıştırıldı."),
+            "market": str(row.get("broker", "-")),
+            "created_at": _text_time_to_epoch(str(row.get("created_at", now_text()))),
             "extra": {},
         })
 
@@ -7904,22 +7958,31 @@ def intermarket_analysis():
 
 @app.route("/auto-trader/history", methods=["GET"])
 def auto_trader_history():
-    """Return auto-trader signal history. Combines in-memory + persistent DB."""
+    """Auto-trader (AI) sinyal + gercek emir gecmisini dondurur. Kullanicinin
+    talebi uzerine ('ana sayfadaki tüm ai işlem geçmişine girilmiyor, onu tek
+    bir yerde topla') artik sadece AI karar dongusu (auto_history) degil, ayrica
+    manuel/otomatik TUM gercek emir denemeleri (trade_journal) de ayni listede,
+    zaman sirali ve 'source' alaniyle etiketlenmis sekilde donuyor - boylece ana
+    sayfa TEK bir cagriyla eksiksiz bir gecmis gorebiliyor. Eski davranisla
+    (sadece AI sinyalleri) geriye donuk uyumluluk icin include_orders=0 verilebilir."""
     try:
         limit = max(1, min(int(request.args.get("limit", "120")), 500))
-        
-        # Get DB records (persistent)
-        db_records = db_recent_auto_history(limit)
-        
+        include_orders = request.args.get("include_orders", "1") != "0"
+
+        if include_orders:
+            unified_records = db_recent_unified_history(limit)
+        else:
+            unified_records = db_recent_auto_history(limit)
+
         # Get in-memory records (for current session)
         with AUTO_LOCK:
             mem_records = AUTO_HISTORY[:limit]
-        
+
         return jsonify({
             "ok": True,
-            "persistent_records": len(db_records),
+            "persistent_records": len(unified_records),
             "session_records": len(mem_records),
-            "history": db_records,
+            "history": unified_records,
             "last_update": now_text(),
         })
     except Exception as e:
