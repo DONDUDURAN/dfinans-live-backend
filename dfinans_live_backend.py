@@ -189,7 +189,7 @@ class AutoTraderState:
     currency: str = "USD"
     quantity: float = 0.01
     interval_sec: int = 20
-    min_confidence: int = 67
+    min_confidence: int = 65
     evaluation_window_sec: int = 300
     max_daily_trades: int = 5
     daily_trade_count: int = 0
@@ -341,7 +341,7 @@ SPOT_AUTO_TRADER.broker = "BINANCE_SPOT"
 SPOT_AUTO_TRADER.market = "SPOT"
 SPOT_AUTO_TRADER.symbol = "ETHUSDT"
 SPOT_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_SPOT_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
-SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "67"))
+SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "65"))
 SPOT_AUTO_TRADER.interval_sec = int(os.getenv("BINANCE_SPOT_AUTO_INTERVAL_SEC", "25"))
 SPOT_AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_SPOT_AUTO_MAX_DAILY_TRADES", "5"))
 SPOT_AUTO_TRADER.mode = AUTO_TRADER.mode
@@ -350,9 +350,9 @@ SPOT_AUTO_LOCK = threading.Lock()
 SPOT_AUTO_HISTORY: List[Dict[str, Any]] = []
 # Her sembol icin bosta bekleyen spot USDT bakiyesinin ne kadari kullanilsin
 # (Futures'taki AUTO_TRADER_SIZE_PCT_* mantiginin spot karsiligi).
-SPOT_AUTO_SIZE_PCT_BTC = float(os.getenv("BINANCE_SPOT_SIZE_PCT_BTC", "20.0")) / 100.0
-SPOT_AUTO_SIZE_PCT_ETH = float(os.getenv("BINANCE_SPOT_SIZE_PCT_ETH", "15.0")) / 100.0
-SPOT_AUTO_SIZE_PCT_DEFAULT = float(os.getenv("BINANCE_SPOT_SIZE_PCT_DEFAULT", "8.0")) / 100.0
+SPOT_AUTO_SIZE_PCT_BTC = float(os.getenv("BINANCE_SPOT_SIZE_PCT_BTC", "28.0")) / 100.0
+SPOT_AUTO_SIZE_PCT_ETH = float(os.getenv("BINANCE_SPOT_SIZE_PCT_ETH", "22.0")) / 100.0
+SPOT_AUTO_SIZE_PCT_DEFAULT = float(os.getenv("BINANCE_SPOT_SIZE_PCT_DEFAULT", "12.0")) / 100.0
 
 
 # Mobil uygulamanin /ai-status ve /ai-control endpoint'lerinin bekledigi basit
@@ -413,9 +413,9 @@ BINANCE_AI_SELL_MIN_LOSS_PCT = float(os.getenv("BINANCE_AI_SELL_MIN_LOSS_PCT", "
 # bosta bekleyen (available) Binance futures USDT bakiyesinin belirli bir yuzdesi
 # kadar pozisyon acilir. BTC icin %25, ETH icin %20, diger tum varliklar icin %10
 # (hepsi Railway degiskeni ile ayarlanabilir).
-AUTO_TRADER_SIZE_PCT_BTC = float(os.getenv("AUTO_TRADER_SIZE_PCT_BTC", "25.0")) / 100.0
-AUTO_TRADER_SIZE_PCT_ETH = float(os.getenv("AUTO_TRADER_SIZE_PCT_ETH", "20.0")) / 100.0
-AUTO_TRADER_SIZE_PCT_DEFAULT = float(os.getenv("AUTO_TRADER_SIZE_PCT_DEFAULT", "10.0")) / 100.0
+AUTO_TRADER_SIZE_PCT_BTC = float(os.getenv("AUTO_TRADER_SIZE_PCT_BTC", "35.0")) / 100.0
+AUTO_TRADER_SIZE_PCT_ETH = float(os.getenv("AUTO_TRADER_SIZE_PCT_ETH", "28.0")) / 100.0
+AUTO_TRADER_SIZE_PCT_DEFAULT = float(os.getenv("AUTO_TRADER_SIZE_PCT_DEFAULT", "15.0")) / 100.0
 
 # Sinyal gucune (confidence) gore kaldirac: kaldirac artik sabit varlik bazli
 # degil, her islemin AI/sinyal guveninе gore kademeli belirlenir. Max kaldirac
