@@ -5110,6 +5110,29 @@ def _auto_trader_run_symbol(
                                 action = "WAIT"
                                 qty = 0
                                 pre_close_position = None
+                            else:
+                                # Elde tutulan miktar istenen qty'den azsa (ör. daha once
+                                # kismen kapatilmis bir pozisyon), qty'yi elde olanla
+                                # sinirla - IBKR API kesirli emri kabul etmiyor, tam sayiya
+                                # yuvarla.
+                                held_qty = math.floor(safe_float(pre_close_position.get("position") or pre_close_position.get("size")))
+                                if held_qty < qty:
+                                    qty = held_qty
+                        else:
+                            # KRITIK: elde HICBIR LONG pozisyon yokken SELL emri gonderilirse
+                            # IBKR bunu "kisa satis" (short sell) olarak degerlendirir ve
+                            # hesap marj/kisa-satis icin yeterli teminata (min 2000 USD)
+                            # sahip degilse "Error 201: Order rejected - YOUR ORDER IS NOT
+                            # ACCEPTED..." ile reddeder (canli loglarda MSFT/TSLA icin
+                            # gorulen tam olarak bu hataydi). Bu hesap sadece LONG islem
+                            # yapiyor, short satis hic istenmiyor - bu yuzden elde pozisyon
+                            # yoksa SAT sinyali tamamen atlanir, emir hic gonderilmez.
+                            reason = (
+                                reason + " (AI SAT sinyali atlandı: bu sembolde açık IBKR pozisyonu yok, "
+                                "kısa satış (short sell) denenmedi.)"
+                            ).strip()
+                            action = "WAIT"
+                            qty = 0
                     if qty > 0 and "error" not in execution:
                         # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
                         # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
