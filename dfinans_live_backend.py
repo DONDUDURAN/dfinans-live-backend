@@ -2138,6 +2138,51 @@ def _build_snapshot_from_ticker(ticker, symbol: str, asset_type: str, exchange: 
     }
 
 
+def _fallback_snapshot_from_history(ib, contract, symbol: str, asset_type: str, exchange: str, currency: str) -> Optional[Dict[str, Any]]:
+    """Canli ticker (marketPrice/last/close) bos donduyse (piyasa kapali,
+    sembol icin canli veri akisi yok, vb.) son 2 gunluk gunluk bar'i
+    (reqHistoricalData) cekip en son kapanisi fiyat olarak kullanir. Boylece
+    tur tamamen basarisiz olmak yerine en azindan bilinen son fiyatla devam
+    eder (kullanicinin 'off-market islemlerde de referans alinsin' talebiyle
+    tutarli)."""
+    if contract is None:
+        return None
+    what_to_show = "MIDPOINT" if str(asset_type or "").upper() in ("FOREX", "FX", "CASH") else "TRADES"
+    bars = ib.reqHistoricalData(
+        contract,
+        endDateTime="",
+        durationStr="2 D",
+        barSizeSetting="1 day",
+        whatToShow=what_to_show,
+        useRTH=False,
+        formatDate=1,
+    )
+    if not bars:
+        return None
+    last_bar = bars[-1]
+    price = _clean_float(getattr(last_bar, "close", 0))
+    if price <= 0:
+        return None
+    prev = _clean_float(getattr(bars[-2], "close", 0)) if len(bars) > 1 else price
+    prev = prev if prev > 0 else price
+    change_24h = ((price - prev) / prev) * 100.0 if prev > 0 else 0.0
+    return {
+        "symbol": normalize_symbol(symbol),
+        "asset_type": str(asset_type or "STK").upper(),
+        "exchange": exchange,
+        "currency": currency,
+        "data_source": "ibkr_history_fallback",
+        "price": round(price, 6),
+        "change_24h": round(change_24h, 4),
+        "prev_close": round(prev, 6),
+        "bid_size": 0.0,
+        "ask_size": 0.0,
+        "order_flow_signal": "NEUTRAL",
+        "is_extended_hours": True,
+        "last_update": now_text(),
+    }
+
+
 def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
     """Tek bir IBKR round-trip'inde birden fazla sembolu birlikte sorgular ve
     sonuclari her istemcinin kendi threading.Event'ine dagitir."""
@@ -2164,10 +2209,11 @@ def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
             except Exception as e:
                 item["error"] = str(e)
         if tickers:
-            # Onceden 2.5sn bekleniyordu; delayed (type 3) veri genelde 1-1.2sn
-            # icinde populate oluyor, gereksiz beklemeyi kisaltmak toplam
-            # gecikmeyi (cache TTL + bu bekleme) azaltir.
-            ib.sleep(1.2)
+            # Onceden 1.2sn bekleniyordu; ozellikle o oturumda ilk kez
+            # sorgulanan (sogutulmus) semboller icin ya da piyasa kapaliyken
+            # bu sure yeterli olmuyor ve tekrarlayan "canlı fiyat alınamadı"
+            # hatalarina yol aciyordu (ozellikle LSE/UK sembolleri). 1.2sn -> 2.2sn.
+            ib.sleep(2.2)
         for item in batch_items:
             key = item["cache_key"]
             if item.get("error"):
@@ -2181,7 +2227,25 @@ def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
                     ticker, item["symbol"], item["asset_type"], item["exchange"], item["currency"]
                 )
             except Exception as e:
-                item["error"] = str(e)
+                # Canli ticker verisi (marketPrice/last/close) hala bos ise -
+                # piyasa kapali veya bu sembol icin canli veri akisi yoksa -
+                # son gunluk kapanis barina (historical data) dusuyoruz. Bu,
+                # kullanicinin istedigi 'off-market islemlerde de referans
+                # alinabilmesi' davranisiyla tutarli: fiyat yoksa en azindan
+                # en son bilinen kapanis fiyati kullanilir, tur tamamen
+                # basarisiz olmaz.
+                fallback = None
+                try:
+                    fallback = _fallback_snapshot_from_history(
+                        ib, unique_contracts.get(key), item["symbol"], item["asset_type"],
+                        item["exchange"], item["currency"],
+                    )
+                except Exception:
+                    fallback = None
+                if fallback is not None:
+                    item["result"] = fallback
+                else:
+                    item["error"] = str(e)
         return None
 
     try:
