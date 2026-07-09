@@ -1757,11 +1757,70 @@ def ensure_thread_event_loop() -> None:
         asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+_IB_INSYNC_WRAPPER_PATCHED = False
+
+
+def _patch_ib_insync_wrapper_key_errors(ib_insync) -> None:
+    """20 sembollik genis IBKR havuzunda ayni anda birden fazla sembol
+    dogrulanirken (qualifyContracts/reqContractDetails), IB Gateway bazen
+    zaman asimina ugramis/temizlenmis bir reqId icin GEC bir contractDetails
+    yaniti gonderiyor. ib_insync'in kendi wrapper.py'si bu durumda
+    'self._results[reqId].append(...)' satirinda KeyError firlatip Railway
+    loglarini sürekli traceback ile dolduruyordu (bağlantı KOPMUYOR, sadece
+    gürültü). Burada ib_insync.wrapper.Wrapper.contractDetails ve
+    contractDetailsEnd metodlarini, bilinmeyen reqId'leri sessizce yok
+    sayacak sekilde monkey-patch'liyoruz - kutuphanenin kendi kodunu
+    degistirmeden, sadece calisma zamaninda daha savunmaci hale getiriyoruz."""
+    global _IB_INSYNC_WRAPPER_PATCHED
+    if _IB_INSYNC_WRAPPER_PATCHED:
+        return
+    try:
+        wrapper_cls = ib_insync.wrapper.Wrapper
+        original_contract_details = wrapper_cls.contractDetails
+        original_contract_details_end = wrapper_cls.contractDetailsEnd
+        original_bond_contract_details = getattr(wrapper_cls, "bondContractDetails", None)
+
+        def safe_contract_details(self, reqId, contractDetails):
+            if reqId not in self._results:
+                return
+            try:
+                original_contract_details(self, reqId, contractDetails)
+            except KeyError:
+                pass
+
+        def safe_contract_details_end(self, reqId):
+            if reqId not in self._results:
+                return
+            try:
+                original_contract_details_end(self, reqId)
+            except KeyError:
+                pass
+
+        wrapper_cls.contractDetails = safe_contract_details
+        wrapper_cls.contractDetailsEnd = safe_contract_details_end
+
+        if original_bond_contract_details:
+            def safe_bond_contract_details(self, reqId, contractDetails):
+                if reqId not in self._results:
+                    return
+                try:
+                    original_bond_contract_details(self, reqId, contractDetails)
+                except KeyError:
+                    pass
+            wrapper_cls.bondContractDetails = safe_bond_contract_details
+
+        _IB_INSYNC_WRAPPER_PATCHED = True
+        print("[IBKR] ib_insync wrapper KeyError koruması uygulandı (gecikmiş reqId yanıtları artık traceback basmayacak).")
+    except Exception as patch_error:
+        print(f"[IBKR] ib_insync wrapper korumasi uygulanamadi (zararsiz, devam ediliyor): {patch_error}")
+
+
 def load_ib_insync():
     try:
         import ib_insync
     except ImportError as e:
         raise RuntimeError("IBKR entegrasyonu için ib-insync kurulmalı.") from e
+    _patch_ib_insync_wrapper_key_errors(ib_insync)
     return ib_insync
 
 
