@@ -2158,10 +2158,12 @@ def _fallback_snapshot_from_history(ib, contract, symbol: str, asset_type: str, 
         formatDate=1,
     )
     if not bars:
+        print(f"[IBKR] {symbol} historical fallback: reqHistoricalData bos bar listesi dondurdu (izin/abonelik sorunu olabilir).")
         return None
     last_bar = bars[-1]
     price = _clean_float(getattr(last_bar, "close", 0))
     if price <= 0:
+        print(f"[IBKR] {symbol} historical fallback: son bar kapanisi da 0/gecersiz.")
         return None
     prev = _clean_float(getattr(bars[-2], "close", 0)) if len(bars) > 1 else price
     prev = prev if prev > 0 else price
@@ -2240,7 +2242,8 @@ def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
                         ib, unique_contracts.get(key), item["symbol"], item["asset_type"],
                         item["exchange"], item["currency"],
                     )
-                except Exception:
+                except Exception as hist_err:
+                    print(f"[IBKR] {item['symbol']} icin historical fallback basarisiz: {hist_err}")
                     fallback = None
                 if fallback is not None:
                     item["result"] = fallback
