@@ -1312,9 +1312,26 @@ def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
     GET /ai-decision-center semasina uygun karar listesini auto_history'den
     (her AI karar dongusu) uretir. Onceden bu endpoint hic yoktu, ekran
     surekli seed/demo veriye dusuyordu - kullanicinin 'ai karar merkezi
-    sorunlu' bildirimi buradan kaynaklaniyordu."""
-    rows = db_recent_auto_history(limit)
-    out: List[Dict[str, Any]] = []
+    sorunlu' bildirimi buradan kaynaklaniyordu.
+
+    Bu ekran 'AI İşlem Günlüğü' (ham, kronolojik tarama akışı) ile ayni
+    auto_history verisini kullansa da, kullanicinin 'ikisi ayni sey gibi
+    gorunuyor' geri bildirimi uzerine burada bilincli olarak farklilastirma
+    yapilir: (1) gercekten islem acilan kararlar en basa alinir (ham
+    kronolojik sirada onlarca 'pas gecildi' kaydinin arasinda kaybolmuyor),
+    (2) ayni sembol icin ust uste tekrar eden, hicbir sey degismemis 'pas
+    gecildi/WAIT' kayitlari sadelestirilir (sadece en guncel/en yuksek
+    skorlu olani tutulur) - boylece bu ekran 'onemli kararlarin ozeti'ne
+    donusur, Islem Gunlugu ise ham tarama akisi olarak kalir."""
+    # Havuzu genis tut (limit*6) ki dedupe/oncelik sonrasi elimizde yeterli
+    # sayida anlamli kayit kalsin; en sonunda yine 'limit' kadar dondurulur.
+    raw_pool = max(limit * 6, 120)
+    rows = db_recent_auto_history(raw_pool)
+
+    trades: List[Dict[str, Any]] = []
+    blocked_by_symbol: Dict[str, Dict[str, Any]] = {}
+    blocked_order: List[str] = []
+
     for r in rows:
         action = str(r.get("action", "WAIT")).upper()
         broker = str(r.get("broker", "-")).upper()
@@ -1322,28 +1339,43 @@ def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
         reason = str(r.get("reason", "")).strip() or "Gerekçe kaydedilmedi."
         confidence = int(r.get("confidence", 0) or 0)
         is_trade = action in ("BUY", "SELL")
-        status = "OPENED" if is_trade else "BLOCKED"
         symbol = str(r.get("symbol", "-"))
-        result_text = (
-            f"{symbol} için {action} kararı verildi ve işleme geçildi: {reason}"
-            if is_trade
-            else f"{symbol} için net bir işlem sinyali bulunmadı, pas geçildi: {reason}"
-        )
-        out.append(
-            {
-                "id": str(r.get("id") or f"{r.get('time')}-{symbol}"),
-                "symbol": symbol,
-                "market": market_label,
-                "side": action,
-                "status": status,
-                "score": confidence,
-                "timeText": _relative_time_tr(r.get("time")),
-                "positiveReasons": [reason] if is_trade else [],
-                "negativeReasons": [] if is_trade else [reason],
-                "resultText": result_text,
-            }
-        )
-    return out
+        entry = {
+            "id": str(r.get("id") or f"{r.get('time')}-{symbol}"),
+            "symbol": symbol,
+            "market": market_label,
+            "side": action,
+            "status": "OPENED" if is_trade else "BLOCKED",
+            "score": confidence,
+            "timeText": _relative_time_tr(r.get("time")),
+            "positiveReasons": [reason] if is_trade else [],
+            "negativeReasons": [] if is_trade else [reason],
+            "resultText": (
+                f"{symbol} için {action} kararı verildi ve işleme geçildi: {reason}"
+                if is_trade
+                else f"{symbol} için net bir işlem sinyali bulunmadı, pas geçildi: {reason}"
+            ),
+        }
+        if is_trade:
+            trades.append(entry)
+            continue
+        # rows en yeniden en eskiye siralidir (created_at DESC); bu sembol
+        # icin ilk gordugumuz (=en guncel) BLOCKED kaydi tutulur, ayni
+        # sembolun daha eski/tekrar eden pas gecme kayitlari elenir.
+        if symbol not in blocked_by_symbol:
+            blocked_by_symbol[symbol] = entry
+            blocked_order.append(symbol)
+
+    # Acilan islemler her zaman basa (zaten en yeniden en eskiye), ardindan
+    # sembol basina sadelestirilmis engellenen kararlar skor (guven) buyukten
+    # kucuge, esitlikte en yeni ise once gelecek sekilde eklenir.
+    blocked_sorted = sorted(
+        (blocked_by_symbol[s] for s in blocked_order),
+        key=lambda e: e["score"],
+        reverse=True,
+    )
+    out = trades + blocked_sorted
+    return out[: max(1, limit)]
 
 
 def build_ai_performance_stats_payload() -> Dict[str, Any]:
