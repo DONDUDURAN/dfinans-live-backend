@@ -417,6 +417,17 @@ AUTO_TRADER_SIZE_PCT_BTC = float(os.getenv("AUTO_TRADER_SIZE_PCT_BTC", "35.0")) 
 AUTO_TRADER_SIZE_PCT_ETH = float(os.getenv("AUTO_TRADER_SIZE_PCT_ETH", "28.0")) / 100.0
 AUTO_TRADER_SIZE_PCT_DEFAULT = float(os.getenv("AUTO_TRADER_SIZE_PCT_DEFAULT", "15.0")) / 100.0
 
+# Taban (minimum) pozisyon tutari: bakiyenin yuzdesi (asset_size_pct /
+# spot_auto_trader_size_pct) cok dusuk bir USD tutarina denk geldiginde
+# (orn. dusuk bakiyede %10 -> birkac dolar), Binance'in kendi min. islem
+# esigini (~20$) bile karsilamayabilir. Boyle durumlarda, kullanicinin
+# talebi uzerine, bakiye yeterliyse (>= bu tutar) SABIT bu tutar kadar
+# pozisyon acilir; bakiye bu tutardan da azsa islem denenmeden atlanir
+# (onceden yuzde bazli tutar zorla min_notional'a yukseltiliyor ama bakiye
+# yeterliligi kontrol edilmiyordu - bu da "yetersiz bakiye/marj" hatasiyla
+# reddedilen emirlere yol aciyordu).
+BINANCE_MIN_POSITION_USD = float(os.getenv("BINANCE_MIN_POSITION_USD", "25.0"))
+
 # Sinyal gucune (confidence) gore kaldirac: kaldirac artik sabit varlik bazli
 # degil, her islemin AI/sinyal guveninе gore kademeli belirlenir. Max kaldirac
 # 3x ile sinirlandirilmistir (ayarlanabilir); cogu islem "orta-guclu" bandina
@@ -5075,14 +5086,26 @@ def _auto_trader_run_symbol(
                         if available_usdt > 0:
                             pct = spot_auto_trader_size_pct(symbol)
                             sized_qty = round((available_usdt * pct) / price, 6)
-                            min_notional = 11.0  # Binance spot min ~10 USD + güvenlik payı
-                            if sized_qty * price < min_notional:
-                                sized_qty = round(math.ceil((min_notional / price) * 1_000_000) / 1_000_000, 6)
-                            qty = sized_qty
-                            reason = (
-                                reason
-                                + f" (Spot pozisyon büyüklüğü: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i -> {sized_qty:.6f} {symbol}.)"
-                            ).strip()
+                            if sized_qty * price < BINANCE_MIN_POSITION_USD:
+                                if available_usdt >= BINANCE_MIN_POSITION_USD:
+                                    sized_qty = round(math.ceil((BINANCE_MIN_POSITION_USD / price) * 1_000_000) / 1_000_000, 6)
+                                    qty = sized_qty
+                                    reason = (
+                                        reason
+                                        + f" (Spot pozisyon büyüklüğü: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i taban tutarın ({BINANCE_MIN_POSITION_USD:.0f}$) altında kaldığı için taban tutara yükseltildi -> {sized_qty:.6f} {symbol}.)"
+                                    ).strip()
+                                else:
+                                    spot_skip_reason = (
+                                        f"İşlem atlandı: kullanılabilir bakiye {available_usdt:.2f} USDT, "
+                                        f"taban pozisyon tutarı {BINANCE_MIN_POSITION_USD:.0f}$'ın altında kaldı."
+                                    )
+                                    qty = 0
+                            else:
+                                qty = sized_qty
+                                reason = (
+                                    reason
+                                    + f" (Spot pozisyon büyüklüğü: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i -> {sized_qty:.6f} {symbol}.)"
+                                ).strip()
                         else:
                             spot_skip_reason = "Spot USDT bakiyesi alınamadı, alım yapılmadı."
                             qty = 0
@@ -5292,6 +5315,7 @@ def _auto_trader_run_symbol(
                 # guclu sinyallerde max kaldirac (varsayilan 3x), zayif sinyallerde min
                 # kaldirac (varsayilan 2x) kullanilir - max kaldirac hicbir zaman asilmaz.
                 leverage = signal_leverage(confidence)
+                available_usdt = 0.0
                 if price > 0:
                     available_usdt = get_futures_available_usdt()
                     if available_usdt > 0:
@@ -5303,11 +5327,20 @@ def _auto_trader_run_symbol(
                                 + f" (Pozisyon buyuklugu: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i x{leverage} kaldirac (guven %{confidence}) -> {sized_qty:.6f} {symbol}.)"
                             ).strip()
                             qty = sized_qty
-                min_notional = 21.0  # Binance min 20 USD + güvenlik payı
-                if price > 0 and qty * price < min_notional:
-                    adj_qty = math.ceil((min_notional / price) * 1000) / 1000.0
-                    reason = (reason + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: min. işlem tutarı {min_notional}$ altında kalıyordu.)").strip()
-                    qty = adj_qty
+                if price > 0 and qty * price < BINANCE_MIN_POSITION_USD:
+                    if available_usdt >= BINANCE_MIN_POSITION_USD:
+                        adj_qty = math.ceil((BINANCE_MIN_POSITION_USD / price) * 1000) / 1000.0
+                        reason = (
+                            reason
+                            + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: taban pozisyon tutarı {BINANCE_MIN_POSITION_USD:.0f}$ uygulandı.)"
+                        ).strip()
+                        qty = adj_qty
+                    else:
+                        reason = (
+                            reason
+                            + f" (İşlem atlandı: kullanılabilir bakiye {available_usdt:.2f} USDT, taban pozisyon tutarı {BINANCE_MIN_POSITION_USD:.0f}$'ın altında kaldı.)"
+                        ).strip()
+                        qty = 0
                 # AI'nin bu SELL/BUY karari mevcut acik bir futures pozisyonunu
                 # (LONG icin SELL, SHORT icin BUY) kapatiyor/azaltiyor mu diye
                 # onceden kontrol ediyoruz - hem gunluk gecici bir dususte erken
