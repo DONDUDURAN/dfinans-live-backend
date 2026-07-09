@@ -520,6 +520,14 @@ def init_runtime_db() -> None:
                 )
                 """
             )
+            # Sonradan eklenen 'confirmations' (X/3 teyit sayisi) kolonu - daha once
+            # olusturulmus tablolarda bu kolon yok, bu yuzden idempotent bir ALTER
+            # TABLE ile ekleniyor (kolon zaten varsa sessizce atlanir).
+            try:
+                conn.execute("ALTER TABLE auto_history ADD COLUMN confirmations TEXT NOT NULL DEFAULT ''")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS spot_positions (
@@ -662,14 +670,15 @@ def db_insert_auto_history(
     price: float,
     reason: str,
     execution: Dict[str, Any],
+    confirmations: str = "",
 ) -> None:
     with DB_LOCK:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
         try:
             conn.execute(
                 """
-                INSERT INTO auto_history(id, created_at, broker, symbol, action, confidence, price, reason, execution_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO auto_history(id, created_at, broker, symbol, action, confidence, price, reason, execution_json, confirmations)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -681,6 +690,7 @@ def db_insert_auto_history(
                     safe_float(price, 0),
                     str(reason),
                     json.dumps(execution, ensure_ascii=False),
+                    str(confirmations or ""),
                 ),
             )
             conn.commit()
@@ -1375,7 +1385,7 @@ def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
         try:
             rows = conn.execute(
                 """
-                SELECT id, created_at, broker, symbol, action, confidence, price, reason, execution_json
+                SELECT id, created_at, broker, symbol, action, confidence, price, reason, execution_json, confirmations
                 FROM auto_history
                 ORDER BY created_at DESC
                 LIMIT ?
@@ -1402,6 +1412,7 @@ def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
                 "price": safe_float(r["price"], 0),
                 "reason": r["reason"],
                 "execution": execution,
+                "confirmations": (r["confirmations"] if "confirmations" in r.keys() else "") or "",
             }
         )
     return out
@@ -1507,6 +1518,7 @@ def build_ai_log_entries(limit: int = 100) -> List[Dict[str, Any]]:
             reason = f"{reason} (Gerçekleşen K/Z: {'+' if pnl_amount >= 0 else ''}{pnl_amount:.2f})"
         if "açık" in reason.lower() and "pozisyon" in reason.lower() and action == "WAIT":
             status = "protectedPosition"
+        confirmations = str(row.get("confirmations") or "").strip()
         entries.append({
             "symbol": row.get("symbol", "-"),
             "side": action if action in ["BUY", "SELL"] else ("SELL" if status == "closedProfit" or status == "closedLoss" else "-"),
@@ -1515,7 +1527,7 @@ def build_ai_log_entries(limit: int = 100) -> List[Dict[str, Any]]:
             "reason": reason or "-",
             "market": str(row.get("broker", "-")),
             "created_at": _text_time_to_epoch(str(row.get("time", now_text()))),
-            "extra": {},
+            "extra": ({"confirmations": confirmations} if confirmations else {}),
         })
 
     for row in db_recent_trade_journal(limit):
@@ -4876,12 +4888,32 @@ def _auto_trader_run_symbol(
                 reason + " [Not: Bu fiyat mesai-dışı (off-market/pre-post-market) işlemlere dayanıyor, "
                 "normal seans açılışında oynaklık farklı olabilir.]"
             ).strip()
+        # Mobil uygulamanin 'Teyit' (X/3) alanini doldurabilmesi icin, karari
+        # oluşturan bağımsız sinyallerin yonlerini ayri degiskenlerde saklıyoruz
+        # (asagida korelasyonla birlikte 3 bagimsiz sinyal uzerinden teyit sayisi
+        # hesaplanacak).
+        signal_momentum_dir = momentum_signal
+        signal_order_flow_dir = order_flow if order_flow in ("BUY", "SELL") else "WAIT"
     else:
         ai = calculate_ai_signal(symbol, market)
         action = str(ai.get("signal", "WAIT")).upper()
         confidence = int(ai.get("confidence", 50))
         price = safe_float(ai.get("price"))
         reason = str(ai.get("reason", ""))
+        # IBKR'daki momentum/emir-akisi ayrimiyla tutarli olmasi icin (bkz. 'Teyit'
+        # alani), crypto tarafinda da ayni iki bagimsiz sinyali change_24h ve
+        # emir defteri baskisindan turetiyoruz.
+        crypto_change = safe_float(ai.get("change_24h"))
+        crypto_orderbook = ai.get("orderbook") or {}
+        crypto_buy_pressure = safe_float(crypto_orderbook.get("buy_pressure"))
+        crypto_sell_pressure = safe_float(crypto_orderbook.get("sell_pressure"))
+        signal_momentum_dir = "BUY" if crypto_change > 0.6 else ("SELL" if crypto_change < -0.6 else "WAIT")
+        if crypto_buy_pressure > 58:
+            signal_order_flow_dir = "BUY"
+        elif crypto_sell_pressure > 58:
+            signal_order_flow_dir = "SELL"
+        else:
+            signal_order_flow_dir = "WAIT"
 
     # Korelasyon/lag/hedge motoru: fiyat gecmisine kaydet ve bu sembol icin
     # en guclu korele oldugu esin (peer) henuz takip edilmemis hareketi var mi bak.
@@ -4898,6 +4930,14 @@ def _auto_trader_run_symbol(
             confidence = min(95, confidence + corr_signal["bias"])
             reason = (reason + " " + corr_signal["note"]).strip()
         # action mevcut sinyalle ters yondeyse mevcut (dogrudan) sinyale mudahale etmiyoruz.
+
+    # Mobil uygulamanin AI Islem Gunlugu ekranindaki 'Teyit' (X/3) alani icin
+    # korelasyon yonunu de saklıyoruz - asil X/3 hesaplamasi, action WAIT'e
+    # donusturulebilecek TUM sonraki guvenlik kontrollerinden (ör. zarar
+    # esigi, elde pozisyon olmama guard'i) SONRA, fonksiyonun en altinda
+    # (db_insert_auto_history'den hemen once) yapiliyor - boylece stale/yanlis
+    # bir teyit sayisi asla kaydedilmez.
+    signal_corr_dir = str(corr_signal.get("action", "WAIT")).upper()
 
     if action in ["BUY", "SELL"]:
         confidence = max(0, min(95, confidence + learning_bias(action)))
@@ -5288,6 +5328,19 @@ def _auto_trader_run_symbol(
         state.symbol = symbol
         state.last_update = now_text()
         state.updated_at_epoch = time.time()
+
+        # 'Teyit' (X/3) alani: guvenlik kontrolleri (zarar esigi, pozisyon yok
+        # guard'i vb.) action'i WAIT'e cevirmis olabilecegi icin, teyit sayisi
+        # burada, KESIN/nihai action uzerinden hesaplanir. Sadece gercek bir
+        # BUY/SELL karari kaydedilecekse doldurulur; WAIT'te bos kalir (mobil
+        # uygulama bos degeri '-' olarak gosterir).
+        signal_confirmations = ""
+        if action in ("BUY", "SELL"):
+            agree_count = sum(
+                1 for d in (signal_momentum_dir, signal_order_flow_dir, signal_corr_dir) if d == action
+            )
+            signal_confirmations = f"{agree_count}/3"
+
         history.insert(
             0,
             {
@@ -5299,6 +5352,7 @@ def _auto_trader_run_symbol(
                 "price": price,
                 "reason": reason,
                 "execution": execution,
+                "confirmations": signal_confirmations,
             },
         )
         del history[300:]
@@ -5312,6 +5366,7 @@ def _auto_trader_run_symbol(
             price=price,
             reason=reason,
             execution=execution,
+            confirmations=signal_confirmations,
         )
 def _ibkr_keepalive_loop():
     while True:
