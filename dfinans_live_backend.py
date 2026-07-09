@@ -1322,7 +1322,16 @@ def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
     (2) ayni sembol icin ust uste tekrar eden, hicbir sey degismemis 'pas
     gecildi/WAIT' kayitlari sadelestirilir (sadece en guncel/en yuksek
     skorlu olani tutulur) - boylece bu ekran 'onemli kararlarin ozeti'ne
-    donusur, Islem Gunlugu ise ham tarama akisi olarak kalir."""
+    donusur, Islem Gunlugu ise ham tarama akisi olarak kalir.
+
+    ONEMLI: 'AÇILDI' etiketi SADECE gercekten borsada/IBKR'de calistirilmis
+    (execution.simulated == False ve execution.error yok) BUY/SELL kararlari
+    icin verilir. Onceden bu kontrol yoktu; action alani BUY/SELL oldugu
+    surece (paper-mode simulasyon veya IBKR'nin reddettigi/hatali bir emir
+    dahi olsa) 'AÇILDI' gosteriliyordu - kullanicinin 'sanki islem acildi
+    gibi gorunuyor' sikayeti buradan kaynaklaniyordu. Simdi calismayan/
+    simule edilen kararlar 'AÇILMADI (BLOCKED)' olarak, sebebi acikca
+    belirtilerek gosterilir."""
     # Havuzu genis tut (limit*6) ki dedupe/oncelik sonrasi elimizde yeterli
     # sayida anlamli kayit kalsin; en sonunda yine 'limit' kadar dondurulur.
     raw_pool = max(limit * 6, 120)
@@ -1338,25 +1347,47 @@ def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
         market_label = _AI_DECISION_MARKET_LABELS.get(broker, broker)
         reason = str(r.get("reason", "")).strip() or "Gerekçe kaydedilmedi."
         confidence = int(r.get("confidence", 0) or 0)
-        is_trade = action in ("BUY", "SELL")
+        execution = r.get("execution") or {}
+        if not isinstance(execution, dict):
+            execution = {}
+        exec_error = str(execution.get("error", "") or "").strip()
+        exec_simulated = bool(execution.get("simulated", True))
+        action_is_trade = action in ("BUY", "SELL")
+        # Gercekten calistirilmis (emir borsaya/IBKR'ye gitmis) sayilmasi icin:
+        # hata olmamasi VE simulasyon olmamasi gerekir.
+        really_executed = action_is_trade and not exec_error and not exec_simulated
         symbol = str(r.get("symbol", "-"))
+
+        if action_is_trade and not really_executed:
+            # AI BUY/SELL karari verdi ama emir gercekten calismadi (paper-mode
+            # simulasyon veya IBKR/Binance hatasi) - bunu 'AÇILDI' gibi gostermek
+            # yaniltici oldugu icin BLOCKED say, sebebi reason'a ekle.
+            if exec_error:
+                reason = f"{reason} (Emir başarısız/reddedildi: {exec_error})"
+            elif exec_simulated:
+                reason = f"{reason} (Paper-mode/simülasyon: gerçek emir gönderilmedi.)"
+
         entry = {
             "id": str(r.get("id") or f"{r.get('time')}-{symbol}"),
             "symbol": symbol,
             "market": market_label,
             "side": action,
-            "status": "OPENED" if is_trade else "BLOCKED",
+            "status": "OPENED" if really_executed else "BLOCKED",
             "score": confidence,
             "timeText": _relative_time_tr(r.get("time")),
-            "positiveReasons": [reason] if is_trade else [],
-            "negativeReasons": [] if is_trade else [reason],
+            "positiveReasons": [reason] if really_executed else [],
+            "negativeReasons": [] if really_executed else [reason],
             "resultText": (
                 f"{symbol} için {action} kararı verildi ve işleme geçildi: {reason}"
-                if is_trade
-                else f"{symbol} için net bir işlem sinyali bulunmadı, pas geçildi: {reason}"
+                if really_executed
+                else (
+                    f"{symbol} için {action} kararı verildi ama işlem gerçekleşmedi: {reason}"
+                    if action_is_trade
+                    else f"{symbol} için net bir işlem sinyali bulunmadı, pas geçildi: {reason}"
+                )
             ),
         }
-        if is_trade:
+        if really_executed:
             trades.append(entry)
             continue
         # rows en yeniden en eskiye siralidir (created_at DESC); bu sembol
