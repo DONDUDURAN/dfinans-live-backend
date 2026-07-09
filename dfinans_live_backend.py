@@ -4688,11 +4688,54 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
     # Cok sembollu tarama: watchlist'teki HER sembol icin ayri sinyal uretilir ve
     # uygun olanlarda ayri ayri islem acilir. Gunluk islem limiti (max_daily_trades)
     # tum semboller arasinda PAYLASILIR (tek bir hesap risk butcesi gibi calisir).
+    #
+    # ONEMLI: her sembol icin try/except ile izole ediyoruz. Once boyle degildi -
+    # tek bir sembolde (ozellikle IBKR'in LSE/GBP veya SEHK/HKD gibi daha az
+    # yaygin borsalarindaki sembollerde) IBKR fiyat/kontrat sorgusu zaman
+    # asimina ugrar veya hata firlatirsa, bu istisna tum for dongusunu
+    # KESIYORDU - listede o sembolden SONRA gelen tum semboller o turda hic
+    # taranmiyordu. Sembol sirasi US->UK->HK oldugu icin (bkz.
+    # IBKR_SYMBOL_MARKET_INFO), bu sessizce "Ingiltere/Hong Kong hic
+    # taranmiyor" sonucuna yol aciyordu - kullanicinin sordugu sorunun
+    # kok nedeni buydu.
     for symbol in symbols:
-        _auto_trader_run_symbol(
-            state, lock, history, broker, symbol, market, base_qty, min_conf,
-            mode, asset_type, exchange, currency, eval_window, max_daily,
-        )
+        try:
+            _auto_trader_run_symbol(
+                state, lock, history, broker, symbol, market, base_qty, min_conf,
+                mode, asset_type, exchange, currency, eval_window, max_daily,
+            )
+        except Exception as symbol_error:
+            error_text = f"{symbol} taranırken hata: {symbol_error}"
+            with lock:
+                state.last_error = error_text
+                state.updated_at_epoch = time.time()
+                history.insert(
+                    0,
+                    {
+                        "time": now_text(),
+                        "broker": broker,
+                        "symbol": symbol,
+                        "action": "ERROR",
+                        "confidence": 0,
+                        "price": 0.0,
+                        "reason": error_text,
+                        "execution": {"error": str(symbol_error)},
+                    },
+                )
+                del history[300:]
+            try:
+                db_insert_auto_history(
+                    broker=broker,
+                    symbol=symbol,
+                    action="ERROR",
+                    confidence=0,
+                    price=0.0,
+                    reason=error_text,
+                    execution={"error": str(symbol_error)},
+                )
+            except Exception:
+                pass
+            continue
 
 
 def _auto_trader_run_symbol(
@@ -5569,6 +5612,16 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
     for position in positions:
         qty = abs(safe_float(position.get("position") or position.get("size")))
         if qty <= 0:
+            continue
+        symbol_check = str(position.get("symbol", "")).upper()
+        if symbol_check == "IBKR":
+            # "IBKR" (Interactive Brokers Group hissesi), aracı kurumdan islem
+            # yapabilmek icin ZORUNLU tutulan bir pay - gercek bir AI
+            # alim-satim karari degil. Otomatik kar-al/zarar-kes bu payi
+            # ASLA satmamali (once sadece kesirli miktar kontrolu vardi,
+            # pay tam sayiya tamamlanirsa/yeni alinirsa bu koruma olmadan
+            # yanlislikla satilabilirdi - bu yuzden burada acikca haric
+            # tutuluyor).
             continue
         profit_pct = ibkr_position_profit_pct(position)
         hit_take_profit = IBKR_TAKE_PROFIT_PCT > 0 and profit_pct >= IBKR_TAKE_PROFIT_PCT
@@ -8417,14 +8470,27 @@ def position_closures_alias():
     """Bir pozisyon kapandiginda 'neden kapandi (kar al/zarar kes/manuel), kar mi
     zarar mi, ne kadar' sorusuna net cevap veren rapor listesi. Kullanici
     'IBKR'de AMD pozisyonu kapandi, neden kapandigini/kar mi zarar mi bilmiyorum'
-    dedigi icin eklendi."""
+    dedigi icin eklendi.
+
+    IBKR hissesi (aracı kurumdan islem yapabilmek icin zorunlu tutulan pay,
+    gercek bir AI alim-satim karari degil) varsayilan olarak haric tutulur;
+    dahil etmek icin include_mandatory=1. Onceden bu filtre burada YOKTU -
+    kullanicinin 'ai işlem günlüğünde sadece IBKR payı görünüyor' bildirimi
+    tam olarak bu yuzdendi: eski bir kod hatasindan kalma 22 adet hatali
+    (gercekte hic satilmamis kesirli IBKR payi icin yanlislikla kaydedilmis)
+    kapanis kaydi, gercek kripto/hisse islemleri henuz kapanmadigi icin
+    listeye tek basina hakim oluyordu."""
     try:
         limit = max(1, min(int(request.args.get("limit", "50")), 200))
     except Exception:
         limit = 50
+    include_mandatory = str(request.args.get("include_mandatory", "0")).lower() in ("1", "true", "yes")
+    days_param = request.args.get("days")
+    days = int(safe_float(days_param)) if days_param else None
     reason_labels = CLOSE_REASON_LABELS_TR
     try:
-        rows = db_recent_position_closures(limit)
+        all_rows = db_all_position_closures(days=days, include_mandatory_holdings=include_mandatory)
+        rows = list(reversed(all_rows))[:limit]
         items = []
         for r in rows:
             reason = str(r.get("close_reason", "-"))
