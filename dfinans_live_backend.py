@@ -387,6 +387,22 @@ IBKR_WORKER_THREAD_STARTED = False
 # sonuclanan ciddi kilitlenmeler/hatalar olusuyordu. Kuyruk + tek worker
 # thread modeli bunu kokten cozer.
 IBKR_TASK_QUEUE: "queue.Queue" = queue.Queue()
+# IBKR worker thread'in TAM O ANDA hangi is uzerinde oldugunu ve ne zaman
+# basladigini izlemek icin: eger tek bir is (ornegin kopmus/zombi bir socket
+# uzerinde sonsuza dek bloke olan bir ib_insync cagrisi) asiri uzun surerse,
+# worker thread tamamen tikanir ve KUYRUKTAKI HER SONRAKI is (tum semboller,
+# tum manuel istekler) sonsuza dek 'IBKR şu anda meşgul' hatasi alir - IBKR
+# baglantisi 'connected: true' gorunse bile duzelmez, cunku worker hicbir
+# zaman bir sonraki ise gecemez. Bu tam olarak kullanicinin bildirdigi
+# 'AI İşlem Günlüğünde hep meşgul diyor' sorununun kok nedenidir. Asagidaki
+# izci (watchdog) thread'i bu durumu tespit edip surecin (ve dolayisiyla
+# IBKR baglantisinin) tamamen sifirlanmasi icin sureci kasitli olarak
+# sonlandirir - Railway'in restart politikasi (railway.json:
+# restartPolicyMaxRetries) sureci saniyeler icinde temiz halde yeniden
+# baslatir.
+IBKR_JOB_STARTED_EPOCH: float = 0.0
+IBKR_WATCHDOG_STUCK_SEC = float(os.getenv("IBKR_WATCHDOG_STUCK_SEC", "90"))
+IBKR_WATCHDOG_THREAD_STARTED = False
 
 # Risk management state
 DAILY_REALIZED_PNL = 0.0
@@ -2082,16 +2098,19 @@ def _ibkr_worker_thread_main():
     'client id already in use' / tum servisin cokmesi gibi hatalari kokten
     onler."""
     ensure_thread_event_loop()
+    global IBKR_JOB_STARTED_EPOCH
     while True:
         job = IBKR_TASK_QUEUE.get()
         if job is None:
             continue
         action, result_holder, done_event = job
+        IBKR_JOB_STARTED_EPOCH = time.time()
         try:
             result_holder["result"] = _ibkr_execute_in_worker_thread(action)
         except Exception as e:
             result_holder["error"] = e
         finally:
+            IBKR_JOB_STARTED_EPOCH = 0.0
             done_event.set()
 
 
@@ -5475,6 +5494,34 @@ def _ibkr_keepalive_loop():
             pass
 
 
+def _ibkr_stuck_watchdog_loop():
+    """IBKR worker thread'i tek bir iste (ornegin kopmus/zombi bir socket
+    uzerinde asyncio seviyesinde sonsuza dek bloke olan bir ib_insync
+    cagrisinda) takilirsa, kuyruktaki TUM sonraki islemler (tum semboller,
+    tum manuel istekler) sonsuza dek 'IBKR şu anda meşgul' hatasi alir -
+    IBKR baglantisi disaridan 'connected: true' gorunse bile bu kendi
+    kendine duzelmez, cunku worker thread'in kendisi hicbir zaman bir
+    sonraki ise gecemez (kullanicinin bildirdigi 'AI İşlem Günlüğü hep
+    meşgul diyor' sorununun kok nedeni budur). Bu izci, tek bir isin
+    IBKR_WATCHDOG_STUCK_SEC (varsayilan 90sn - normal reconnect+islem
+    suresinin cok uzerinde) suresini astigini tespit ederse sureci
+    kasitli olarak sonlandirir; Railway'in restart politikasi
+    (railway.json: restartPolicyMaxRetries) sureci saniyeler icinde
+    temiz bir IBKR baglantisi ve bos kuyrukla yeniden baslatir."""
+    while True:
+        time.sleep(15)
+        started = IBKR_JOB_STARTED_EPOCH
+        if started and (time.time() - started) > IBKR_WATCHDOG_STUCK_SEC:
+            print(
+                f"[IBKR][WATCHDOG] Worker thread {time.time() - started:.0f}sn'dir tek bir iste "
+                f"tikanmis durumda (esik: {IBKR_WATCHDOG_STUCK_SEC:.0f}sn). Kuyruk tamamen "
+                f"kilitlendi ({IBKR_TASK_QUEUE.qsize()} bekleyen is), surec kasitli olarak "
+                f"sonlandiriliyor - Railway restart politikasi temiz yeniden baslatma yapacak.",
+                flush=True,
+            )
+            os._exit(1)
+
+
 def _auto_trader_loop():
     while True:
         with AUTO_LOCK:
@@ -5520,7 +5567,7 @@ def _auto_trader_loop():
 
 
 def start_background_workers_once():
-    global KEEPALIVE_THREAD_STARTED, AUTO_THREAD_STARTED, IBKR_WORKER_THREAD_STARTED
+    global KEEPALIVE_THREAD_STARTED, AUTO_THREAD_STARTED, IBKR_WORKER_THREAD_STARTED, IBKR_WATCHDOG_THREAD_STARTED
     if not IBKR_WORKER_THREAD_STARTED:
         t0 = threading.Thread(target=_ibkr_worker_thread_main, daemon=True)
         t0.start()
@@ -5533,6 +5580,10 @@ def start_background_workers_once():
         t2 = threading.Thread(target=_auto_trader_loop, daemon=True)
         t2.start()
         AUTO_THREAD_STARTED = True
+    if not IBKR_WATCHDOG_THREAD_STARTED:
+        t3 = threading.Thread(target=_ibkr_stuck_watchdog_loop, daemon=True)
+        t3.start()
+        IBKR_WATCHDOG_THREAD_STARTED = True
 
 
 def get_24h(symbol: str, market: str) -> Dict[str, Any]:
