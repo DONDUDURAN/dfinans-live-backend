@@ -6584,6 +6584,19 @@ def get_portfolio() -> Dict[str, Any]:
     spot = get_spot_balances()
     futures_positions = get_futures_positions()
     total_unrealized_pnl = sum(safe_float(p.get("pnl")) for p in futures_positions if p.get("symbol") != "HATA")
+    # Futures pozisyonlarinin toplam yuzdesel kar/zarari: agirlikli ortalama
+    # (her pozisyonun marjina gore agirliklandirilmis) - kullanicinin talebi:
+    # portfoy ekraninda hem dolar hem yuzde kar/zarar gorunsun.
+    futures_total_margin = 0.0
+    for p in futures_positions:
+        if p.get("symbol") == "HATA":
+            continue
+        entry = safe_float(p.get("entry_price"))
+        size = abs(safe_float(p.get("size")))
+        leverage = max(1.0, safe_float(p.get("leverage"), 1.0))
+        if entry > 0 and size > 0:
+            futures_total_margin += (entry * size) / leverage
+    total_unrealized_pnl_pct = (total_unrealized_pnl / futures_total_margin * 100.0) if futures_total_margin > 0 else 0.0
     binance_summary = build_binance_summary(spot, futures_positions)
     ibkr_positions: List[Dict[str, Any]] = []
     ibkr_error = ""
@@ -6644,11 +6657,60 @@ def get_portfolio() -> Dict[str, Any]:
         binance_summary["futures_total"] = futures_try
         binance_summary["currency"] = "TRY_EQUIV_LIVE"
         binance_summary["usdtry_rate"] = live_totals.get("usdtry_rate")
-    
+
+    # IBKR pozisyonlarinin toplam dolar ve yuzdesel kar/zarari (maliyet bazli
+    # agirlikli ortalama) - portfoy ekraninda IBKR icin de hem $ hem % gorunsun.
+    ibkr_total_unrealized_pnl = sum(safe_float(p.get("pnl")) for p in ibkr_positions)
+    ibkr_total_cost_basis = 0.0
+    for p in ibkr_positions:
+        avg_cost = safe_float(p.get("avgCost") or p.get("entry_price"))
+        size = abs(safe_float(p.get("position") or p.get("size")))
+        if avg_cost > 0 and size > 0:
+            ibkr_total_cost_basis += avg_cost * size
+    ibkr_total_unrealized_pnl_pct = (
+        (ibkr_total_unrealized_pnl / ibkr_total_cost_basis * 100.0) if ibkr_total_cost_basis > 0 else 0.0
+    )
+
+    # Spot AI (auto-trader) pozisyonlarini da (hem $ hem % kar/zarar ile) portfoy
+    # yanitina dahil ediyoruz - onceden /portfolio bu pozisyonlari hic icermiyordu,
+    # sadece ham bakiye (spot_balances) donduruluyordu, kar/zarar bilgisi yoktu.
+    spot_positions: List[Dict[str, Any]] = []
+    spot_total_unrealized_pnl = 0.0
+    spot_total_cost_basis = 0.0
+    try:
+        for pos in db_list_spot_positions():
+            symbol = str(pos.get("symbol", "")).upper()
+            quantity = safe_float(pos.get("quantity"))
+            avg_cost = safe_float(pos.get("avg_cost"))
+            try:
+                snap = get_market_snapshot(symbol, "SPOT")
+                price = safe_float(snap.get("price"))
+            except Exception:
+                price = 0.0
+            profit_pct = spot_position_profit_pct(pos, price) if price > 0 else 0.0
+            pnl_amount = (price - avg_cost) * quantity if price > 0 else 0.0
+            spot_positions.append({
+                **pos,
+                "current_price": price,
+                "profit_pct": round(profit_pct, 3),
+                "pnl_pct": round(profit_pct, 3),
+                "pnl": round(pnl_amount, 2),
+                "pnl_amount": round(pnl_amount, 2),
+            })
+            if avg_cost > 0 and quantity > 0:
+                spot_total_unrealized_pnl += pnl_amount
+                spot_total_cost_basis += avg_cost * quantity
+    except Exception:
+        pass
+    spot_total_unrealized_pnl_pct = (
+        (spot_total_unrealized_pnl / spot_total_cost_basis * 100.0) if spot_total_cost_basis > 0 else 0.0
+    )
+
     result = {
         "last_update": now_text(),
         "live_trading": LIVE_TRADING,
         "spot_balances": spot,
+        "spot_positions": spot_positions,
         "futures_positions": futures_positions,
         "binance_summary": binance_summary,
         # Legacy mobile clients read these fields directly from /portfolio.
@@ -6666,6 +6728,11 @@ def get_portfolio() -> Dict[str, Any]:
         "ibkr_connected": ibkr_connected,
         "ibkr_error": ibkr_error,
         "total_unrealized_pnl": round(total_unrealized_pnl, 2),
+        "total_unrealized_pnl_pct": round(total_unrealized_pnl_pct, 3),
+        "ibkr_total_unrealized_pnl": round(ibkr_total_unrealized_pnl, 2),
+        "ibkr_total_unrealized_pnl_pct": round(ibkr_total_unrealized_pnl_pct, 3),
+        "spot_total_unrealized_pnl": round(spot_total_unrealized_pnl, 2),
+        "spot_total_unrealized_pnl_pct": round(spot_total_unrealized_pnl_pct, 3),
     }
     
     # Cache the result if successful
