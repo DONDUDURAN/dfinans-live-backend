@@ -599,6 +599,17 @@ def init_runtime_db() -> None:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS position_add_log (
+                    broker TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    add_date TEXT NOT NULL,
+                    last_add_at TEXT NOT NULL,
+                    PRIMARY KEY (broker, symbol, add_date)
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -764,6 +775,43 @@ def db_delete_spot_position(symbol: str) -> None:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
         try:
             conn.execute("DELETE FROM spot_positions WHERE symbol = ?", (symbol,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_position_added_today(broker: str, symbol: str) -> bool:
+    """Ayni sembolde (broker bazinda) bugun zaten bir 'pozisyon buyutme' (piramitleme)
+    yapilip yapilmadigini kontrol eder - kullanicinin talebi: ayni yonde mevcut acik
+    pozisyon uzerine ekleme gunde en fazla 1 kere yapilabilir."""
+    today = now_text()[:10]
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM position_add_log WHERE broker = ? AND symbol = ? AND add_date = ?",
+                (broker, symbol, today),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row is not None
+
+
+def db_log_position_add(broker: str, symbol: str) -> None:
+    """Bugun bu sembolde (broker bazinda) bir pozisyon buyutme yapildigini kaydeder."""
+    today = now_text()[:10]
+    now = now_text()
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO position_add_log(broker, symbol, add_date, last_add_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(broker, symbol, add_date) DO UPDATE SET last_add_at=excluded.last_add_at
+                """,
+                (broker, symbol, today, now),
+            )
             conn.commit()
         finally:
             conn.close()
@@ -5097,8 +5145,12 @@ def _auto_trader_run_symbol(
                             )
                             qty = 0
                 else:
-                    if existing_position and safe_float(existing_position.get("quantity")) > 0:
-                        spot_skip_reason = "Zaten açık spot pozisyon var, üst üste alım yapılmadı."
+                    spot_is_position_add = bool(existing_position and safe_float(existing_position.get("quantity")) > 0)
+                    if spot_is_position_add and db_position_added_today("BINANCE_SPOT", symbol):
+                        spot_skip_reason = (
+                            "Zaten açık spot pozisyon var ve bugün bu sembolde bir pozisyon büyütme işlemi "
+                            "zaten yapıldı (günde en fazla 1 kez büyütme kuralı)."
+                        )
                         qty = 0
                     elif price > 0:
                         available_usdt = get_spot_available_usdt()
@@ -5125,6 +5177,11 @@ def _auto_trader_run_symbol(
                                     reason
                                     + f" (Spot pozisyon büyüklüğü: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i -> {sized_qty:.6f} {symbol}.)"
                                 ).strip()
+                            if qty > 0 and spot_is_position_add:
+                                reason = (
+                                    reason
+                                    + " (Pozisyon büyütme: aynı yönde mevcut açık pozisyon üzerine ekleme yapılıyor, günlük 1 büyütme hakkı kullanılacak.)"
+                                ).strip()
                         else:
                             spot_skip_reason = "Spot USDT bakiyesi alınamadı, alım yapılmadı."
                             qty = 0
@@ -5143,7 +5200,16 @@ def _auto_trader_run_symbol(
                         execution = place_spot_order(symbol, action, qty)
                         if not execution.get("error"):
                             if action == "BUY":
-                                db_upsert_spot_position(symbol, qty, price)
+                                if spot_is_position_add and existing_position:
+                                    old_qty = safe_float(existing_position.get("quantity"))
+                                    old_avg_cost = safe_float(existing_position.get("avg_cost"))
+                                    fill_price = safe_float(execution.get("avg_fill_price")) or price
+                                    new_qty = old_qty + qty
+                                    new_avg_cost = ((old_qty * old_avg_cost) + (qty * fill_price)) / new_qty if new_qty > 0 else fill_price
+                                    db_upsert_spot_position(symbol, new_qty, new_avg_cost)
+                                    db_log_position_add("BINANCE_SPOT", symbol)
+                                else:
+                                    db_upsert_spot_position(symbol, qty, price)
                             else:
                                 avg_cost = safe_float(existing_position.get("avg_cost")) if existing_position else 0.0
                                 exit_price = safe_float(execution.get("avg_fill_price")) or price
@@ -5223,6 +5289,29 @@ def _auto_trader_run_symbol(
                                     "error": "IBKR API kesirli hisse emrini desteklemiyor, miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
                                     "time": now_text(),
                                 }
+                    # Ayni yonde (LONG) mevcut acik pozisyon uzerine ekleme (piramitleme)
+                    # yapiliyor mu kontrol et - kullanicinin talebi: ayni yonde ekleme
+                    # sembol basina gunde en fazla 1 kez yapilabilir.
+                    ibkr_is_position_add = False
+                    if action == "BUY" and qty > 0:
+                        try:
+                            for p in ibkr_positions_snapshot():
+                                if str(p.get("symbol", "")).upper() == symbol and str(p.get("side", "")).upper() == "LONG":
+                                    ibkr_is_position_add = True
+                                    break
+                        except Exception:
+                            ibkr_is_position_add = False
+                        if ibkr_is_position_add and db_position_added_today("IBKR", symbol):
+                            reason = (
+                                reason
+                                + " (Pozisyon büyütme atlandı: bu sembolde bugün zaten bir büyütme yapıldı, günde en fazla 1 kez.)"
+                            ).strip()
+                            qty = 0
+                        elif ibkr_is_position_add:
+                            reason = (
+                                reason
+                                + " (Pozisyon büyütme: aynı yönde mevcut açık IBKR pozisyonu üzerine ekleme yapılıyor.)"
+                            ).strip()
                     # AI'nin SELL karariyla mevcut acik (LONG) bir IBKR pozisyonunu kapatip
                     # kapatmadigini anlamak icin emirden ONCE mevcut pozisyonu (varsa) kaydediyoruz.
                     # Boylece emir basariyla dolarsa gerceklesen kar/zarari hesaplayip
@@ -5298,6 +5387,8 @@ def _auto_trader_run_symbol(
                         # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
                         # cache'i temizliyoruz.
                         _invalidate_cache("ibkr_available_funds")
+                        if ibkr_is_position_add and not execution.get("error") and safe_float(execution.get("filled")) > 0:
+                            db_log_position_add("IBKR", symbol)
                         if pre_close_position and not execution.get("error") and safe_float(execution.get("filled")) > 0:
                             filled_qty = safe_float(execution.get("filled"))
                             entry_price = safe_float(pre_close_position.get("avgCost") or pre_close_position.get("entry_price"))
@@ -5388,10 +5479,39 @@ def _auto_trader_run_symbol(
                         ).strip()
                         qty = 0
                         pre_close_futures_position = None
+                # Ayni yonde mevcut acik pozisyon uzerine ekleme (piramitleme) yapiliyor mu
+                # kontrol et - kullanicinin talebi: ayni yonde ekleme sembol basina
+                # gunde en fazla 1 kez yapilabilir.
+                futures_is_position_add = False
+                if qty > 0 and not pre_close_futures_position:
+                    try:
+                        for p in get_futures_positions():
+                            if p.get("id") == "error":
+                                continue
+                            if str(p.get("symbol", "")).upper() == symbol:
+                                p_side = str(p.get("side", "")).upper()
+                                if (p_side == "LONG" and action == "BUY") or (p_side == "SHORT" and action == "SELL"):
+                                    futures_is_position_add = True
+                                break
+                    except Exception:
+                        futures_is_position_add = False
+                    if futures_is_position_add and db_position_added_today("BINANCE_FUTURES", symbol):
+                        reason = (
+                            reason
+                            + " (Pozisyon büyütme atlandı: bu sembolde bugün zaten bir büyütme yapıldı, günde en fazla 1 kez.)"
+                        ).strip()
+                        qty = 0
+                    elif futures_is_position_add:
+                        reason = (
+                            reason
+                            + " (Pozisyon büyütme: aynı yönde mevcut açık futures pozisyonu üzerine ekleme yapılıyor.)"
+                        ).strip()
                 if do_live:
                     ensure_binance_leverage(symbol, leverage)
                     if qty > 0:
                         execution = place_futures_order(symbol, action, qty, reduce_only=False)
+                        if futures_is_position_add and not execution.get("error"):
+                            db_log_position_add("BINANCE_FUTURES", symbol)
                         if pre_close_futures_position and not execution.get("error"):
                             existing_size = abs(safe_float(pre_close_futures_position.get("size")))
                             closed_qty = min(qty, existing_size) if existing_size > 0 else qty
