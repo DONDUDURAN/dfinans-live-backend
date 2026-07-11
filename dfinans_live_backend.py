@@ -2504,7 +2504,7 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                         pnl = (mark_price - avg_cost) * qty
                 except Exception:
                     pass
-            rows.append({
+            row = {
                 "id": f"IBKR-{pos.contract.secType}-{pos.contract.symbol}",
                 "broker": "IBKR",
                 "market": "IBKR",
@@ -2524,7 +2524,9 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                 "avgCost": avg_cost,
                 "secType": pos.contract.secType,
                 "name": pos.contract.symbol,
-            })
+            }
+            row["pnl_pct"] = round(ibkr_position_profit_pct(row), 3)
+            rows.append(row)
         return rows
     return ibkr_execute(_run)
 
@@ -5872,18 +5874,29 @@ def get_market_snapshot(symbol: str, market: str) -> Dict[str, Any]:
 
 
 def get_futures_positions() -> List[Dict[str, Any]]:
+    def _enrich_pnl_pct(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        for row in rows:
+            if not isinstance(row, dict) or row.get("id") == "error":
+                continue
+            if "pnl_pct" not in row or row.get("pnl_pct") in (None, ""):
+                try:
+                    row["pnl_pct"] = round(binance_position_profit_pct(row), 3)
+                except Exception:
+                    row["pnl_pct"] = 0.0
+        return rows
+
     if BINANCE_PROXY_BASE_URL:
         try:
             # Try direct /positions endpoint first (VPS proxy has this)
             legacy_pos = _binance_proxy_request("GET", "/positions")
             rows = _proxy_extract_positions_from_legacy_positions(legacy_pos)
             if rows:
-                return rows
+                return _enrich_pnl_pct(rows)
             # If empty, try /portfolio fallback
             legacy = _binance_proxy_portfolio_payload()
             rows = _proxy_extract_positions_from_portfolio(legacy)
             if rows:
-                return rows
+                return _enrich_pnl_pct(rows)
             raise RuntimeError("Proxy /positions veya /portfolio'dan futures position bulunamadı.")
         except Exception as proxy_err:
             pass
@@ -5898,7 +5911,7 @@ def get_futures_positions() -> List[Dict[str, Any]]:
             mark = safe_float(p.get("markPrice"))
             pnl = safe_float(p.get("unRealizedProfit"))
             side = "LONG" if amt > 0 else "SHORT"
-            positions.append({
+            pos_row = {
                 "id": f"BINANCE-FUTURES-{p.get('symbol')}",
                 "broker": "Binance",
                 "market": "Futures",
@@ -5909,10 +5922,12 @@ def get_futures_positions() -> List[Dict[str, Any]]:
                 "mark_price": mark,
                 "pnl": pnl,
                 "leverage": p.get("leverage", ""),
-            })
+            }
+            pos_row["pnl_pct"] = round(binance_position_profit_pct(pos_row), 3)
+            positions.append(pos_row)
         return positions
     except Exception as e:
-        return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": str(e)}]
+        return [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "pnl_pct": 0, "error": str(e)}]
 
 
 def binance_position_profit_pct(position: Dict[str, Any]) -> float:
@@ -7897,11 +7912,12 @@ def binance_private_futures_positions():
                 "entry_price": entry,
                 "mark_price": mark,
                 "pnl": pnl,
+                "pnl_pct": round(binance_position_profit_pct({"entry_price": entry, "mark_price": mark, "pnl": pnl, "size": abs(amt), "leverage": p.get("leverage", ""), "side": side}), 3),
                 "leverage": p.get("leverage", ""),
             })
         return jsonify({"ok": True, "positions": positions, "last_update": now_text()})
     except Exception as e:
-        return jsonify({"ok": False, "positions": [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "error": str(e)}], "error": str(e), "last_update": now_text()}), 500
+        return jsonify({"ok": False, "positions": [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "pnl_pct": 0, "error": str(e)}], "error": str(e), "last_update": now_text()}), 500
 
 
 @app.route("/binance/private/order", methods=["POST"])
@@ -8528,7 +8544,17 @@ def spot_auto_trader_positions():
             except Exception:
                 price = 0.0
             profit_pct = spot_position_profit_pct(pos, price) if price > 0 else 0.0
-            enriched.append({**pos, "current_price": price, "profit_pct": round(profit_pct, 3)})
+            quantity = safe_float(pos.get("quantity"))
+            avg_cost = safe_float(pos.get("avg_cost"))
+            pnl_amount = (price - avg_cost) * quantity if price > 0 else 0.0
+            enriched.append({
+                **pos,
+                "current_price": price,
+                "profit_pct": round(profit_pct, 3),
+                "pnl_pct": round(profit_pct, 3),
+                "pnl": round(pnl_amount, 2),
+                "pnl_amount": round(pnl_amount, 2),
+            })
         return jsonify({"ok": True, "positions": enriched, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "positions": [], "last_update": now_text()}), 200
