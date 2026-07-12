@@ -3220,6 +3220,153 @@ def get_fear_greed_index() -> Dict[str, Any]:
     return _cache_get_or_fetch("fear_greed", 1800, _fetch)
 
 
+def compute_rsi(closes: List[float], period: int = 14) -> Optional[float]:
+    """Wilder'in orijinal RSI (Relative Strength Index) formulu (smoothed moving
+    average yontemiyle). En az period+1 kapanis fiyati gerektirir; yetersiz veri
+    varsa None doner (cagiran taraf sessizce notr kabul eder). 0-100 arasi deger:
+    <=30 asiri satim (oversold), >=70 asiri alim (overbought) olarak yorumlanir."""
+    if len(closes) < period + 1:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, period + 1):
+        delta = closes[i] - closes[i - 1]
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for i in range(period + 1, len(closes)):
+        delta = closes[i] - closes[i - 1]
+        gain = max(delta, 0.0)
+        loss = max(-delta, 0.0)
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def compute_sma(closes: List[float], period: int) -> Optional[float]:
+    """Basit hareketli ortalama (Simple Moving Average). Yetersiz veri varsa None doner."""
+    if len(closes) < period:
+        return None
+    return sum(closes[-period:]) / period
+
+
+def get_ibkr_daily_closes(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60) -> List[float]:
+    """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyatini ceker (RSI/SMA
+    hesaplamak icin gecmis veri gerekir). /history ucundaki ile ayni desen; burada
+    dogrudan Python float listesi (eskiden-yeniye sirali) donuyor."""
+    def _run(ib, ibs):
+        contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
+        qualified = ib.qualifyContracts(contract)
+        if not qualified:
+            raise RuntimeError("IBKR contract doğrulanamadı.")
+        bars = ib.reqHistoricalData(
+            qualified[0],
+            endDateTime="",
+            durationStr=f"{max(num_days, 30)} D",
+            barSizeSetting="1 day",
+            whatToShow="TRADES",
+            useRTH=True,
+            formatDate=1,
+        )
+        return [safe_float(b.close) for b in bars if safe_float(b.close) > 0]
+    return ibkr_execute(_run)
+
+
+def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> Dict[str, Any]:
+    """Sembolun RSI(14) ve SMA(20)/SMA(50) degerlerini hesaplar - kripto icin Binance
+    gunluk mumlari (fetch_binance_klines), IBKR icin gunluk bar gecmisi
+    (get_ibkr_daily_closes) kullanilir. Sonuc sembol+broker basina cache'lenir
+    (kripto 30dk, IBKR 60dk - IBKR sorgusu daha yavas/pahali oldugu icin daha
+    uzun cache). Daha once sistemde HICBIR klasik teknik indikator yoktu -
+    sadece 24s momentum + emir defteri baskisi vardi."""
+    def _fetch():
+        if broker == "IBKR":
+            market_info = get_ibkr_symbol_market_info(symbol)
+            closes = get_ibkr_daily_closes(
+                symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=60,
+            )
+        else:
+            binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
+            candles = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=60)
+            closes = [safe_float(c.get("close")) for c in candles if safe_float(c.get("close")) > 0]
+        if len(closes) < 15:
+            raise RuntimeError(f"{symbol} için RSI/SMA hesaplamaya yetecek geçmiş veri yok ({len(closes)} bar).")
+        rsi = compute_rsi(closes, 14)
+        sma20 = compute_sma(closes, 20)
+        sma50 = compute_sma(closes, 50)
+        return {
+            "symbol": symbol,
+            "bars_used": len(closes),
+            "rsi_14": round(rsi, 2) if rsi is not None else None,
+            "sma_20": round(sma20, 4) if sma20 is not None else None,
+            "sma_50": round(sma50, 4) if sma50 is not None else None,
+            "last_close": round(closes[-1], 6),
+            "time": now_text(),
+        }
+    ttl = 3600 if broker == "IBKR" else 1800
+    return _cache_get_or_fetch(f"tech_indicators:{broker}:{symbol}", ttl, _fetch)
+
+
+def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str) -> Dict[str, Any]:
+    """RSI(14) asiri-alim/satim + SMA20/SMA50 trend hizalanmasini birlestirip
+    BUY/SELL confidence'ina bias uretir. Hem kripto hem IBKR (hisse) icin gecerlidir
+    - klasik teknik analiz katmani daha once sistemde tamamen eksikti."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+
+    bias = 0
+    notes: List[str] = []
+
+    try:
+        tech = get_technical_indicator_snapshot(symbol, market, broker)
+        if tech.get("error"):
+            return {"bias": 0, "notes": []}
+
+        rsi = tech.get("rsi_14")
+        if rsi is not None:
+            if rsi <= 30:
+                if action == "BUY":
+                    bias += 6
+                    notes.append(f"RSI(14) aşırı satım bölgesinde ({rsi}): teknik olarak BUY'ı destekler.")
+                else:
+                    bias -= 5
+                    notes.append(f"RSI(14) aşırı satım bölgesinde ({rsi}): yeni SELL riskli (tepki yükselişi gelebilir).")
+            elif rsi >= 70:
+                if action == "SELL":
+                    bias += 6
+                    notes.append(f"RSI(14) aşırı alım bölgesinde ({rsi}): teknik olarak SELL'i destekler.")
+                else:
+                    bias -= 5
+                    notes.append(f"RSI(14) aşırı alım bölgesinde ({rsi}): yeni BUY riskli (düzeltme gelebilir).")
+
+        sma20 = tech.get("sma_20")
+        sma50 = tech.get("sma_50")
+        last_close = tech.get("last_close")
+        if sma20 is not None and sma50 is not None and last_close is not None:
+            if last_close > sma20 > sma50:
+                if action == "BUY":
+                    bias += 5
+                    notes.append("Fiyat > SMA20 > SMA50 (yükseliş trendi hizalanması): BUY'ı destekler.")
+                else:
+                    bias -= 4
+                    notes.append("Fiyat > SMA20 > SMA50 (yükseliş trendi): trend yönüne karşı SELL riskli.")
+            elif last_close < sma20 < sma50:
+                if action == "SELL":
+                    bias += 5
+                    notes.append("Fiyat < SMA20 < SMA50 (düşüş trendi hizalanması): SELL'i destekler.")
+                else:
+                    bias -= 4
+                    notes.append("Fiyat < SMA20 < SMA50 (düşüş trendi): trend yönüne karşı BUY riskli.")
+    except Exception:
+        pass
+
+    return {"bias": max(-14, min(14, bias)), "notes": notes}
+
+
 def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
     """Funding rate + Fear&Greed Index'i birlestirip verilen islem yonune (BUY/SELL)
     confidence puanina eklenecek/cikarilacak bir bias ve aciklama uretir."""
@@ -5367,6 +5514,15 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + macro_risk["bias"]))
         if macro_risk["notes"]:
             reason = (reason + " " + " ".join(macro_risk["notes"])).strip()
+
+        # Klasik teknik analiz katmani (RSI(14) + SMA20/SMA50 trend hizalanmasi).
+        # Hem kripto hem IBKR (hisse) icin gecerlidir - daha once sistemde HICBIR
+        # teknik indikator yoktu, sadece 24s momentum + emir defteri baskisi vardi.
+        technical = get_technical_signal_bias(symbol, market, broker, action)
+        if technical["bias"] != 0:
+            confidence = max(0, min(95, confidence + technical["bias"]))
+        if technical["notes"]:
+            reason = (reason + " " + " ".join(technical["notes"])).strip()
 
         # Bolgeler-arasi seans sirasi sinyali: sadece IBKR (hisse) sembolleri icin
         # anlamlidir - Asya kotu/iyi kapanmissa bu, Ingiltere/ABD seansindaki
