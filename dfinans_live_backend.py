@@ -3002,6 +3002,170 @@ def get_news_sentiment_signal() -> Dict[str, Any]:
     return _cache_get_or_fetch("news_sentiment", 1800, _fetch)
 
 
+def get_stock_news_sentiment_signal(symbol: str) -> Dict[str, Any]:
+    """Yahoo Finance'in sembole-ozel RSS besleme (ucretsiz, anahtar gerekmez) uzerinden
+    o SIRKETE OZEL (genel kripto haberi degil) son basliklarda ayni anahtar kelime
+    tabanli sentiment skorunu hesaplar. get_news_sentiment_signal() SADECE CoinDesk
+    (kripto) haberlerini taradigi icin IBKR hisseleri icin hicbir zaman alakali
+    olmuyordu - bu fonksiyon o bosluğu kapatir. Sembol basina ayri cache'lenir."""
+    def _fetch():
+        import xml.etree.ElementTree as ET
+        r = requests.get(
+            "https://feeds.finance.yahoo.com/rss/2.0/headline",
+            params={"s": symbol, "region": "US", "lang": "en-US"},
+            timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (dfinans-live-backend)"},
+        )
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        items = root.findall(".//item")[:20]
+        texts = [
+            (item.findtext("title", "") + " " + item.findtext("description", ""))
+            for item in items
+        ]
+        if not texts:
+            raise RuntimeError(f"{symbol} icin Yahoo Finance haber verisi bos döndü.")
+        pos = neg = 0
+        for t in texts:
+            low = t.lower()
+            pos += sum(1 for k in NEWS_POSITIVE_KEYWORDS if k in low)
+            neg += sum(1 for k in NEWS_NEGATIVE_KEYWORDS if k in low)
+        total = pos + neg
+        net_score = (pos - neg) / total if total > 0 else 0.0
+        return {
+            "symbol": symbol,
+            "headlines_scanned": len(texts),
+            "positive_hits": pos,
+            "negative_hits": neg,
+            "net_sentiment": round(net_score, 2),
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"stock_news_sentiment:{symbol}", 1800, _fetch)
+
+
+_SEC_TICKER_CIK_HEADERS = {"User-Agent": "dfinans-live-backend research contact@dfinans.example"}
+
+
+def get_sec_ticker_cik_map() -> Dict[str, str]:
+    """SEC'in resmi ticker->CIK esleme dosyasini (ucretsiz, anahtar gerekmez, sadece
+    User-Agent istiyor) ceker ve 10 haneli sifir-doldurulmus CIK koduna cevirir.
+    Nadiren degistigi icin uzun sureli (24 saat) cache'lenir."""
+    def _fetch():
+        r = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            timeout=10,
+            headers=_SEC_TICKER_CIK_HEADERS,
+        )
+        r.raise_for_status()
+        js = r.json()
+        mapping: Dict[str, str] = {}
+        for row in js.values():
+            ticker = str(row.get("ticker", "")).upper()
+            cik = row.get("cik_str")
+            if ticker and cik is not None:
+                mapping[ticker] = str(cik).zfill(10)
+        if not mapping:
+            raise RuntimeError("SEC ticker-CIK esleme verisi bos döndü.")
+        return mapping
+    return _cache_get_or_fetch("sec_ticker_cik_map", 86400, _fetch)
+
+
+def get_company_sec_filing_signal(symbol: str) -> Dict[str, Any]:
+    """SEC EDGAR 'submissions' API'si (ucretsiz, anahtar gerekmez) uzerinden BU SIRKETE
+    OZEL (genel 'bitcoin' anahtar kelimesi degil) son dosyalama hacmini onceki
+    donemle karsilastirir. Ozellikle 8-K (planlanmamis onemli olay bildirimi)
+    sicramasi piyasayi etkileyebilecek bir gelisme isaret eder; yon belirsiz
+    oldugu icin sadece "temkin/oynaklik artisi" uyarisi olarak kullanilir,
+    dogrudan yonlu bias vermez (get_regulatory_activity_signal ile ayni felsefe)."""
+    def _fetch():
+        cik_map = get_sec_ticker_cik_map()
+        cik = cik_map.get(symbol.upper())
+        if not cik:
+            raise RuntimeError(f"{symbol} icin SEC CIK kodu bulunamadi.")
+        r = requests.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            timeout=10,
+            headers=_SEC_TICKER_CIK_HEADERS,
+        )
+        r.raise_for_status()
+        js = r.json()
+        recent = (js.get("filings") or {}).get("recent") or {}
+        forms = recent.get("form", [])
+        dates = recent.get("filingDate", [])
+        if not forms:
+            raise RuntimeError(f"{symbol} icin SEC dosyalama verisi bos döndü.")
+
+        now = datetime.now()
+        recent_count = 0
+        recent_8k_count = 0
+        baseline_count = 0
+        for form, date_str in zip(forms, dates):
+            try:
+                filed = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                continue
+            age_days = (now - filed).days
+            if 0 <= age_days <= 2:
+                recent_count += 1
+                if str(form).upper().startswith("8-K"):
+                    recent_8k_count += 1
+            elif 2 < age_days <= 16:
+                baseline_count += 1
+
+        baseline_daily_avg = max(0.5, baseline_count / 14.0)
+        spike_ratio = recent_count / baseline_daily_avg if baseline_daily_avg > 0 else 0.0
+        spike = spike_ratio >= 2.5 and recent_count >= 2
+        return {
+            "symbol": symbol,
+            "filings_last_48h": recent_count,
+            "form_8k_last_48h": recent_8k_count,
+            "baseline_daily_avg": round(baseline_daily_avg, 2),
+            "spike_ratio": round(spike_ratio, 2),
+            "spike_detected": spike,
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"sec_company_filing:{symbol}", 10800, _fetch)
+
+
+def get_stock_specific_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
+    """Hisseye-ozel haber sentiment'i (Yahoo Finance) ve hisseye-ozel SEC dosyalama
+    sicramasini birlestirip verilen islem yonune (BUY/SELL) eklenecek bias uretir.
+    Sadece IBKR (hisse) sembolleri icin anlamlidir - kripto sembollerinde (BTCUSDT vb.)
+    SEC CIK/Yahoo ticker eslenmedigi icin sessizce notr doner (fail-open)."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+
+    bias = 0
+    notes: List[str] = []
+
+    try:
+        news = get_stock_news_sentiment_signal(symbol)
+        if not news.get("error") and news.get("headlines_scanned", 0) >= 3:
+            net = safe_float(news.get("net_sentiment"))
+            if net >= 0.3:
+                bias += 6 if action == "BUY" else -6
+                notes.append(f"{symbol} için şirkete özel haber akışı olumlu (net sentiment {net}).")
+            elif net <= -0.3:
+                bias += 6 if action == "SELL" else -6
+                notes.append(f"{symbol} için şirkete özel haber akışı olumsuz (net sentiment {net}).")
+    except Exception:
+        pass
+
+    try:
+        filing = get_company_sec_filing_signal(symbol)
+        if not filing.get("error") and filing.get("spike_detected"):
+            bias -= 5
+            extra = " (8-K içeriyor - planlanmamış önemli olay)" if filing.get("form_8k_last_48h", 0) > 0 else ""
+            notes.append(
+                f"{symbol} için SEC dosyalama hacminde sıçrama tespit edildi "
+                f"(son 48s: {filing.get('filings_last_48h')} dosyalama){extra}: temkinli olunmalı."
+            )
+    except Exception:
+        pass
+
+    return {"bias": max(-12, min(12, bias)), "notes": notes}
+
+
 def get_google_trends_signal(keyword: str = "bitcoin") -> Dict[str, Any]:
     """Google Trends (pytrends, resmi olmayan/gayri-resmi kutuphane) uzerinden ani arama
     ilgisi artisini tespit eder. Bu servis resmi API olmadigi ve sunucu ortamlarinda siklikla
@@ -5213,6 +5377,17 @@ def _auto_trader_run_symbol(
                 confidence = max(0, min(95, confidence + cross_session["bias"]))
             if cross_session["note"]:
                 reason = (reason + " " + cross_session["note"]).strip()
+
+            # Sirkete-ozel haber sentiment'i (Yahoo Finance) + sirkete-ozel SEC
+            # dosyalama sicramasi (EDGAR). get_external_signal_bias/get_macro_risk_bias
+            # yukarida zaten uygulaniyordu ama onlarin haber/duzenleyici katmani
+            # SADECE kripto (CoinDesk/bitcoin anahtar kelimesi) taraniyordu - bu
+            # hisseler icin hicbir zaman alakali degildi. Bu, o bosluğu kapatir.
+            stock_specific = get_stock_specific_signal_bias(symbol, action)
+            if stock_specific["bias"] != 0:
+                confidence = max(0, min(95, confidence + stock_specific["bias"]))
+            if stock_specific["notes"]:
+                reason = (reason + " " + " ".join(stock_specific["notes"])).strip()
     resolve_learning(symbol, price)
 
     with lock:
