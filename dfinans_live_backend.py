@@ -3166,6 +3166,138 @@ def get_stock_specific_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
     return {"bias": max(-12, min(12, bias)), "notes": notes}
 
 
+def get_analyst_rating_signal(symbol: str) -> Dict[str, Any]:
+    """yfinance uzerinden hissenin analist tavsiye konsensusunu (Strong Buy=1 ..
+    Strong Sell=5 skalasinda recommendationMean) ve ortalama hedef fiyatini ceker.
+    Sembol basina 12 saat cache'lenir (analist tavsiyeleri gun icinde sik
+    degismez, agir bir yfinance .info cagrisidir)."""
+    def _fetch():
+        import yfinance as yf
+        info = yf.Ticker(to_yfinance_symbol(symbol)).info or {}
+        rec_mean = safe_float(info.get("recommendationMean"))
+        rec_key = str(info.get("recommendationKey") or "")
+        num_analysts = int(safe_float(info.get("numberOfAnalystOpinions")))
+        target_mean = safe_float(info.get("targetMeanPrice"))
+        current_price = safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        if rec_mean <= 0 and not rec_key:
+            raise RuntimeError(f"{symbol} için analist verisi bulunamadı.")
+        upside_pct = (
+            ((target_mean - current_price) / current_price) * 100.0
+            if (target_mean > 0 and current_price > 0) else None
+        )
+        return {
+            "symbol": symbol,
+            "recommendation_key": rec_key,
+            "recommendation_mean": round(rec_mean, 2) if rec_mean else None,
+            "num_analysts": num_analysts,
+            "target_mean_price": round(target_mean, 2) if target_mean else None,
+            "current_price": round(current_price, 2) if current_price else None,
+            "upside_pct": round(upside_pct, 2) if upside_pct is not None else None,
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"analyst_rating:{symbol}", 43200, _fetch)
+
+
+def get_analyst_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
+    """Analist konsensusu (recommendationMean, 1=Strong Buy..5=Strong Sell) ve
+    ortalama hedef fiyatin mevcut fiyata gore yukselis/dususunu birlestirip
+    BUY/SELL confidence'ina bias uretir. Sadece yeterli analist sayisi (>=3)
+    varsa kullanilir - az sayida analistin gorusu istatistiksel olarak
+    guvenilmez sayilir."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+
+    bias = 0
+    notes: List[str] = []
+
+    try:
+        rating = get_analyst_rating_signal(symbol)
+        if rating.get("error") or rating.get("num_analysts", 0) < 3:
+            return {"bias": 0, "notes": []}
+
+        rec_mean = rating.get("recommendation_mean")
+        num_analysts = rating.get("num_analysts")
+        if rec_mean is not None:
+            if rec_mean <= 2.0:
+                if action == "BUY":
+                    bias += 5
+                    notes.append(f"{symbol} için analist konsensüsü olumlu (ort. {rec_mean}/5, {num_analysts} analist): BUY'ı destekler.")
+                else:
+                    bias -= 4
+                    notes.append(f"{symbol} için analist konsensüsü olumlu: SELL yönüne karşı, temkinli olunmalı.")
+            elif rec_mean >= 4.0:
+                if action == "SELL":
+                    bias += 5
+                    notes.append(f"{symbol} için analist konsensüsü olumsuz (ort. {rec_mean}/5, {num_analysts} analist): SELL'i destekler.")
+                else:
+                    bias -= 4
+                    notes.append(f"{symbol} için analist konsensüsü olumsuz: BUY yönüne karşı, temkinli olunmalı.")
+
+        upside_pct = rating.get("upside_pct")
+        if upside_pct is not None:
+            if upside_pct >= 15 and action == "BUY":
+                bias += 4
+                notes.append(f"Ortalama analist hedef fiyatı mevcut fiyatın %{upside_pct:.1f} üzerinde: BUY'ı destekler.")
+            elif upside_pct <= -15 and action == "SELL":
+                bias += 4
+                notes.append(f"Ortalama analist hedef fiyatı mevcut fiyatın %{abs(upside_pct):.1f} altında: SELL'i destekler.")
+    except Exception:
+        pass
+
+    return {"bias": max(-9, min(9, bias)), "notes": notes}
+
+
+def get_earnings_calendar_signal(symbol: str) -> Dict[str, Any]:
+    """yfinance 'calendar' uzerinden hissenin bir sonraki kazanc aciklama tarihini
+    ceker ve bugune kac gun kaldigini hesaplar. Kazanc aciklamasina yakin donemde
+    (0-2 gun) pozisyon acmak yuksek gap-riski tasir (fiyat aciklama sonrasi %5-15
+    sicrama/dususe ugrayabilir, TP/SL yuzdeleri bu ani harekette anlamli calismaz).
+    Sembol basina 12 saat cache'lenir."""
+    def _fetch():
+        import yfinance as yf
+        cal = yf.Ticker(to_yfinance_symbol(symbol)).calendar or {}
+        earnings_dates = cal.get("Earnings Date") or []
+        if not earnings_dates:
+            raise RuntimeError(f"{symbol} için kazanç takvimi verisi bulunamadı.")
+        next_date = min(earnings_dates)
+        today = datetime.now().date()
+        days_until = (next_date - today).days
+        return {
+            "symbol": symbol,
+            "next_earnings_date": str(next_date),
+            "days_until_earnings": days_until,
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"earnings_calendar:{symbol}", 43200, _fetch)
+
+
+def get_earnings_calendar_bias(symbol: str, action: str) -> Dict[str, Any]:
+    """Kazanc aciklamasina 2 gunden az kaldiysa YENI pozisyon acmayi caydiran bir
+    bias uretir (yon-notr bir risk uyarisidir - gap riski hem BUY hem SELL icin
+    zararli olabilir, bu yuzden hangi yon olursa olsun confidence dusurulur)."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+
+    bias = 0
+    notes: List[str] = []
+
+    try:
+        earnings = get_earnings_calendar_signal(symbol)
+        if earnings.get("error"):
+            return {"bias": 0, "notes": []}
+        days_until = earnings.get("days_until_earnings")
+        if days_until is not None and 0 <= days_until <= 2:
+            bias -= 8
+            notes.append(
+                f"{symbol} için kazanç açıklamasına {days_until} gün kaldı "
+                f"({earnings.get('next_earnings_date')}): gap riski nedeniyle yeni pozisyon riskli, temkinli olunmalı."
+            )
+    except Exception:
+        pass
+
+    return {"bias": max(-8, min(8, bias)), "notes": notes}
+
+
 def get_google_trends_signal(keyword: str = "bitcoin") -> Dict[str, Any]:
     """Google Trends (pytrends, resmi olmayan/gayri-resmi kutuphane) uzerinden ani arama
     ilgisi artisini tespit eder. Bu servis resmi API olmadigi ve sunucu ortamlarinda siklikla
@@ -3254,10 +3386,11 @@ def compute_sma(closes: List[float], period: int) -> Optional[float]:
     return sum(closes[-period:]) / period
 
 
-def get_ibkr_daily_closes(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60) -> List[float]:
-    """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyatini ceker (RSI/SMA
-    hesaplamak icin gecmis veri gerekir). /history ucundaki ile ayni desen; burada
-    dogrudan Python float listesi (eskiden-yeniye sirali) donuyor."""
+def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60) -> List[Dict[str, float]]:
+    """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyati VE hacmini ceker
+    (RSI/SMA ve hacim teyidi hesaplamalari icin gecmis veri gerekir). /history
+    ucundaki ile ayni desen; burada dogrudan Python liste-of-dict (eskiden-yeniye
+    sirali, {'close', 'volume'}) donuyor."""
     def _run(ib, ibs):
         contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
         qualified = ib.qualifyContracts(contract)
@@ -3272,32 +3405,52 @@ def get_ibkr_daily_closes(symbol: str, asset_type: str, exchange: str, currency:
             useRTH=True,
             formatDate=1,
         )
-        return [safe_float(b.close) for b in bars if safe_float(b.close) > 0]
+        return [
+            {"close": safe_float(b.close), "volume": safe_float(b.volume)}
+            for b in bars if safe_float(b.close) > 0
+        ]
     return ibkr_execute(_run)
 
 
 def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> Dict[str, Any]:
-    """Sembolun RSI(14) ve SMA(20)/SMA(50) degerlerini hesaplar - kripto icin Binance
-    gunluk mumlari (fetch_binance_klines), IBKR icin gunluk bar gecmisi
-    (get_ibkr_daily_closes) kullanilir. Sonuc sembol+broker basina cache'lenir
+    """Sembolun RSI(14), SMA(20)/SMA(50) ve hacim teyidi verilerini hesaplar - kripto
+    icin Binance gunluk mumlari (fetch_binance_klines), IBKR icin gunluk bar gecmisi
+    (get_ibkr_daily_bars) kullanilir. Sonuc sembol+broker basina cache'lenir
     (kripto 30dk, IBKR 60dk - IBKR sorgusu daha yavas/pahali oldugu icin daha
     uzun cache). Daha once sistemde HICBIR klasik teknik indikator yoktu -
     sadece 24s momentum + emir defteri baskisi vardi."""
     def _fetch():
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
-            closes = get_ibkr_daily_closes(
+            bars = get_ibkr_daily_bars(
                 symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=60,
             )
+            closes = [b["close"] for b in bars]
+            volumes = [b["volume"] for b in bars]
         else:
             binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
             candles = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=60)
             closes = [safe_float(c.get("close")) for c in candles if safe_float(c.get("close")) > 0]
+            volumes = [safe_float(c.get("volume")) for c in candles if safe_float(c.get("close")) > 0]
         if len(closes) < 15:
             raise RuntimeError(f"{symbol} için RSI/SMA hesaplamaya yetecek geçmiş veri yok ({len(closes)} bar).")
         rsi = compute_rsi(closes, 14)
         sma20 = compute_sma(closes, 20)
         sma50 = compute_sma(closes, 50)
+        # Hacim teyidi: son (bugunku/en guncel) mum GUN ICINDE hala olusmakta oldugu
+        # icin (henuz kapanmamis) hacmi yapay dusuk gorunur - bu yuzden hacim
+        # kiyaslamasinda SON KAPANMIS barı kullaniriz (volumes[-2]), onceki 20
+        # TAM kapanmis barin ortalamasiyla kiyaslanir. Fiyat guclu hareket ediyor
+        # ama hacim ortalamanin altindaysa bu hareket "teyitsiz" (dusuk katilimli)
+        # sayilir.
+        if len(volumes) >= 2:
+            last_closed_volume = volumes[-2]
+            prior_volumes = volumes[-22:-2] if len(volumes) >= 22 else volumes[:-2]
+        else:
+            last_closed_volume = volumes[-1] if volumes else 0.0
+            prior_volumes = []
+        avg_volume = (sum(prior_volumes) / len(prior_volumes)) if prior_volumes else 0.0
+        volume_ratio = (last_closed_volume / avg_volume) if avg_volume > 0 else None
         return {
             "symbol": symbol,
             "bars_used": len(closes),
@@ -3305,6 +3458,9 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
             "sma_20": round(sma20, 4) if sma20 is not None else None,
             "sma_50": round(sma50, 4) if sma50 is not None else None,
             "last_close": round(closes[-1], 6),
+            "last_closed_volume": round(last_closed_volume, 2),
+            "avg_volume_20": round(avg_volume, 2) if avg_volume else None,
+            "volume_ratio": round(volume_ratio, 2) if volume_ratio is not None else None,
             "time": now_text(),
         }
     ttl = 3600 if broker == "IBKR" else 1800
@@ -3361,10 +3517,23 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
                 else:
                     bias -= 4
                     notes.append("Fiyat < SMA20 < SMA50 (düşüş trendi): trend yönüne karşı BUY riskli.")
+
+        # Hacim teyidi: guclu fiyat hareketi dusuk hacimle olmussa (katilim zayif)
+        # bu hareket guvenilmez sayilir - bias dusurulur. Hacim ortalamanin
+        # belirgin uzerindeyse (katilimli hareket) mevcut yon teyit edilmis
+        # sayilir - bias artirilir. Yon-notr bir teyit/red mekanizmasidir.
+        volume_ratio = tech.get("volume_ratio")
+        if volume_ratio is not None:
+            if volume_ratio >= 1.5:
+                bias += 4
+                notes.append(f"Hacim ortalamanın {volume_ratio}x üzerinde: mevcut hareket hacimle teyit ediliyor.")
+            elif volume_ratio <= 0.5:
+                bias -= 4
+                notes.append(f"Hacim ortalamanın {volume_ratio}x altında (düşük katılım): hareket teyitsiz, güvenilirliği düşük.")
     except Exception:
         pass
 
-    return {"bias": max(-14, min(14, bias)), "notes": notes}
+    return {"bias": max(-18, min(18, bias)), "notes": notes}
 
 
 def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
@@ -5544,6 +5713,22 @@ def _auto_trader_run_symbol(
                 confidence = max(0, min(95, confidence + stock_specific["bias"]))
             if stock_specific["notes"]:
                 reason = (reason + " " + " ".join(stock_specific["notes"])).strip()
+
+            # Analist tavsiye konsensusu (Strong Buy..Strong Sell) + ortalama hedef
+            # fiyat yukselis/dususu - sadece hisseler icin anlamlidir.
+            analyst = get_analyst_signal_bias(symbol, action)
+            if analyst["bias"] != 0:
+                confidence = max(0, min(95, confidence + analyst["bias"]))
+            if analyst["notes"]:
+                reason = (reason + " " + " ".join(analyst["notes"])).strip()
+
+            # Yaklasan kazanc aciklamasi (earnings) - gap riski nedeniyle
+            # aciklamaya 0-2 gun kalaysa confidence dusurulur.
+            earnings = get_earnings_calendar_bias(symbol, action)
+            if earnings["bias"] != 0:
+                confidence = max(0, min(95, confidence + earnings["bias"]))
+            if earnings["notes"]:
+                reason = (reason + " " + " ".join(earnings["notes"])).strip()
     resolve_learning(symbol, price)
 
     with lock:
