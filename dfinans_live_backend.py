@@ -255,6 +255,9 @@ IBKR_SYMBOL_MARKET_INFO: Dict[str, Dict[str, str]] = {
     "GOOGL": {"exchange": "SMART", "currency": "USD", "region": "US"},
     "AMZN": {"exchange": "SMART", "currency": "USD", "region": "US"},
     "META": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    # --- Emtia ETF'leri (SMART / USD) - fiziksel kontrat degil, ETF uzerinden ---
+    "GLD": {"exchange": "SMART", "currency": "USD", "region": "US"},   # SPDR Gold Shares (altin)
+    "USO": {"exchange": "SMART", "currency": "USD", "region": "US"},   # United States Oil Fund (petrol)
     # --- Ingiltere (LSE / GBP) ---
     "SHEL": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
     "AZN": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
@@ -610,6 +613,18 @@ def init_runtime_db() -> None:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS symbol_tp_sl_overrides (
+                    broker TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    take_profit_pct REAL,
+                    stop_loss_pct REAL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (broker, symbol)
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -815,6 +830,92 @@ def db_log_position_add(broker: str, symbol: str) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def db_get_symbol_tp_sl_override(broker: str, symbol: str) -> Optional[Dict[str, Any]]:
+    """Bir sembol/broker icin ozel (global varsayilanlari gecersiz kilan) kar-al/
+    zarar-kes yuzdesi tanimli mi kontrol eder. Kullanicinin talebi: 'her varligi
+    ayri ayri izleyip ilerde her varlik icin farkli kar/zarar noktalari
+    belirleyebiliriz' - bu fonksiyon o altyapinin okuma tarafidir. Override
+    yoksa None doner, cagiran taraf global BINANCE_*/IBKR_* sabitlerine duser."""
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT take_profit_pct, stop_loss_pct FROM symbol_tp_sl_overrides WHERE broker = ? AND symbol = ?",
+                (broker, symbol),
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        return None
+    return {"take_profit_pct": row["take_profit_pct"], "stop_loss_pct": row["stop_loss_pct"]}
+
+
+def db_set_symbol_tp_sl_override(
+    broker: str, symbol: str,
+    take_profit_pct: Optional[float] = None, stop_loss_pct: Optional[float] = None,
+) -> None:
+    """Bir sembol icin ozel kar-al/zarar-kes yuzdesi tanimlar (None birakilan alan
+    global varsayilani kullanir - bkz. db_get_symbol_tp_sl_override)."""
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO symbol_tp_sl_overrides(broker, symbol, take_profit_pct, stop_loss_pct, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(broker, symbol) DO UPDATE SET
+                    take_profit_pct=excluded.take_profit_pct,
+                    stop_loss_pct=excluded.stop_loss_pct,
+                    updated_at=excluded.updated_at
+                """,
+                (broker, symbol, take_profit_pct, stop_loss_pct, now_text()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_delete_symbol_tp_sl_override(broker: str, symbol: str) -> None:
+    """Bir sembolun ozel kar-al/zarar-kes ayarini kaldirir, tekrar global
+    varsayilanlara doner."""
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                "DELETE FROM symbol_tp_sl_overrides WHERE broker = ? AND symbol = ?",
+                (broker, symbol),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_list_symbol_tp_sl_overrides() -> List[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT broker, symbol, take_profit_pct, stop_loss_pct, updated_at FROM symbol_tp_sl_overrides ORDER BY broker, symbol"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def resolve_symbol_tp_sl(broker: str, symbol: str, default_tp: float, default_sl: float) -> "Tuple[float, float]":
+    """Bir sembol icin fiilen kullanilacak kar-al/zarar-kes yuzdesini dondurur:
+    ozel bir override tanimliysa onu, tanimli degilse (veya sadece biri
+    tanimliysa) global varsayilani kullanir."""
+    override = db_get_symbol_tp_sl_override(broker, symbol)
+    if not override:
+        return default_tp, default_sl
+    tp = override.get("take_profit_pct")
+    sl = override.get("stop_loss_pct")
+    return (tp if tp is not None else default_tp), (sl if sl is not None else default_sl)
 
 
 def db_list_spot_positions() -> List[Dict[str, Any]]:
@@ -5951,7 +6052,13 @@ def binance_position_profit_pct(position: Dict[str, Any]) -> float:
 def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any]]:
     """Binance futures pozisyonlarinda hem kar-al (BINANCE_TAKE_PROFIT_PCT) hem de
     zarar-kes (BINANCE_STOP_LOSS_PCT) esiklerini kontrol eder. Onceden sadece
-    kar-al vardi; hesap zarar yonunde sinirsiz acik kalabiliyordu."""
+    kar-al vardi; hesap zarar yonunde sinirsiz acik kalabiliyordu.
+
+    Her sembol icin once symbol_tp_sl_overrides tablosuna bakilir (kullanicinin
+    talebi: 'her varligi ayri ayri izleyip ilerde her varlik icin farkli kar/
+    zarar noktalari belirleyebiliriz') - override yoksa global BINANCE_*
+    sabitlerine dusulur, boylece hicbir override tanimlanmadigi surece davranis
+    tamamen ayni kalir."""
     if BINANCE_TAKE_PROFIT_PCT <= 0 and BINANCE_STOP_LOSS_PCT <= 0:
         return None
     positions = [
@@ -5959,12 +6066,15 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
         if p.get("id") != "error" and str(p.get("symbol", "")).upper() != "HATA"
     ]
     for position in positions:
+        symbol = str(position.get("symbol", "")).upper()
+        take_profit_pct, stop_loss_pct = resolve_symbol_tp_sl(
+            "BINANCE_FUTURES", symbol, BINANCE_TAKE_PROFIT_PCT, BINANCE_STOP_LOSS_PCT,
+        )
         profit_pct = binance_position_profit_pct(position)
-        hit_take_profit = BINANCE_TAKE_PROFIT_PCT > 0 and profit_pct >= BINANCE_TAKE_PROFIT_PCT
-        hit_stop_loss = BINANCE_STOP_LOSS_PCT > 0 and profit_pct <= -BINANCE_STOP_LOSS_PCT
+        hit_take_profit = take_profit_pct > 0 and profit_pct >= take_profit_pct
+        hit_stop_loss = stop_loss_pct > 0 and profit_pct <= -stop_loss_pct
         if not hit_take_profit and not hit_stop_loss:
             continue
-        symbol = str(position.get("symbol", "")).upper()
         size = abs(safe_float(position.get("size")))
         if not symbol or size <= 0:
             continue
@@ -5982,7 +6092,7 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
         result["symbol"] = symbol
         result["trigger"] = trigger
         result["trigger_pct"] = round(profit_pct, 4)
-        result["target_pct"] = BINANCE_TAKE_PROFIT_PCT if hit_take_profit else -BINANCE_STOP_LOSS_PCT
+        result["target_pct"] = take_profit_pct if hit_take_profit else -stop_loss_pct
         result["pnl"] = safe_float(position.get("pnl"))
         if not result.get("error"):
             entry_price = safe_float(position.get("entry_price"))
@@ -5999,8 +6109,8 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
                 realized_pnl_pct=profit_pct,
                 close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
                 detail=(
-                    f"%{BINANCE_TAKE_PROFIT_PCT:.1f} kâr hedefi tetiklendi." if hit_take_profit
-                    else f"%{BINANCE_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
+                    f"%{take_profit_pct:.1f} kâr hedefi tetiklendi." if hit_take_profit
+                    else f"%{stop_loss_pct:.1f} zarar-kes tetiklendi."
                 ),
             )
         return result
