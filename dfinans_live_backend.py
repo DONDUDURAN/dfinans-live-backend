@@ -380,6 +380,12 @@ IBKR_RUNTIME: Dict[str, Any] = {
     "circuit_breaker_open": False,
 }
 IBKR_LOCK = threading.RLock()  # RLock: ibkr_execute + ensure_ibkr_connection ayni thread'de ic ice kilit alabiliyor
+# Portfoy-genel gunluk devre kesici (circuit breaker): esik yuzdesi ve
+# "bugun zaten tetiklendi mi" durumu. Tetiklendiginde ayni takvim gunu
+# icinde AI'nin yeni BUY/SELL kararlari durdurulur (bkz.
+# get_portfolio_circuit_breaker_status / _auto_trader_run_symbol).
+PORTFOLIO_CIRCUIT_BREAKER_LOSS_PCT = 5.0
+PORTFOLIO_CIRCUIT_BREAKER_STATE: Dict[str, Any] = {"triggered_date": None, "trigger_reason": ""}
 KEEPALIVE_THREAD_STARTED = False
 AUTO_THREAD_STARTED = False
 IBKR_WORKER_THREAD_STARTED = False
@@ -5995,12 +6001,22 @@ def _auto_trader_run_symbol(
     resolve_learning(symbol, price)
 
     with lock:
+        # Portfoy-genel gunluk devre kesici: gunluk toplam (gerceklesen + tum
+        # acik pozisyonlarin ANLIK gerceklesmemis) kayip esik yuzdesini
+        # asarsa, o takvim gunu icin AI'nin YENI BUY/SELL kararlari tamamen
+        # durdurulur (mevcut TP/SL/bracket emirleri gibi bagimsiz risk
+        # yonetimi mekanizmalari bundan ETKILENMEZ, sadece bu fonksiyonun
+        # kendi yeni pozisyon acma kararlari engellenir).
+        circuit_breaker = get_portfolio_circuit_breaker_status()
         allow_trade = (
             action in ["BUY", "SELL"]
             and confidence >= min_conf
             and state.daily_trade_count < max_daily
             and qty > 0
+            and not circuit_breaker.get("triggered")
         )
+        if circuit_breaker.get("triggered") and action in ["BUY", "SELL"]:
+            reason = (reason + " " + circuit_breaker.get("reason", "")).strip()
         do_live = mode == "live" and ((broker == "IBKR" and IBKR_LIVE_TRADING) or (broker != "IBKR" and LIVE_TRADING))
         if allow_trade:
             if broker == "BINANCE_SPOT":
@@ -7646,6 +7662,79 @@ def get_portfolio() -> Dict[str, Any]:
     return result
 
 
+def get_portfolio_circuit_breaker_status() -> Dict[str, Any]:
+    """Portfoy genelinde GUNLUK (bugunku takvim gunune ait) toplam gerceklesen
+    (position_closures) + tum acik pozisyonlarin ANLIK gerceklesmemis K/Z'sini
+    (Binance futures + Binance spot AI pozisyonlari + IBKR, hepsi USD/USDT
+    bazinda) toplayip toplam portfoy degerine (NetLiquidation/TRY toplaminin
+    canli USD/TRY kuruyla dolara cevrilmis hali) oranini hesaplar. Oran esik
+    (-%PORTFOLIO_CIRCUIT_BREAKER_LOSS_PCT, varsayilan -%5) altina duserse
+    devre kesici o takvim gunu icin TETIKLENIR ve bir daha ayni gun icinde
+    (kismi toparlanma olsa bile) tekrar KAPANMAZ - boylece "yanlis guvenle"
+    tekrar risk alinmasi engellenir. Ertesi takvim gunu otomatik sifirlanir.
+    Hata durumunda / yetersiz veri durumunda fail-open (triggered=False)
+    davranir - bu katmanin kendisi bir hata nedeniyle tum sistemi
+    kilitlememelidir."""
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if PORTFOLIO_CIRCUIT_BREAKER_STATE.get("triggered_date") == today:
+        return {
+            "triggered": True,
+            "date": today,
+            "reason": PORTFOLIO_CIRCUIT_BREAKER_STATE.get("trigger_reason", ""),
+            "cached": True,
+        }
+
+    try:
+        closures_today = [
+            r for r in db_all_position_closures(days=2, include_mandatory_holdings=False)
+            if str(r.get("created_at", "")).startswith(today)
+        ]
+        realized_today_usd = sum(safe_float(r.get("realized_pnl")) for r in closures_today)
+
+        portfolio = get_portfolio()
+        unrealized_total_usd = (
+            safe_float(portfolio.get("total_unrealized_pnl"))
+            + safe_float(portfolio.get("spot_total_unrealized_pnl"))
+            + safe_float(portfolio.get("ibkr_total_unrealized_pnl"))
+        )
+        total_today_usd = realized_today_usd + unrealized_total_usd
+
+        total_try = safe_float((portfolio.get("data") or {}).get("totalTry"))
+        usdtry_rate = get_live_usdtry_rate() or 0.0
+        total_portfolio_usd = (total_try / usdtry_rate) if (total_try > 0 and usdtry_rate > 0) else 0.0
+
+        if total_portfolio_usd <= 0:
+            return {"triggered": False, "date": today, "reason": "", "insufficient_data": True}
+
+        loss_pct = (total_today_usd / total_portfolio_usd) * 100.0
+        triggered = loss_pct <= -PORTFOLIO_CIRCUIT_BREAKER_LOSS_PCT
+
+        result_status: Dict[str, Any] = {
+            "triggered": triggered,
+            "date": today,
+            "realized_today_usd": round(realized_today_usd, 2),
+            "unrealized_total_usd": round(unrealized_total_usd, 2),
+            "total_today_usd": round(total_today_usd, 2),
+            "total_portfolio_usd": round(total_portfolio_usd, 2),
+            "loss_pct": round(loss_pct, 2),
+            "threshold_pct": -PORTFOLIO_CIRCUIT_BREAKER_LOSS_PCT,
+            "reason": "",
+        }
+        if triggered:
+            reason = (
+                f"Günlük toplam kayıp %{abs(loss_pct):.2f} (${abs(total_today_usd):,.0f}), "
+                f"eşik %{PORTFOLIO_CIRCUIT_BREAKER_LOSS_PCT:.0f}'i aştı: portföy devre kesicisi devreye girdi, "
+                f"bugün için yeni işlem açılmayacak."
+            )
+            PORTFOLIO_CIRCUIT_BREAKER_STATE["triggered_date"] = today
+            PORTFOLIO_CIRCUIT_BREAKER_STATE["trigger_reason"] = reason
+            result_status["reason"] = reason
+        return result_status
+    except Exception as e:
+        return {"triggered": False, "date": today, "reason": "", "error": str(e)}
+
+
 def calculate_ai_signal(symbol: str, market: str) -> Dict[str, Any]:
     market = market.upper()
     snapshot = get_market_snapshot(symbol, market)
@@ -8818,6 +8907,18 @@ def personal_cash_flow_endpoint():
 @app.route("/portfolio", methods=["GET"])
 def portfolio():
     return jsonify(get_portfolio())
+
+
+@app.route("/circuit-breaker/status", methods=["GET"])
+def circuit_breaker_status():
+    """Portfoy-genel gunluk devre kesicinin (bkz. get_portfolio_circuit_breaker_status)
+    anlik durumunu doner - tetiklenmisse hangi takvim gununde ve neden
+    tetiklendigini gosterir. Mobil uygulamada bir uyari/rozet gostermek icin
+    kullanilabilir."""
+    try:
+        return jsonify(get_portfolio_circuit_breaker_status())
+    except Exception as e:
+        return jsonify({"triggered": False, "error": str(e), "time": now_text()}), 200
 
 
 @app.route("/positions", methods=["GET"])
