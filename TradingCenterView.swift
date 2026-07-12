@@ -63,6 +63,7 @@ struct TCPosition: Codable, Identifiable {
     let entry_price: Double
     let mark_price: Double
     let pnl: Double
+    let pnl_pct: Double?
     let leverage: String?
     let error: String?
 }
@@ -838,9 +839,14 @@ struct TradingCenterView: View {
                         .foregroundColor(.white.opacity(0.65))
                 }
                 Spacer()
-                Text(formatSigned(p.pnl))
-                    .font(.headline.monospacedDigit())
-                    .foregroundColor(p.pnl >= 0 ? .green : .red)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(formatSigned(p.pnl))
+                        .font(.headline.monospacedDigit())
+                        .foregroundColor(p.pnl >= 0 ? .green : .red)
+                    Text(formatPercent(p.pnl_pct))
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(p.pnl >= 0 ? .green : .red)
+                }
             }
 
             HStack {
