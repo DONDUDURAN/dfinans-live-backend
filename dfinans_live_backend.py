@@ -3676,6 +3676,110 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
     return {"bias": max(-18, min(18, bias)), "notes": notes}
 
 
+def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
+    """Kisa (1s), orta (4s) ve uzun (24s) vadeli mum kapanislarindan yuzde
+    degisim hesaplayip bunlarin AYNI YONDE olup olmadigina bakar. Mevcut
+    sistem sadece 24s degisimi (change_24h) kullaniyordu - kisa vadeli yon
+    celiskisi (orn. 24s +%5 ama son 1s -%2, yani donus baslamis olabilir)
+    fark edilmiyordu. Kripto icin Binance 1h/4h/1d mumlari, IBKR icin
+    (intraday veri bu ortamda pratik olarak elde edilemedigi icin) gunluk
+    bar serisinden turetilen kisa/orta/uzun pencereler kullanilir.
+    Sembol+broker basina 15dk cache'lenir."""
+    def _fetch():
+        if broker == "IBKR":
+            market_info = get_ibkr_symbol_market_info(symbol)
+            bars = get_ibkr_daily_bars(
+                symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=10,
+            )
+            closes = [b["close"] for b in bars]
+            if len(closes) < 6:
+                raise RuntimeError(f"{symbol} için çoklu zaman dilimi hesaplamaya yetecek veri yok.")
+            short_change = ((closes[-1] - closes[-2]) / closes[-2]) * 100.0 if closes[-2] else 0.0
+            mid_change = ((closes[-1] - closes[-4]) / closes[-4]) * 100.0 if len(closes) >= 4 and closes[-4] else 0.0
+            long_change = ((closes[-1] - closes[-6]) / closes[-6]) * 100.0 if len(closes) >= 6 and closes[-6] else 0.0
+            timeframe_labels = {"short": "1 gün", "mid": "3 gün", "long": "5 gün"}
+        else:
+            binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
+            hourly = fetch_binance_klines(symbol, binance_market, interval="1h", total_candles=6)
+            four_hourly = fetch_binance_klines(symbol, binance_market, interval="4h", total_candles=6)
+            daily = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=2)
+            if len(hourly) < 2 or len(four_hourly) < 2 or len(daily) < 2:
+                raise RuntimeError(f"{symbol} için çoklu zaman dilimi hesaplamaya yetecek veri yok.")
+            short_change = ((hourly[-1]["close"] - hourly[-2]["close"]) / hourly[-2]["close"]) * 100.0 if hourly[-2]["close"] else 0.0
+            mid_change = ((four_hourly[-1]["close"] - four_hourly[-2]["close"]) / four_hourly[-2]["close"]) * 100.0 if four_hourly[-2]["close"] else 0.0
+            long_change = ((daily[-1]["close"] - daily[-2]["close"]) / daily[-2]["close"]) * 100.0 if daily[-2]["close"] else 0.0
+            timeframe_labels = {"short": "1 saat", "mid": "4 saat", "long": "24 saat"}
+
+        directions = []
+        for v in (short_change, mid_change, long_change):
+            if v > 0.15:
+                directions.append(1)
+            elif v < -0.15:
+                directions.append(-1)
+            else:
+                directions.append(0)
+        non_zero = [d for d in directions if d != 0]
+        aligned = len(non_zero) >= 2 and len(set(non_zero)) == 1
+        conflicting = len(set(d for d in directions if d != 0)) > 1
+
+        return {
+            "symbol": symbol,
+            "short_change_pct": round(short_change, 3),
+            "mid_change_pct": round(mid_change, 3),
+            "long_change_pct": round(long_change, 3),
+            "timeframe_labels": timeframe_labels,
+            "aligned": aligned,
+            "conflicting": conflicting,
+            "consensus_direction": non_zero[0] if aligned else 0,
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"multi_timeframe:{broker}:{symbol}", 900, _fetch)
+
+
+def get_multi_timeframe_signal_bias(symbol: str, market: str, broker: str, action: str) -> Dict[str, Any]:
+    """Kisa/orta/uzun vadeli momentumun ayni yonde olup olmadigina gore
+    BUY/SELL confidence'ina bias uygular: tum zaman dilimleri islem yonuyle
+    hizaliysa teyit eder (+5), zaman dilimleri BIRBIRIYLE celisiyorsa (biri
+    yukari biri asagi) muhtemel donus/gecikme riski nedeniyle cezalandirir."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+
+    bias = 0
+    notes: List[str] = []
+
+    try:
+        mtf = get_multi_timeframe_momentum_signal(symbol, market, broker)
+        if mtf.get("error"):
+            return {"bias": 0, "notes": []}
+
+        consensus = mtf.get("consensus_direction", 0)
+        aligned = mtf.get("aligned")
+        conflicting = mtf.get("conflicting")
+        labels = mtf.get("timeframe_labels", {})
+
+        wanted_direction = 1 if action == "BUY" else -1
+
+        if aligned and consensus == wanted_direction:
+            bias += 5
+            notes.append(
+                f"{symbol} için {labels.get('short','kısa')}/{labels.get('mid','orta')}/{labels.get('long','uzun')} "
+                f"vadeli momentum aynı yönde ({action}'ı destekler)."
+            )
+        elif aligned and consensus == -wanted_direction:
+            bias -= 6
+            notes.append(
+                f"{symbol} için kısa/orta/uzun vadeli momentum {'düşüş' if consensus < 0 else 'yükseliş'} yönünde hizalı: "
+                f"{action} yönüne karşı, muhtemel geç kalınmış/dönüş riski var."
+            )
+        elif conflicting:
+            bias -= 3
+            notes.append(f"{symbol} için farklı zaman dilimlerinde momentum çelişiyor: teyit zayıf, temkinli olunmalı.")
+    except Exception:
+        pass
+
+    return {"bias": max(-6, min(5, bias)), "notes": notes}
+
+
 def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
     """Funding rate + Fear&Greed Index'i birlestirip verilen islem yonune (BUY/SELL)
     confidence puanina eklenecek/cikarilacak bir bias ve aciklama uretir."""
@@ -5832,6 +5936,16 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + technical["bias"]))
         if technical["notes"]:
             reason = (reason + " " + " ".join(technical["notes"])).strip()
+
+        # Coklu zaman dilimi (kisa/orta/uzun vadeli) momentum teyidi - hem
+        # kripto hem IBKR icin gecerlidir. Sadece 24s degisim kullanildiginda
+        # kisa vadede baslamis bir donus fark edilmiyordu; bu katman zaman
+        # dilimleri arasindaki uyumu/celiskiyi degerlendirir.
+        mtf = get_multi_timeframe_signal_bias(symbol, market, broker, action)
+        if mtf["bias"] != 0:
+            confidence = max(0, min(95, confidence + mtf["bias"]))
+        if mtf["notes"]:
+            reason = (reason + " " + " ".join(mtf["notes"])).strip()
 
         # Bolgeler-arasi seans sirasi sinyali: sadece IBKR (hisse) sembolleri icin
         # anlamlidir - Asya kotu/iyi kapanmissa bu, Ingiltere/ABD seansindaki
