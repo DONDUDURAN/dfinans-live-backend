@@ -5979,6 +5979,7 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
             request_id=request_id,
             channel=channel,
         )
+        result["symbol"] = symbol
         result["trigger"] = trigger
         result["trigger_pct"] = round(profit_pct, 4)
         result["target_pct"] = BINANCE_TAKE_PROFIT_PCT if hit_take_profit else -BINANCE_STOP_LOSS_PCT
@@ -6228,16 +6229,25 @@ def get_symbol_filters(symbol: str, market: str = "SPOT") -> Dict[str, Any]:
 
 def round_quantity_to_step(
     symbol: str, market: str, quantity: float, price: float = 0.0,
+    skip_min_notional: bool = False,
 ) -> "Tuple[float, Optional[str]]":
     """Verilen miktari borsanin stepSize'ina asagi yuvarlar (Binance emirleri
     stepSize'in tam kati olmayan miktarlari reddeder). minQty/minNotional
     saglanmiyorsa (0.0, hata mesaji) doner - boylece cagiran taraf Binance'in
     kriptik "precision over maximum defined" hatasi yerine anlasilir bir
-    mesajla erken cikabilir."""
+    mesajla erken cikabilir.
+
+    skip_min_notional=True: pozisyon KAPATMA (reduce-only) emirlerinde
+    kullanilir. Onceden minNotional kontrolu kapatma emirlerine de
+    uygulaniyordu; bu da kucuk kalan (orn. 25 USDT) bir pozisyonun
+    borsanin minimumunun (orn. 50 USDT) altinda kaldigi icin SONSUZA KADAR
+    kapatilamamasina, stop-loss'un her dongude tekrar tetiklenip basarisiz
+    olmasina ve pozisyonun zarar etmeye devam etmesine yol aciyordu. Risk
+    azaltan (kapatma) emirler asla minNotional'a takilmamali."""
     filters = get_symbol_filters(symbol, market)
     step = filters.get("step_size", 0.0) or 0.0
     min_qty = filters.get("min_qty", 0.0) or 0.0
-    min_notional = filters.get("min_notional", 0.0) or 0.0
+    min_notional = 0.0 if skip_min_notional else (filters.get("min_notional", 0.0) or 0.0)
 
     if step > 0:
         decimals = max(0, -int(round(math.log10(step)))) if step < 1 else 0
@@ -7534,14 +7544,16 @@ def place_futures_order(
             current_price = get_price(symbol, "FUTURES")
         except Exception:
             current_price = 0.0
-        quantity, precision_error = round_quantity_to_step(symbol, "FUTURES", quantity, current_price)
+        quantity, precision_error = round_quantity_to_step(
+            symbol, "FUTURES", quantity, current_price, skip_min_notional=reduce_only,
+        )
         if precision_error:
             db_insert_trade_journal(
                 broker="Binance", channel=channel, symbol=symbol, side=side, quantity=quantity,
                 status="REJECTED", simulated=False, payload={"reason": "precision_or_min_notional"},
                 error_text=precision_error, request_id=request_id,
             )
-            return {"error": precision_error, "request_id": request_id, "simulated": False}
+            return {"error": precision_error, "request_id": request_id, "simulated": False, "symbol": symbol}
 
     # Risk check: max daily loss
     if DAILY_REALIZED_PNL < MAX_DAILY_LOSS:
@@ -7558,7 +7570,7 @@ def place_futures_order(
             error_text=error,
             request_id=request_id,
         )
-        return {"error": error, "request_id": request_id, "simulated": False}
+        return {"error": error, "request_id": request_id, "simulated": False, "symbol": symbol}
     
     if not reduce_only:
         # Risk check: cooldown
@@ -7577,7 +7589,7 @@ def place_futures_order(
                 error_text=error,
                 request_id=request_id,
             )
-            return {"error": error, "request_id": request_id, "simulated": False}
+            return {"error": error, "request_id": request_id, "simulated": False, "symbol": symbol}
 
         # Risk check: max concurrent symbols
         if MAX_CONCURRENT_POSITIONS > 0:
@@ -7603,12 +7615,12 @@ def place_futures_order(
                     error_text=error,
                     request_id=request_id,
                 )
-                return {"error": error, "request_id": request_id, "simulated": False}
+                return {"error": error, "request_id": request_id, "simulated": False, "symbol": symbol}
     
     # Dedup check
     if request_id_seen(request_id):
         error = "Request already seen (duplicate)"
-        return {"error": error, "request_id": request_id, "simulated": False}
+        return {"error": error, "request_id": request_id, "simulated": False, "symbol": symbol}
     
     if not LIVE_TRADING:
         simulated = {
