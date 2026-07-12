@@ -33,6 +33,7 @@ import json
 import math
 import statistics
 import uuid
+import xml.etree.ElementTree as ET
 import queue
 import sqlite3
 import hashlib
@@ -3127,6 +3128,145 @@ def get_company_sec_filing_signal(symbol: str) -> Dict[str, Any]:
     return _cache_get_or_fetch(f"sec_company_filing:{symbol}", 10800, _fetch)
 
 
+def get_insider_transaction_direction_signal(symbol: str) -> Dict[str, Any]:
+    """SEC EDGAR uzerinden son 30 gunun Form 4 (icerden kisi islem bildirimi)
+    dosyalamalarini bulur ve HER BIRININ ic XML detayini cekip transactionCode'u
+    inceler: SADECE P (acik piyasa alimi) ve S (acik piyasa satisi) kodlari
+    dikkate alinir - A (odul/hakkedis), F (vergi kesintisi icin hisse teslimi),
+    M (opsiyon kullanimi) gibi tazminat kaynakli kodlar YONSUZ sayilir ve
+    dahil edilmez (bunlar insider'in "karar verip almasi/satmasi" degil, ücret
+    paketinin otomatik bir parcasidir). Eski get_company_sec_filing_signal
+    sadece filing SAYISINI sayiyordu, alim mi satim mi oldugunu bilmiyordu -
+    bu fonksiyon o boslugu netlestirir. En fazla ilk 8 Form-4 filing incelenir
+    (SEC sunucusuna asiri istek atmamak icin); sembol basina 6 saat cache'lenir."""
+    def _fetch():
+        cik_map = get_sec_ticker_cik_map()
+        cik = cik_map.get(symbol.upper())
+        if not cik:
+            raise RuntimeError(f"{symbol} için SEC CIK kodu bulunamadı.")
+        r = requests.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            timeout=10,
+            headers=_SEC_TICKER_CIK_HEADERS,
+        )
+        r.raise_for_status()
+        js = r.json()
+        recent = (js.get("filings") or {}).get("recent") or {}
+        forms = recent.get("form", [])
+        dates = recent.get("filingDate", [])
+        accns = recent.get("accessionNumber", [])
+        docs = recent.get("primaryDocument", [])
+        now = datetime.now()
+        cik_int = int(cik)
+
+        candidates = []
+        for form, date_str, accn, doc in zip(forms, dates, accns, docs):
+            if str(form).upper() != "4":
+                continue
+            try:
+                filed = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                continue
+            if (now - filed).days > 30:
+                continue
+            candidates.append((date_str, accn, doc))
+        candidates = candidates[:8]
+
+        buy_value = 0.0
+        sell_value = 0.0
+        buy_count = 0
+        sell_count = 0
+        inspected = 0
+        for date_str, accn, doc in candidates:
+            try:
+                accn_nodash = accn.replace("-", "")
+                raw_name = doc.split("/")[-1] if doc else "form4.xml"
+                url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accn_nodash}/{raw_name}"
+                fr = requests.get(url, headers=_SEC_TICKER_CIK_HEADERS, timeout=10)
+                if fr.status_code != 200:
+                    continue
+                root = ET.fromstring(fr.text)
+                inspected += 1
+                for txn in root.iter("nonDerivativeTransaction"):
+                    code_el = txn.find(".//transactionCoding/transactionCode")
+                    shares_el = txn.find(".//transactionAmounts/transactionShares/value")
+                    price_el = txn.find(".//transactionAmounts/transactionPricePerShare/value")
+                    code = code_el.text.strip() if (code_el is not None and code_el.text) else ""
+                    if code not in ("P", "S"):
+                        continue
+                    shares = safe_float(shares_el.text) if shares_el is not None else 0.0
+                    price = safe_float(price_el.text) if price_el is not None else 0.0
+                    value = shares * price
+                    if code == "P":
+                        buy_value += value
+                        buy_count += 1
+                    elif code == "S":
+                        sell_value += value
+                        sell_count += 1
+            except Exception:
+                continue
+
+        if inspected == 0:
+            raise RuntimeError(f"{symbol} için son 30 günde incelenebilir Form 4 dosyalaması bulunamadı.")
+
+        net_value = buy_value - sell_value
+        return {
+            "symbol": symbol,
+            "filings_inspected": inspected,
+            "buy_transactions": buy_count,
+            "sell_transactions": sell_count,
+            "buy_value_usd": round(buy_value, 2),
+            "sell_value_usd": round(sell_value, 2),
+            "net_value_usd": round(net_value, 2),
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"sec_insider_direction:{symbol}", 21600, _fetch)
+
+
+def get_insider_direction_bias(symbol: str, action: str) -> Dict[str, Any]:
+    """Icerden kisi acik piyasa alim/satim (Form 4, P/S kodlari) net yonunu
+    BUY/SELL confidence'ina cevirir. Net alim baskinsa (>= $50.000 net ve
+    en az bir P islemi) BUY'i destekler, net satim baskinsa (<= -$50.000 net
+    ve en az bir S islemi) SELL'i destekler - kucuk/gurultu seviyesindeki
+    farklar (esik altinda) goz ardi edilir."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+
+    bias = 0
+    notes: List[str] = []
+
+    try:
+        insider = get_insider_transaction_direction_signal(symbol)
+        if insider.get("error"):
+            return {"bias": 0, "notes": []}
+
+        net_value = insider.get("net_value_usd", 0.0)
+        buy_count = insider.get("buy_transactions", 0)
+        sell_count = insider.get("sell_transactions", 0)
+
+        if buy_count == 0 and sell_count == 0:
+            return {"bias": 0, "notes": []}
+
+        if net_value >= 50000 and buy_count > 0:
+            if action == "BUY":
+                bias += 5
+                notes.append(f"{symbol} için son 30 günde net içerden alım (${net_value:,.0f}): BUY'ı destekler.")
+            else:
+                bias -= 4
+                notes.append(f"{symbol} için içerden net alım var: SELL yönüne karşı, temkinli olunmalı.")
+        elif net_value <= -50000 and sell_count > 0:
+            if action == "SELL":
+                bias += 5
+                notes.append(f"{symbol} için son 30 günde net içerden satış (${abs(net_value):,.0f}): SELL'i destekler.")
+            else:
+                bias -= 4
+                notes.append(f"{symbol} için içerden net satış var: BUY yönüne karşı, temkinli olunmalı.")
+    except Exception:
+        pass
+
+    return {"bias": max(-9, min(9, bias)), "notes": notes}
+
+
 def get_stock_specific_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
     """Hisseye-ozel haber sentiment'i (Yahoo Finance) ve hisseye-ozel SEC dosyalama
     sicramasini birlestirip verilen islem yonune (BUY/SELL) eklenecek bias uretir.
@@ -5729,6 +5869,15 @@ def _auto_trader_run_symbol(
                 confidence = max(0, min(95, confidence + earnings["bias"]))
             if earnings["notes"]:
                 reason = (reason + " " + " ".join(earnings["notes"])).strip()
+
+            # Icerden kisi acik piyasa alim/satim yonu (Form 4, P/S kodlari) -
+            # eski SEC sinyali sadece dosyalama SAYISINI (sicrama) sayiyordu,
+            # yon bilgisi vermiyordu.
+            insider_dir = get_insider_direction_bias(symbol, action)
+            if insider_dir["bias"] != 0:
+                confidence = max(0, min(95, confidence + insider_dir["bias"]))
+            if insider_dir["notes"]:
+                reason = (reason + " " + " ".join(insider_dir["notes"])).strip()
     resolve_learning(symbol, price)
 
     with lock:
