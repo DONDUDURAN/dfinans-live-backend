@@ -7391,6 +7391,7 @@ CHAIN_ORDER_MOVE_THRESHOLD_PCT = float(os.getenv("CHAIN_ORDER_MOVE_THRESHOLD_PCT
 CHAIN_ORDER_SIZE_PCT = float(os.getenv("CHAIN_ORDER_SIZE_PCT", "0.5"))
 CHAIN_ORDER_RSI_OVERBOUGHT = float(os.getenv("CHAIN_ORDER_RSI_OVERBOUGHT", "65"))
 CHAIN_ORDER_RSI_OVERSOLD = float(os.getenv("CHAIN_ORDER_RSI_OVERSOLD", "35"))
+CHAIN_ORDER_MIN_CONFIDENCE = float(os.getenv("CHAIN_ORDER_MIN_CONFIDENCE", "65"))
 
 
 def get_symbol_daily_change_and_rsi(symbol: str, broker: str) -> Optional[Dict[str, float]]:
@@ -7420,14 +7421,61 @@ def get_symbol_daily_change_and_rsi(symbol: str, broker: str) -> Optional[Dict[s
         return None
 
 
+def _chain_order_signal_direction(broker: str, symbol: str) -> Optional[Dict[str, Any]]:
+    """Zincir emrin YONUNU belirler. Geriye donuk test (kullanicinin istegiyle
+    yapilan analiz), 'ciddi hareketten sonra kor kore tersine donus bekle'
+    varsayiminin zayif/guvenilmez oldugunu gosterdi (coin'e gore degisken,
+    bazen tam tersi - momentum devam ediyor). Bu yuzden yon karari artik sabit
+    bir RSI kuraliyla degil, botun normal otomatik islemlerde kullandigi AYNI
+    coklu-faktor sinyal motoruyla (crypto: calculate_ai_signal - momentum +
+    emir defteri baskisi; IBKR: fiyat momentumu + emir akisi teyidi) verilir.
+    Boylece 'kor kore ters ac' yerine 'o anki gercek analize gore ac' mantigi
+    uygulanmis olur; sinyal devam (continuation) yonunu gosteriyorsa zincir
+    emir de o yonde acilir, net/guvenilir bir yon yoksa hic acilmaz."""
+    try:
+        if broker == "IBKR":
+            market_info = get_ibkr_symbol_market_info(symbol)
+            snap = ibkr_market_snapshot(
+                symbol, market_info.get("asset_type", "STK"),
+                market_info.get("exchange", "SMART"), market_info.get("currency", "USD"),
+            )
+            change = safe_float(snap.get("change_24h"))
+            order_flow = str(snap.get("order_flow_signal", "NEUTRAL")).upper()
+            momentum_signal = "BUY" if change > 0.6 else ("SELL" if change < -0.6 else "WAIT")
+            if momentum_signal in ("BUY", "SELL") and order_flow in ("BUY", "SELL") and momentum_signal != order_flow:
+                return None  # celiskili sinyaller - islem acma
+            direction = momentum_signal if momentum_signal in ("BUY", "SELL") else (order_flow if order_flow in ("BUY", "SELL") else None)
+            if direction is None:
+                return None
+            confidence = min(90, int(55 + abs(change) * 11))
+            if momentum_signal in ("BUY", "SELL") and order_flow == momentum_signal:
+                confidence = min(95, confidence + 10)
+            note = f"IBKR analiz motoru: momentum/emir akışı {direction} yönünde (24s değişim %{change:.2f})."
+        else:
+            binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
+            ai = calculate_ai_signal(symbol, binance_market)
+            direction = str(ai.get("signal", "WAIT")).upper()
+            if direction not in ("BUY", "SELL"):
+                return None
+            confidence = int(ai.get("confidence", 50))
+            note = f"AI sinyal motoru: {direction} ({confidence}% güven) - {ai.get('reason', '')}".strip()
+        return {"direction": direction, "confidence": confidence, "note": note}
+    except Exception:
+        return None
+
+
 def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_price: float) -> Optional[Dict[str, Any]]:
     """Bir pozisyon kapandiginda (TP/SL veya AI karariyla) tetiklenir.
-    Kullanicinin talebi: 'bir varlikta daha once ciddi bir fiyat artisi
-    oldugunda devaminda dusus oluyorsa SHORT, ciddi bir dususun ardindan
-    artis oluyorsa LONG zincir emri ac'. Burada 'ciddi hareket + tersine
-    donus egilimi' RSI(14) asiri alim/satim ile teyit edilir (Binance
+    Tetikleyici kosul: son 24 saatte ciddi bir fiyat hareketi (>= %CHAIN_ORDER_
+    MOVE_THRESHOLD_PCT) olmus olmasi - kullanicinin orijinal senaryosu budur.
+    ANCAK acilacak pozisyonun YONU artik sabit bir 'tersine donus' varsayimiyla
+    degil, botun normal otomatik islem kararlarinda kullandigi ayni coklu-faktor
+    analiz motoruyla belirlenir (bkz. _chain_order_signal_direction) - cunku
+    yapilan geriye donuk test, kor kore tersine donus varsayiminin guvenilir
+    bir edge saglamadigini gosterdi. Analiz net ve yeterince guvenli (>= 
+    CHAIN_ORDER_MIN_CONFIDENCE) bir yon vermezse zincir emir acilmaz. Binance
     Futures'ta hem SHORT hem LONG, IBKR/Spot'ta short mumkun olmadigi icin
-    sadece LONG zincirlenir). Sembol basina gunde en fazla 1 zincir emir
+    sadece LONG zincirlenir. Sembol basina gunde en fazla 1 zincir emir
     acilir (bkz. db_chain_order_today)."""
     if not CHAIN_ORDER_ENABLED or exit_price <= 0 or closed_qty <= 0:
         return None
@@ -7438,24 +7486,17 @@ def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_pri
         if not stats:
             return None
         change_24h = stats["change_24h"]
-        rsi = stats["rsi"]
+        if abs(change_24h) < CHAIN_ORDER_MOVE_THRESHOLD_PCT:
+            return None  # tetikleyici kosul yok: yakin zamanda ciddi bir hareket yok
 
-        direction: Optional[str] = None
-        pattern_note = ""
-        if change_24h >= CHAIN_ORDER_MOVE_THRESHOLD_PCT and rsi >= CHAIN_ORDER_RSI_OVERBOUGHT:
-            direction = "SELL"
-            pattern_note = (
-                f"Son 24s içinde %{change_24h:.2f} yükseliş + RSI {rsi:.1f} (aşırı alım): "
-                f"geri çekilme beklentisiyle zincir SHORT açıldı."
-            )
-        elif change_24h <= -CHAIN_ORDER_MOVE_THRESHOLD_PCT and rsi <= CHAIN_ORDER_RSI_OVERSOLD:
-            direction = "BUY"
-            pattern_note = (
-                f"Son 24s içinde %{change_24h:.2f} düşüş + RSI {rsi:.1f} (aşırı satım): "
-                f"toparlanma beklentisiyle zincir LONG açıldı."
-            )
-        if direction is None:
+        sig = _chain_order_signal_direction(broker, symbol)
+        if not sig or sig["confidence"] < CHAIN_ORDER_MIN_CONFIDENCE:
             return None
+        direction = sig["direction"]
+        pattern_note = (
+            f"Son 24s içinde %{change_24h:.2f} hareket sonrası zincir emir tetiklendi; "
+            f"{sig['note']}"
+        )
         # Spot ve IBKR'de kisa satis (short) desteklenmiyor - bu hesaplar
         # sadece LONG yonunde zincirlenebilir (bkz. mevcut IBKR/Spot SAT
         # kisitlamalari).
@@ -9986,8 +10027,11 @@ def spot_auto_trader_reconcile():
 def chain_order_status():
     """Zincir emir ozelligi ayarlarini ve son tetiklenen zincir emirleri dondurur.
     Bir pozisyon (TP/SL veya AI karariyla) kapandiginda, o varlikta son 24s'te
-    esik ustu bir hareket VE bunu teyit eden RSI asiri alim/satim durumu varsa
-    tersine (mean-reversion) bir pozisyon otomatik acilir."""
+    esik ustu bir hareket varsa TETIKLENIR; ancak acilacak pozisyonun YONU artik
+    sabit bir RSI/tersine-donus kuraliyla degil, botun normal otomatik islem
+    kararlarinda kullandigi ayni coklu-faktor analiz motoruyla belirlenir (bkz.
+    _chain_order_signal_direction) - gecmise donuk test bu kuralin guvenilir
+    bir edge saglamadigini gosterdigi icin degistirildi."""
     try:
         db_records = [
             r for r in db_recent_auto_history(500)
@@ -9998,8 +10042,8 @@ def chain_order_status():
             "enabled": CHAIN_ORDER_ENABLED,
             "move_threshold_pct": CHAIN_ORDER_MOVE_THRESHOLD_PCT,
             "size_pct_of_closed": CHAIN_ORDER_SIZE_PCT,
-            "rsi_overbought": CHAIN_ORDER_RSI_OVERBOUGHT,
-            "rsi_oversold": CHAIN_ORDER_RSI_OVERSOLD,
+            "min_confidence": CHAIN_ORDER_MIN_CONFIDENCE,
+            "direction_source": "AI çok faktörlü sinyal motoru (RSI değil)",
             "recent_chain_orders": db_records,
             "last_update": now_text(),
         })
