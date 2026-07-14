@@ -6551,8 +6551,20 @@ def _ibkr_stuck_watchdog_loop():
             os._exit(1)
 
 
+_SPOT_RECONCILE_INTERVAL_SEC = 300
+_SPOT_RECONCILE_LAST_TS = 0.0
+
+
 def _auto_trader_loop():
+    global _SPOT_RECONCILE_LAST_TS
     while True:
+        if (time.time() - _SPOT_RECONCILE_LAST_TS) >= _SPOT_RECONCILE_INTERVAL_SEC:
+            _SPOT_RECONCILE_LAST_TS = time.time()
+            try:
+                reconcile_spot_positions()
+            except Exception:
+                pass
+
         with AUTO_LOCK:
             enabled = AUTO_TRADER.enabled
             interval_sec = max(8, AUTO_TRADER.interval_sec)
@@ -7278,6 +7290,130 @@ def spot_position_profit_pct(position: Dict[str, Any], current_price: float) -> 
     if avg_cost <= 0 or current_price <= 0:
         return 0.0
     return ((current_price - avg_cost) / avg_cost) * 100.0
+
+
+SPOT_RECONCILE_MIN_USD = float(os.getenv("SPOT_RECONCILE_MIN_USD", "3.0"))
+_SPOT_RECONCILE_STABLE_ASSETS = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI", "TRY"}
+
+
+def estimate_spot_avg_cost_from_trades(symbol: str, target_qty: float) -> float:
+    """Binance'in kendi islem gecmisinden (GET /api/v3/myTrades) bu sembol icin
+    (bot disinda/manuel yapilmis olabilecek dahil) agirlikli ortalama alim
+    maliyetini tahmin eder. Su an elde tutulan target_qty kadar miktari
+    KARSILAYAN en SON alimlardan geriye dogru gidilerek hesaplanir (daha once
+    satilmis/kapatilmis eski alimlar dahil edilmez). Islem gecmisi
+    okunamazsa ya da BUY islemi bulunamazsa 0.0 doner - cagiran taraf bu
+    durumda mevcut piyasa fiyatini yedek (fallback) olarak kullanir."""
+    try:
+        trades = signed_request("GET", SPOT_BASE, "/api/v3/myTrades", {"symbol": symbol, "limit": 500})
+    except Exception:
+        return 0.0
+    if not isinstance(trades, list) or not trades:
+        return 0.0
+    buys = [t for t in trades if t.get("isBuyer")]
+    if not buys:
+        return 0.0
+    # En yeniden en eskiye dogru sirala, elde tutulan miktari karsilayana kadar topla.
+    buys.sort(key=lambda t: safe_float(t.get("time")), reverse=True)
+    remaining = target_qty
+    weighted_cost_sum = 0.0
+    collected_qty = 0.0
+    for t in buys:
+        if remaining <= 0:
+            break
+        qty = safe_float(t.get("qty"))
+        price = safe_float(t.get("price"))
+        if qty <= 0 or price <= 0:
+            continue
+        take_qty = min(qty, remaining)
+        weighted_cost_sum += take_qty * price
+        collected_qty += take_qty
+        remaining -= take_qty
+    if collected_qty <= 0:
+        return 0.0
+    return weighted_cost_sum / collected_qty
+
+
+def reconcile_spot_positions() -> Dict[str, Any]:
+    """Binance spot cuzdanindaki GERCEK bakiyeleri, botun kendi takip ettigi
+    spot_positions tablosuyla karsilastirir. Kullanicinin talebi: 'bot sadece
+    kendi actigi islemleri degil, cuzdanda fiilen bulunan (ornegin manuel
+    alinmis ya da baska bir yolla edinilmis) varliklari da fark edip
+    izleyebilsin' (once bu tutarsizlik, kar takibi yapilmayan bir SOL
+    bakiyesiyle fark edildi).
+
+    - Cuzdanda olup takip tablosunda OLMAYAN, tozdan (SPOT_RECONCILE_MIN_USD
+      ustu) buyuk varliklar: gecmis islemlerden agirlikli ortalama maliyet
+      tahmin edilerek (bulunamazsa mevcut fiyat fallback) spot_positions'a
+      eklenir - boylece /portfolio'da gorunur ve TP/SL takibine girer.
+    - Takip tablosunda olup cuzdanda ARTIK bulunmayan (bot disinda elden
+      cikarilmis) hayalet pozisyonlar silinir.
+    """
+    result: Dict[str, Any] = {"added": [], "removed": [], "error": ""}
+    try:
+        wallet_raw = _binance_proxy_request("GET", "/spot-balances")
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+    wallet_balances = wallet_raw.get("balances", []) if isinstance(wallet_raw, dict) else (wallet_raw or [])
+    wallet_by_asset = {
+        str(b.get("asset", "")).upper(): b
+        for b in wallet_balances
+        if str(b.get("asset", "")).upper() not in _SPOT_RECONCILE_STABLE_ASSETS
+    }
+
+    try:
+        tracked = db_list_spot_positions()
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+    tracked_by_symbol = {str(p.get("symbol", "")).upper(): p for p in tracked}
+
+    # 1) Cuzdanda olup takip edilmeyen (yeterince buyuk) varliklari ekle.
+    for asset, bal in wallet_by_asset.items():
+        symbol = f"{asset}USDT"
+        if symbol in tracked_by_symbol:
+            continue
+        usd_value = safe_float(bal.get("usdValue"))
+        free_qty = safe_float(bal.get("free"))
+        if usd_value < SPOT_RECONCILE_MIN_USD or free_qty <= 0:
+            continue
+        avg_cost = estimate_spot_avg_cost_from_trades(symbol, free_qty)
+        if avg_cost <= 0:
+            avg_cost = safe_float(bal.get("usd_price"))
+        if avg_cost <= 0:
+            continue
+        try:
+            db_upsert_spot_position(symbol, free_qty, avg_cost)
+            db_insert_auto_history(
+                broker="BINANCE_SPOT",
+                symbol=symbol,
+                action="SYNC",
+                confidence=0,
+                price=avg_cost,
+                reason=(
+                    f"Mutabakat: cüzdanda {free_qty:.6f} {asset} (${usd_value:.2f}) bulundu, "
+                    f"bot takibinde yoktu - eklendi (tahmini maliyet ${avg_cost:.4f})."
+                ),
+                execution={"simulated": True, "message": "Mutabakat: dış pozisyon takibe eklendi."},
+            )
+            result["added"].append(symbol)
+        except Exception:
+            continue
+
+    # 2) Takip edilen ama cuzdanda artik olmayan (bot disinda satilmis) hayalet
+    # pozisyonlari temizle.
+    for symbol, pos in tracked_by_symbol.items():
+        asset = symbol.replace("USDT", "")
+        bal = wallet_by_asset.get(asset)
+        real_qty = safe_float(bal.get("free")) if bal else 0.0
+        if real_qty <= 0:
+            try:
+                db_delete_spot_position(symbol)
+                result["removed"].append(symbol)
+            except Exception:
+                continue
+    return result
 
 
 def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Optional[Dict[str, Any]]:
@@ -9638,6 +9774,18 @@ def spot_auto_trader_positions():
         return jsonify({"ok": True, "positions": enriched, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "positions": [], "last_update": now_text()}), 200
+
+
+@app.route("/auto-trader/spot/reconcile", methods=["POST"])
+def spot_auto_trader_reconcile():
+    """Spot cuzdanindaki gercek bakiyeleri botun takip tablosuyla manuel olarak
+    eslestirir (normalde arka planda 5 dakikada bir otomatik calisir - bu
+    endpoint anlik/manuel tetikleme icindir)."""
+    try:
+        result = reconcile_spot_positions()
+        return jsonify({"ok": not result.get("error"), **result, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "added": [], "removed": [], "last_update": now_text()}), 200
 
 
 @app.route("/ai-scenario-analysis", methods=["POST"])
