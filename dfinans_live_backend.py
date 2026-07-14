@@ -420,10 +420,15 @@ MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "-500.0"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "5"))
 LAST_ORDER_TIME: Dict[str, float] = {}
 MIN_ORDER_COOLDOWN_SEC = float(os.getenv("MIN_ORDER_COOLDOWN_SEC", "2.0"))
-BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "5.0"))
+BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "3.0"))
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
-IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "6.0"))
+IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "3.0"))
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
+# Kullanicinin talebi: bir pozisyon buyutulmus (piramitlenmis) ise, normal
+# (buyutulmemis) pozisyondan DAHA DUSUK bir kar yuzdesinde kapatilsin - boyut
+# arttigi icin risk de arttigindan kari daha erken realize etmek mantikli.
+BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "2.0"))
+IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "2.0"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
 # dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
@@ -854,6 +859,43 @@ def db_log_position_add(broker: str, symbol: str) -> None:
             conn.close()
 
 
+def db_position_ever_scaled(broker: str, symbol: str) -> bool:
+    """Su an acik olan pozisyon herhangi bir tarihte en az bir kez 'buyutulmus'
+    (piramitlenmis) mu diye bakar (sadece bugune degil, TUM gecmise bakar -
+    pozisyon gunler once buyutulup daha sonra kar hedefine ulasmis olabilir).
+    Kullanicinin talebi: buyutulmus bir pozisyonun kapanmasi icin normal
+    pozisyondan DAHA DUSUK bir kar yuzdesi yeterli olsun (risk/boyut arttigi
+    icin daha erken kar realize edilsin). Pozisyon tamamen kapandiginda
+    db_record_position_closure() bu kaydi temizler, boylece yeni acilan bir
+    pozisyon 'buyutulmus' olarak baslamaz."""
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM position_add_log WHERE broker = ? AND symbol = ? LIMIT 1",
+                (broker, symbol),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row is not None
+
+
+def db_clear_position_add_log(broker: str, symbol: str) -> None:
+    """Bir pozisyon tamamen kapandiginda o sembol icin biriken 'buyutme'
+    kayitlarini temizler - aksi halde yeni acilacak pozisyon, eski (kapanmis)
+    pozisyondan kalma 'buyutulmus' durumunu yanlislikla devralir."""
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                "DELETE FROM position_add_log WHERE broker = ? AND symbol = ?",
+                (broker, symbol),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def db_chain_order_today(broker: str, symbol: str) -> bool:
     """Bugun bu sembolde (broker bazinda) zaten bir zincir emir acilip acilmadigini
     kontrol eder - ayni sembolde gunde en fazla 1 zincir emir acilabilir."""
@@ -1187,6 +1229,16 @@ def db_record_position_closure(
                 conn.commit()
             finally:
                 conn.close()
+    except Exception:
+        pass
+
+    # Pozisyon tamamen kapandigi icin bu sembol icin biriken 'buyutme'
+    # gecmisini de temizle - aksi halde ayni sembolde yeniden acilacak bir
+    # pozisyon, eski (kapanmis) pozisyondan kalma 'buyutulmus' durumunu
+    # yanlislikla devralip dusuk kar hedefiyle (bkz. take-profit fonksiyonlari)
+    # erken kapanabilir.
+    try:
+        db_clear_position_add_log(broker, symbol)
     except Exception:
         pass
 
@@ -7001,6 +7053,8 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
         take_profit_pct, stop_loss_pct = resolve_symbol_tp_sl(
             "BINANCE_FUTURES", symbol, BINANCE_TAKE_PROFIT_PCT, BINANCE_STOP_LOSS_PCT,
         )
+        if take_profit_pct > 0 and db_position_ever_scaled("BINANCE_FUTURES", symbol):
+            take_profit_pct = min(take_profit_pct, BINANCE_SCALED_TAKE_PROFIT_PCT)
         profit_pct = binance_position_profit_pct(position)
         hit_take_profit = take_profit_pct > 0 and profit_pct >= take_profit_pct
         hit_stop_loss = stop_loss_pct > 0 and profit_pct <= -stop_loss_pct
@@ -7094,7 +7148,10 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             # tutuluyor).
             continue
         profit_pct = ibkr_position_profit_pct(position)
-        hit_take_profit = IBKR_TAKE_PROFIT_PCT > 0 and profit_pct >= IBKR_TAKE_PROFIT_PCT
+        ibkr_take_profit_pct = IBKR_TAKE_PROFIT_PCT
+        if ibkr_take_profit_pct > 0 and db_position_ever_scaled("IBKR", symbol_check):
+            ibkr_take_profit_pct = min(ibkr_take_profit_pct, IBKR_SCALED_TAKE_PROFIT_PCT)
+        hit_take_profit = ibkr_take_profit_pct > 0 and profit_pct >= ibkr_take_profit_pct
         hit_stop_loss = IBKR_STOP_LOSS_PCT > 0 and profit_pct <= -IBKR_STOP_LOSS_PCT
         if not hit_take_profit and not hit_stop_loss:
             continue
@@ -7135,7 +7192,7 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             result = {"simulated": False, "broker": "IBKR", "symbol": symbol, "error": str(e), "time": now_text()}
         result["trigger"] = trigger
         result["trigger_pct"] = round(profit_pct, 4)
-        result["target_pct"] = IBKR_TAKE_PROFIT_PCT if hit_take_profit else -IBKR_STOP_LOSS_PCT
+        result["target_pct"] = ibkr_take_profit_pct if hit_take_profit else -IBKR_STOP_LOSS_PCT
         result["symbol"] = symbol
         result["pnl"] = safe_float(position.get("pnl"))
         if not result.get("error"):
@@ -7153,7 +7210,7 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
                 realized_pnl_pct=profit_pct,
                 close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
                 detail=(
-                    f"%{IBKR_TAKE_PROFIT_PCT:.1f} kâr hedefi tetiklendi." if hit_take_profit
+                    f"%{ibkr_take_profit_pct:.1f} kâr hedefi tetiklendi." if hit_take_profit
                     else f"%{IBKR_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
                 ),
             )
@@ -7765,7 +7822,10 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         if price <= 0:
             continue
         profit_pct = spot_position_profit_pct(pos, price)
-        hit_take_profit = BINANCE_TAKE_PROFIT_PCT > 0 and profit_pct >= BINANCE_TAKE_PROFIT_PCT
+        spot_take_profit_pct = BINANCE_TAKE_PROFIT_PCT
+        if spot_take_profit_pct > 0 and db_position_ever_scaled("BINANCE_SPOT", symbol):
+            spot_take_profit_pct = min(spot_take_profit_pct, BINANCE_SCALED_TAKE_PROFIT_PCT)
+        hit_take_profit = spot_take_profit_pct > 0 and profit_pct >= spot_take_profit_pct
         hit_stop_loss = BINANCE_STOP_LOSS_PCT > 0 and profit_pct <= -BINANCE_STOP_LOSS_PCT
         if not hit_take_profit and not hit_stop_loss:
             continue
@@ -7784,7 +7844,7 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             db_delete_spot_position(symbol)
         result["trigger"] = trigger
         result["trigger_pct"] = round(profit_pct, 4)
-        result["target_pct"] = BINANCE_TAKE_PROFIT_PCT if hit_take_profit else -BINANCE_STOP_LOSS_PCT
+        result["target_pct"] = spot_take_profit_pct if hit_take_profit else -BINANCE_STOP_LOSS_PCT
         result["symbol"] = symbol
         if not result.get("error"):
             avg_cost = safe_float(pos.get("avg_cost"))
@@ -7801,7 +7861,7 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
                 realized_pnl_pct=profit_pct,
                 close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
                 detail=(
-                    f"%{BINANCE_TAKE_PROFIT_PCT:.1f} kâr hedefi tetiklendi." if hit_take_profit
+                    f"%{spot_take_profit_pct:.1f} kâr hedefi tetiklendi." if hit_take_profit
                     else f"%{BINANCE_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
                 ),
             )
@@ -7818,12 +7878,36 @@ def ensure_binance_leverage(symbol: str, leverage: int) -> None:
     """Binance futures'ta ilgili sembol icin istenen kaldiraci ayarlar (POST /fapi/v1/leverage).
     Ayni deger zaten uygulanmissa (bu process icinde) tekrar cagirmaz. Hata durumunda
     sessizce gecer; asil emir Binance'in kendi hata mesajiyla (yetersiz kaldirac vb.)
-    reddedilirse bu execution.error olarak zaten raporlanir."""
+    reddedilirse bu execution.error olarak zaten raporlanir.
+
+    ONEMLI: canli izlemede TUM futures pozisyonlarinin (confidence'a gore 2x/3x
+    olmasi beklenirken) hep 1x acildigi tespit edildi. Sebep: bu istek DOGRUDAN
+    Railway'den signed_request ile gonderiliyordu; Railway'in IP'si Binance'de
+    whitelist'li olmadigi icin (bkz. get_futures_available_usdt vb. ayni sorun)
+    istek sessizce basarisiz oluyor, kaldirac hic degismiyordu - emirler proxy
+    uzerinden gittigi icin BASARIYLA aciliyor ama hesabin varsayilan (1x)
+    kaldiraciyla. Once emir proxy'si (BINANCE_ORDER_PROXY_BASE_URL, ayni VPS'in
+    imzali istekleri whitelist'li IP'den gonderdigi servis) uzerinden
+    '/binance/private/leverage' denenir; VPS bu route'u desteklemiyorsa (404 vb.)
+    eskisi gibi dogrudan signed_request'e geri dusulur (regresyon yok, sadece
+    iyilestirme denemesi)."""
     if leverage <= 1:
         return
     with _LEVERAGE_LOCK:
         if _LEVERAGE_APPLIED_CACHE.get(symbol) == leverage:
             return
+    if BINANCE_ORDER_PROXY_BASE_URL:
+        try:
+            _binance_proxy_request(
+                "POST", "/binance/private/leverage",
+                json_body={"symbol": symbol, "leverage": leverage},
+                base_url=BINANCE_ORDER_PROXY_BASE_URL,
+            )
+            with _LEVERAGE_LOCK:
+                _LEVERAGE_APPLIED_CACHE[symbol] = leverage
+            return
+        except Exception:
+            pass
     try:
         signed_request("POST", FUTURES_BASE, "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
         with _LEVERAGE_LOCK:
