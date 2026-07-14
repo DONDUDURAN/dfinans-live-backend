@@ -433,6 +433,10 @@ IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
 # yoksayilip pozisyon acik tutulur (yalnizca STOP_LOSS_PCT'e ulasilirsa
 # veya pozisyon karda ise satis yapilir).
 IBKR_AI_SELL_MIN_LOSS_PCT = float(os.getenv("IBKR_AI_SELL_MIN_LOSS_PCT", "10.0"))
+# Kullanicinin talebi: IBKR'de asgari teyit sayisi. 5 bagimsiz sinyalden
+# (momentum, emir akisi, korelasyon, teknik trend, coklu zaman dilimi) en az
+# bu kadari action ile ayni yonde olmadan GERCEK IBKR emri gonderilmez.
+IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "3"))
 BINANCE_AI_SELL_MIN_LOSS_PCT = float(os.getenv("BINANCE_AI_SELL_MIN_LOSS_PCT", "10.0"))
 
 # Varlik bazli pozisyon boyutlandirma: her BUY/SELL sinyalinde sabit miktar yerine,
@@ -5960,6 +5964,43 @@ def _auto_trader_run_symbol(
     # bir teyit sayisi asla kaydedilmez.
     signal_corr_dir = str(corr_signal.get("action", "WAIT")).upper()
 
+    # Kullanicinin talebi: IBKR'de teyit sistemini guclendirmek. Onceden IBKR
+    # sadece 3 sinyalden (momentum, emir akisi, korelasyon) olusuyordu ve
+    # pratikte cogunlukla sadece 1'i hizalaniyordu (bkz. canli tarama). Burada
+    # IBKR icin 2 BAGIMSIZ sinyal daha ekleniyor: (1) RSI(14)+SMA20/50 teknik
+    # trend yonu, (2) kisa/orta/uzun vade momentum hizalanmasi (coklu zaman
+    # dilimi). Boylece IBKR'de toplam 5 bagimsiz sinyal olur ve asagida
+    # (emirden hemen once) bunlardan en az IBKR_MIN_CONFIRMATIONS kadarinin
+    # ayni yonde olmasi sarti aranir - sadece confidence yeterli olmasi
+    # artik IBKR icin GERCEK bir emir acmaya yetmez.
+    signal_technical_dir = "WAIT"
+    signal_mtf_dir = "WAIT"
+    if broker == "IBKR":
+        try:
+            tech_snap = get_technical_indicator_snapshot(symbol, market, broker)
+            rsi_val = tech_snap.get("rsi_14")
+            sma20_val = tech_snap.get("sma_20")
+            sma50_val = tech_snap.get("sma_50")
+            last_close_val = tech_snap.get("last_close")
+            if rsi_val is not None and rsi_val <= 30:
+                signal_technical_dir = "BUY"
+            elif rsi_val is not None and rsi_val >= 70:
+                signal_technical_dir = "SELL"
+            elif sma20_val is not None and sma50_val is not None and last_close_val is not None:
+                if last_close_val > sma20_val > sma50_val:
+                    signal_technical_dir = "BUY"
+                elif last_close_val < sma20_val < sma50_val:
+                    signal_technical_dir = "SELL"
+        except Exception:
+            signal_technical_dir = "WAIT"
+        try:
+            mtf_snap = get_multi_timeframe_momentum_signal(symbol, market, broker)
+            if mtf_snap.get("aligned"):
+                mtf_consensus = mtf_snap.get("consensus_direction", 0)
+                signal_mtf_dir = "BUY" if mtf_consensus > 0 else ("SELL" if mtf_consensus < 0 else "WAIT")
+        except Exception:
+            signal_mtf_dir = "WAIT"
+
     if action in ["BUY", "SELL"]:
         confidence = max(0, min(95, confidence + learning_bias(action)))
         # Dis sinyaller (SEC dosyalama sicramasi, haber sentiment'i, Fear&Greed, makro
@@ -6101,19 +6142,20 @@ def _auto_trader_run_symbol(
                         available_usdt = get_spot_available_usdt()
                         if available_usdt > 0:
                             pct = spot_auto_trader_size_pct(symbol)
+                            min_pos_usd = effective_min_position_usd(symbol, "SPOT")
                             sized_qty = round((available_usdt * pct) / price, 6)
-                            if sized_qty * price < BINANCE_MIN_POSITION_USD:
-                                if available_usdt >= BINANCE_MIN_POSITION_USD:
-                                    sized_qty = round(math.ceil((BINANCE_MIN_POSITION_USD / price) * 1_000_000) / 1_000_000, 6)
+                            if sized_qty * price < min_pos_usd:
+                                if available_usdt >= min_pos_usd:
+                                    sized_qty = round(math.ceil((min_pos_usd / price) * 1_000_000) / 1_000_000, 6)
                                     qty = sized_qty
                                     reason = (
                                         reason
-                                        + f" (Spot pozisyon büyüklüğü: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i taban tutarın ({BINANCE_MIN_POSITION_USD:.0f}$) altında kaldığı için taban tutara yükseltildi -> {sized_qty:.6f} {symbol}.)"
+                                        + f" (Spot pozisyon büyüklüğü: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i taban tutarın ({min_pos_usd:.0f}$) altında kaldığı için taban tutara yükseltildi -> {sized_qty:.6f} {symbol}.)"
                                     ).strip()
                                 else:
                                     spot_skip_reason = (
                                         f"İşlem atlandı: kullanılabilir bakiye {available_usdt:.2f} USDT, "
-                                        f"taban pozisyon tutarı {BINANCE_MIN_POSITION_USD:.0f}$'ın altında kaldı."
+                                        f"taban pozisyon tutarı {min_pos_usd:.0f}$'ın altında kaldı."
                                     )
                                     qty = 0
                             else:
@@ -6313,6 +6355,25 @@ def _auto_trader_run_symbol(
                             ).strip()
                             action = "WAIT"
                             qty = 0
+                    if qty > 0 and action in ("BUY", "SELL"):
+                        # Kullanicinin talebi: IBKR'de asgari teyit sarti. Momentum, emir
+                        # akisi, korelasyon, teknik trend ve coklu zaman dilimi olmak uzere
+                        # 5 bagimsiz sinyalden en az IBKR_MIN_CONFIRMATIONS kadari action ile
+                        # AYNI yonde degilse, confidence yeterli olsa bile GERCEK emir
+                        # gonderilmez (sadece WAIT'e dusurulur, islem atlanir).
+                        ibkr_agree_count = sum(
+                            1 for d in (
+                                signal_momentum_dir, signal_order_flow_dir, signal_corr_dir,
+                                signal_technical_dir, signal_mtf_dir,
+                            ) if d == action
+                        )
+                        if ibkr_agree_count < IBKR_MIN_CONFIRMATIONS:
+                            reason = (
+                                reason
+                                + f" (IBKR emri atlandı: sadece {ibkr_agree_count}/5 bağımsız sinyal {action} yönünde "
+                                f"hizalandı, minimum {IBKR_MIN_CONFIRMATIONS} teyit gerekiyor.)"
+                            ).strip()
+                            qty = 0
                     if qty > 0 and "error" not in execution:
                         # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
                         # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
@@ -6384,18 +6445,19 @@ def _auto_trader_run_symbol(
                                 + f" (Pozisyon buyuklugu: bakiye {available_usdt:.2f} USDT'nin %{pct * 100:.0f}'i x{leverage} kaldirac (guven %{confidence}) -> {sized_qty:.6f} {symbol}.)"
                             ).strip()
                             qty = sized_qty
-                if price > 0 and qty * price < BINANCE_MIN_POSITION_USD:
-                    if available_usdt >= BINANCE_MIN_POSITION_USD:
-                        adj_qty = math.ceil((BINANCE_MIN_POSITION_USD / price) * 1000) / 1000.0
+                if price > 0 and qty * price < effective_min_position_usd(symbol, "FUTURES"):
+                    min_pos_usd = effective_min_position_usd(symbol, "FUTURES")
+                    if available_usdt >= min_pos_usd:
+                        adj_qty = math.ceil((min_pos_usd / price) * 1000) / 1000.0
                         reason = (
                             reason
-                            + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: taban pozisyon tutarı {BINANCE_MIN_POSITION_USD:.0f}$ uygulandı.)"
+                            + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: taban pozisyon tutarı {min_pos_usd:.0f}$ uygulandı.)"
                         ).strip()
                         qty = adj_qty
                     else:
                         reason = (
                             reason
-                            + f" (İşlem atlandı: kullanılabilir bakiye {available_usdt:.2f} USDT, taban pozisyon tutarı {BINANCE_MIN_POSITION_USD:.0f}$'ın altında kaldı.)"
+                            + f" (İşlem atlandı: kullanılabilir bakiye {available_usdt:.2f} USDT, taban pozisyon tutarı {min_pos_usd:.0f}$'ın altında kaldı.)"
                         ).strip()
                         qty = 0
                 # AI'nin bu SELL/BUY karari mevcut acik bir futures pozisyonunu
@@ -6530,10 +6592,11 @@ def _auto_trader_run_symbol(
         # uygulama bos degeri '-' olarak gosterir).
         signal_confirmations = ""
         if action in ("BUY", "SELL"):
-            agree_count = sum(
-                1 for d in (signal_momentum_dir, signal_order_flow_dir, signal_corr_dir) if d == action
-            )
-            signal_confirmations = f"{agree_count}/3"
+            confirmation_pool = (signal_momentum_dir, signal_order_flow_dir, signal_corr_dir)
+            if broker == "IBKR":
+                confirmation_pool = confirmation_pool + (signal_technical_dir, signal_mtf_dir)
+            agree_count = sum(1 for d in confirmation_pool if d == action)
+            signal_confirmations = f"{agree_count}/{len(confirmation_pool)}"
 
         history.insert(
             0,
@@ -7102,7 +7165,26 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
 def get_futures_available_usdt() -> float:
     """Binance futures cuzdanindaki kullanilabilir (bosta bekleyen) USDT bakiyesini dondurur.
     Yeni pozisyon boyutlandirma (varlik basina %) bu deger uzerinden hesaplanir.
-    Basarisiz olursa 0.0 doner; cagiran taraf bu durumda AUTO_TRADER.quantity'e (sabit miktar) geri duser."""
+    Basarisiz olursa 0.0 doner; cagiran taraf bu durumda AUTO_TRADER.quantity'e (sabit miktar) geri duser.
+
+    ONEMLI: Railway'in IP'si Binance'de whitelist'li DEGIL (bkz. /futures-balances,
+    /spot-balances route'larindaki proxy notu) - bu yuzden dogrudan signed_request
+    her zaman basarisiz olup sessizce 0.0 donuyordu, bu da gercek bakiye olmasina
+    ragmen 'kullanilabilir bakiye 0.00 USDT' yuzunden yeni islemlerin atlanmasina
+    yol aciyordu. Once VPS proxy'si (/futures-balances) denenir; o basarisiz olursa
+    (proxy tanimli degilse) dogrudan signed_request'e geri dusulur."""
+    if BINANCE_PROXY_BASE_URL:
+        try:
+            data = _binance_proxy_request("GET", "/futures-balances")
+            balances = data.get("balances", data) if isinstance(data, dict) else data
+            for b in balances:
+                if str(b.get("asset", "")).upper() == "USDT":
+                    val = safe_float(b.get("availableBalance"))
+                    if val:
+                        return val
+                    return safe_float(b.get("balance"))
+        except Exception:
+            pass
     try:
         data = signed_request("GET", FUTURES_BASE, "/fapi/v2/balance", {})
         for b in data:
@@ -7115,7 +7197,23 @@ def get_futures_available_usdt() -> float:
 
 def get_spot_available_usdt() -> float:
     """Binance spot cuzdanindaki bosta bekleyen (free) USDT miktarini dondurur.
-    Spot auto-trader'in BUY pozisyon boyutlandirmasi bu deger uzerinden yapilir."""
+    Spot auto-trader'in BUY pozisyon boyutlandirmasi bu deger uzerinden yapilir.
+
+    ONEMLI: get_futures_available_usdt() ile ayni Railway-IP-whitelist sorunu
+    burada da gecerli - once proxy (/spot-balances) denenir, olmazsa dogrudan
+    signed_request'e geri dusulur."""
+    if BINANCE_PROXY_BASE_URL:
+        try:
+            data = _binance_proxy_request("GET", "/spot-balances")
+            balances = data.get("balances", data) if isinstance(data, dict) else data
+            for b in balances:
+                if str(b.get("asset", "")).upper() == "USDT":
+                    val = safe_float(b.get("free"))
+                    if val:
+                        return val
+                    return safe_float(b.get("total"))
+        except Exception:
+            pass
     try:
         data = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
         for b in data.get("balances", []):
@@ -7129,7 +7227,23 @@ def get_spot_available_usdt() -> float:
 def get_spot_asset_free_qty(asset: str) -> float:
     """Belirtilen varligin (ör. ETH, BTC - USDT'siz) spot cuzdanindaki bosta
     bekleyen miktarini dondurur. SELL islemi acmadan once elde ne kadar oldugunu
-    kontrol etmek icin kullanilir (spot'ta short mumkun degil)."""
+    kontrol etmek icin kullanilir (spot'ta short mumkun degil).
+
+    get_futures_available_usdt() ile ayni Railway-IP-whitelist sorunu burada da
+    gecerli - once proxy (/spot-balances) denenir, olmazsa dogrudan signed_request'e
+    geri dusulur."""
+    if BINANCE_PROXY_BASE_URL:
+        try:
+            data = _binance_proxy_request("GET", "/spot-balances")
+            balances = data.get("balances", data) if isinstance(data, dict) else data
+            for b in balances:
+                if str(b.get("asset", "")).upper() == asset.upper():
+                    val = safe_float(b.get("free"))
+                    if val:
+                        return val
+                    return safe_float(b.get("total"))
+        except Exception:
+            pass
     try:
         data = signed_request("GET", SPOT_BASE, "/api/v3/account", {})
         for b in data.get("balances", []):
@@ -7205,6 +7319,24 @@ def get_symbol_filters(symbol: str, market: str = "SPOT") -> Dict[str, Any]:
     result["_ts"] = time.time()
     _SYMBOL_FILTERS_CACHE[cache_key] = result
     return result
+
+
+def effective_min_position_usd(symbol: str, market: str = "FUTURES") -> float:
+    """Pozisyon boyutlandirmasinda kullanilacak GERCEK taban tutari dondurur:
+    kendi sabit BINANCE_MIN_POSITION_USD degerimiz ile borsanin o sembol icin
+    GERCEK minNotional degerinden (get_symbol_filters) BUYUK OLANI. Onceden
+    sadece sabit BINANCE_MIN_POSITION_USD (25$) kullaniliyordu; ancak bazi
+    sembollerin (ör. ETHUSDT futures) gercek borsa minimumu bundan yuksek
+    (ör. 50$) oldugu icin, bot pozisyonu kendi tabanina (25$) buyutuyor ama
+    borsa bunu reddediyordu - bu, ayni sembolde saatlerce tekrarlayan
+    'işlem büyüklüğü ... borsanın minimum işlem büyüklüğünün altında kaldı'
+    hatasinin kok nedeniydi. Artik iki tabanin buyugu kullanilarak bu emirler
+    ilk seferde gecerli boyutta acilir."""
+    try:
+        exchange_min = safe_float(get_symbol_filters(symbol, market).get("min_notional", 0.0))
+    except Exception:
+        exchange_min = 0.0
+    return max(BINANCE_MIN_POSITION_USD, exchange_min)
 
 
 def round_quantity_to_step(
@@ -7391,7 +7523,6 @@ CHAIN_ORDER_MOVE_THRESHOLD_PCT = float(os.getenv("CHAIN_ORDER_MOVE_THRESHOLD_PCT
 CHAIN_ORDER_SIZE_PCT = float(os.getenv("CHAIN_ORDER_SIZE_PCT", "0.5"))
 CHAIN_ORDER_RSI_OVERBOUGHT = float(os.getenv("CHAIN_ORDER_RSI_OVERBOUGHT", "65"))
 CHAIN_ORDER_RSI_OVERSOLD = float(os.getenv("CHAIN_ORDER_RSI_OVERSOLD", "35"))
-CHAIN_ORDER_MIN_CONFIDENCE = float(os.getenv("CHAIN_ORDER_MIN_CONFIDENCE", "65"))
 
 
 def get_symbol_daily_change_and_rsi(symbol: str, broker: str) -> Optional[Dict[str, float]]:
@@ -7421,61 +7552,14 @@ def get_symbol_daily_change_and_rsi(symbol: str, broker: str) -> Optional[Dict[s
         return None
 
 
-def _chain_order_signal_direction(broker: str, symbol: str) -> Optional[Dict[str, Any]]:
-    """Zincir emrin YONUNU belirler. Geriye donuk test (kullanicinin istegiyle
-    yapilan analiz), 'ciddi hareketten sonra kor kore tersine donus bekle'
-    varsayiminin zayif/guvenilmez oldugunu gosterdi (coin'e gore degisken,
-    bazen tam tersi - momentum devam ediyor). Bu yuzden yon karari artik sabit
-    bir RSI kuraliyla degil, botun normal otomatik islemlerde kullandigi AYNI
-    coklu-faktor sinyal motoruyla (crypto: calculate_ai_signal - momentum +
-    emir defteri baskisi; IBKR: fiyat momentumu + emir akisi teyidi) verilir.
-    Boylece 'kor kore ters ac' yerine 'o anki gercek analize gore ac' mantigi
-    uygulanmis olur; sinyal devam (continuation) yonunu gosteriyorsa zincir
-    emir de o yonde acilir, net/guvenilir bir yon yoksa hic acilmaz."""
-    try:
-        if broker == "IBKR":
-            market_info = get_ibkr_symbol_market_info(symbol)
-            snap = ibkr_market_snapshot(
-                symbol, market_info.get("asset_type", "STK"),
-                market_info.get("exchange", "SMART"), market_info.get("currency", "USD"),
-            )
-            change = safe_float(snap.get("change_24h"))
-            order_flow = str(snap.get("order_flow_signal", "NEUTRAL")).upper()
-            momentum_signal = "BUY" if change > 0.6 else ("SELL" if change < -0.6 else "WAIT")
-            if momentum_signal in ("BUY", "SELL") and order_flow in ("BUY", "SELL") and momentum_signal != order_flow:
-                return None  # celiskili sinyaller - islem acma
-            direction = momentum_signal if momentum_signal in ("BUY", "SELL") else (order_flow if order_flow in ("BUY", "SELL") else None)
-            if direction is None:
-                return None
-            confidence = min(90, int(55 + abs(change) * 11))
-            if momentum_signal in ("BUY", "SELL") and order_flow == momentum_signal:
-                confidence = min(95, confidence + 10)
-            note = f"IBKR analiz motoru: momentum/emir akışı {direction} yönünde (24s değişim %{change:.2f})."
-        else:
-            binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
-            ai = calculate_ai_signal(symbol, binance_market)
-            direction = str(ai.get("signal", "WAIT")).upper()
-            if direction not in ("BUY", "SELL"):
-                return None
-            confidence = int(ai.get("confidence", 50))
-            note = f"AI sinyal motoru: {direction} ({confidence}% güven) - {ai.get('reason', '')}".strip()
-        return {"direction": direction, "confidence": confidence, "note": note}
-    except Exception:
-        return None
-
-
 def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_price: float) -> Optional[Dict[str, Any]]:
     """Bir pozisyon kapandiginda (TP/SL veya AI karariyla) tetiklenir.
-    Tetikleyici kosul: son 24 saatte ciddi bir fiyat hareketi (>= %CHAIN_ORDER_
-    MOVE_THRESHOLD_PCT) olmus olmasi - kullanicinin orijinal senaryosu budur.
-    ANCAK acilacak pozisyonun YONU artik sabit bir 'tersine donus' varsayimiyla
-    degil, botun normal otomatik islem kararlarinda kullandigi ayni coklu-faktor
-    analiz motoruyla belirlenir (bkz. _chain_order_signal_direction) - cunku
-    yapilan geriye donuk test, kor kore tersine donus varsayiminin guvenilir
-    bir edge saglamadigini gosterdi. Analiz net ve yeterince guvenli (>= 
-    CHAIN_ORDER_MIN_CONFIDENCE) bir yon vermezse zincir emir acilmaz. Binance
+    Kullanicinin talebi: 'bir varlikta daha once ciddi bir fiyat artisi
+    oldugunda devaminda dusus oluyorsa SHORT, ciddi bir dususun ardindan
+    artis oluyorsa LONG zincir emri ac'. Burada 'ciddi hareket + tersine
+    donus egilimi' RSI(14) asiri alim/satim ile teyit edilir (Binance
     Futures'ta hem SHORT hem LONG, IBKR/Spot'ta short mumkun olmadigi icin
-    sadece LONG zincirlenir. Sembol basina gunde en fazla 1 zincir emir
+    sadece LONG zincirlenir). Sembol basina gunde en fazla 1 zincir emir
     acilir (bkz. db_chain_order_today)."""
     if not CHAIN_ORDER_ENABLED or exit_price <= 0 or closed_qty <= 0:
         return None
@@ -7486,17 +7570,24 @@ def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_pri
         if not stats:
             return None
         change_24h = stats["change_24h"]
-        if abs(change_24h) < CHAIN_ORDER_MOVE_THRESHOLD_PCT:
-            return None  # tetikleyici kosul yok: yakin zamanda ciddi bir hareket yok
+        rsi = stats["rsi"]
 
-        sig = _chain_order_signal_direction(broker, symbol)
-        if not sig or sig["confidence"] < CHAIN_ORDER_MIN_CONFIDENCE:
+        direction: Optional[str] = None
+        pattern_note = ""
+        if change_24h >= CHAIN_ORDER_MOVE_THRESHOLD_PCT and rsi >= CHAIN_ORDER_RSI_OVERBOUGHT:
+            direction = "SELL"
+            pattern_note = (
+                f"Son 24s içinde %{change_24h:.2f} yükseliş + RSI {rsi:.1f} (aşırı alım): "
+                f"geri çekilme beklentisiyle zincir SHORT açıldı."
+            )
+        elif change_24h <= -CHAIN_ORDER_MOVE_THRESHOLD_PCT and rsi <= CHAIN_ORDER_RSI_OVERSOLD:
+            direction = "BUY"
+            pattern_note = (
+                f"Son 24s içinde %{change_24h:.2f} düşüş + RSI {rsi:.1f} (aşırı satım): "
+                f"toparlanma beklentisiyle zincir LONG açıldı."
+            )
+        if direction is None:
             return None
-        direction = sig["direction"]
-        pattern_note = (
-            f"Son 24s içinde %{change_24h:.2f} hareket sonrası zincir emir tetiklendi; "
-            f"{sig['note']}"
-        )
         # Spot ve IBKR'de kisa satis (short) desteklenmiyor - bu hesaplar
         # sadece LONG yonunde zincirlenebilir (bkz. mevcut IBKR/Spot SAT
         # kisitlamalari).
@@ -7513,12 +7604,13 @@ def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_pri
             ensure_binance_leverage(symbol, leverage)
             execution = place_futures_order(symbol, direction, chain_qty, reduce_only=False, channel="chain_order")
         elif broker == "BINANCE_SPOT":
+            min_pos_usd = effective_min_position_usd(symbol, "SPOT")
             notional = chain_qty * exit_price
-            if notional < BINANCE_MIN_POSITION_USD:
+            if notional < min_pos_usd:
                 available_usdt = get_spot_available_usdt()
-                if available_usdt < BINANCE_MIN_POSITION_USD:
+                if available_usdt < min_pos_usd:
                     return None
-                chain_qty = math.ceil((BINANCE_MIN_POSITION_USD / exit_price) * 1_000_000) / 1_000_000
+                chain_qty = math.ceil((min_pos_usd / exit_price) * 1_000_000) / 1_000_000
             execution = place_spot_order(symbol, "BUY", chain_qty, channel="chain_order")
             if not execution.get("error"):
                 fill_price = safe_float(execution.get("avg_fill_price")) or exit_price
@@ -10027,11 +10119,8 @@ def spot_auto_trader_reconcile():
 def chain_order_status():
     """Zincir emir ozelligi ayarlarini ve son tetiklenen zincir emirleri dondurur.
     Bir pozisyon (TP/SL veya AI karariyla) kapandiginda, o varlikta son 24s'te
-    esik ustu bir hareket varsa TETIKLENIR; ancak acilacak pozisyonun YONU artik
-    sabit bir RSI/tersine-donus kuraliyla degil, botun normal otomatik islem
-    kararlarinda kullandigi ayni coklu-faktor analiz motoruyla belirlenir (bkz.
-    _chain_order_signal_direction) - gecmise donuk test bu kuralin guvenilir
-    bir edge saglamadigini gosterdigi icin degistirildi."""
+    esik ustu bir hareket VE bunu teyit eden RSI asiri alim/satim durumu varsa
+    tersine (mean-reversion) bir pozisyon otomatik acilir."""
     try:
         db_records = [
             r for r in db_recent_auto_history(500)
@@ -10042,8 +10131,8 @@ def chain_order_status():
             "enabled": CHAIN_ORDER_ENABLED,
             "move_threshold_pct": CHAIN_ORDER_MOVE_THRESHOLD_PCT,
             "size_pct_of_closed": CHAIN_ORDER_SIZE_PCT,
-            "min_confidence": CHAIN_ORDER_MIN_CONFIDENCE,
-            "direction_source": "AI çok faktörlü sinyal motoru (RSI değil)",
+            "rsi_overbought": CHAIN_ORDER_RSI_OVERBOUGHT,
+            "rsi_oversold": CHAIN_ORDER_RSI_OVERSOLD,
             "recent_chain_orders": db_records,
             "last_update": now_text(),
         })
