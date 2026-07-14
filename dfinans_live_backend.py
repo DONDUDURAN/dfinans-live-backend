@@ -632,6 +632,17 @@ def init_runtime_db() -> None:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chain_order_log (
+                    broker TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    order_date TEXT NOT NULL,
+                    last_order_at TEXT NOT NULL,
+                    PRIMARY KEY (broker, symbol, order_date)
+                )
+                """
+            )
             conn.commit()
         finally:
             conn.close()
@@ -831,6 +842,42 @@ def db_log_position_add(broker: str, symbol: str) -> None:
                 INSERT INTO position_add_log(broker, symbol, add_date, last_add_at)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(broker, symbol, add_date) DO UPDATE SET last_add_at=excluded.last_add_at
+                """,
+                (broker, symbol, today, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_chain_order_today(broker: str, symbol: str) -> bool:
+    """Bugun bu sembolde (broker bazinda) zaten bir zincir emir acilip acilmadigini
+    kontrol eder - ayni sembolde gunde en fazla 1 zincir emir acilabilir."""
+    today = now_text()[:10]
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM chain_order_log WHERE broker = ? AND symbol = ? AND order_date = ?",
+                (broker, symbol, today),
+            ).fetchone()
+        finally:
+            conn.close()
+    return row is not None
+
+
+def db_log_chain_order(broker: str, symbol: str) -> None:
+    """Bugun bu sembolde (broker bazinda) bir zincir emir acildigini kaydeder."""
+    today = now_text()[:10]
+    now = now_text()
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO chain_order_log(broker, symbol, order_date, last_order_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(broker, symbol, order_date) DO UPDATE SET last_order_at=excluded.last_order_at
                 """,
                 (broker, symbol, today, now),
             )
@@ -6126,6 +6173,7 @@ def _auto_trader_run_symbol(
                                     detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
                                 )
                                 db_delete_spot_position(symbol)
+                                maybe_open_chain_order("BINANCE_SPOT", symbol, qty, exit_price)
                     else:
                         execution = {
                             "simulated": True,
@@ -6305,6 +6353,7 @@ def _auto_trader_run_symbol(
                                 close_reason="AI_KARARI",
                                 detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
                             )
+                            maybe_open_chain_order("IBKR", symbol, filled_qty, exit_price)
                 else:
                     execution = {
                         "simulated": True,
@@ -6435,6 +6484,7 @@ def _auto_trader_run_symbol(
                                 close_reason="AI_KARARI",
                                 detail=f"AI {action} kararıyla kapandı: {reason[:200]}",
                             )
+                            maybe_open_chain_order("BINANCE_FUTURES", symbol, closed_qty, exit_price)
                 else:
                     execution = {
                         "simulated": True,
@@ -6931,6 +6981,7 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
                     else f"%{stop_loss_pct:.1f} zarar-kes tetiklendi."
                 ),
             )
+            maybe_open_chain_order("BINANCE_FUTURES", symbol, size, exit_price)
         return result
     return None
 
@@ -7043,6 +7094,7 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
                     else f"%{IBKR_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
                 ),
             )
+            maybe_open_chain_order("IBKR", symbol, qty, exit_price)
         return result
     return None
 
@@ -7334,6 +7386,147 @@ def estimate_spot_avg_cost_from_trades(symbol: str, target_qty: float) -> float:
     return weighted_cost_sum / collected_qty
 
 
+CHAIN_ORDER_ENABLED = os.getenv("CHAIN_ORDER_ENABLED", "true").lower() == "true"
+CHAIN_ORDER_MOVE_THRESHOLD_PCT = float(os.getenv("CHAIN_ORDER_MOVE_THRESHOLD_PCT", "5.0"))
+CHAIN_ORDER_SIZE_PCT = float(os.getenv("CHAIN_ORDER_SIZE_PCT", "0.5"))
+CHAIN_ORDER_RSI_OVERBOUGHT = float(os.getenv("CHAIN_ORDER_RSI_OVERBOUGHT", "65"))
+CHAIN_ORDER_RSI_OVERSOLD = float(os.getenv("CHAIN_ORDER_RSI_OVERSOLD", "35"))
+
+
+def get_symbol_daily_change_and_rsi(symbol: str, broker: str) -> Optional[Dict[str, float]]:
+    """Bir sembolun son 24 saatlik (gunluk kapanis bazli) yuzde degisimini ve
+    RSI(14) degerini dondurur. Zincir emir kararinin girdisidir: 'ciddi bir
+    fiyat hareketi ASIRI ALIM/SATIM ile teyit ediliyorsa, tersine donus
+    beklenir' mantigini kurar."""
+    try:
+        if broker == "IBKR":
+            market_info = get_ibkr_symbol_market_info(symbol)
+            bars = get_ibkr_daily_bars(
+                symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=30,
+            )
+            closes = [b["close"] for b in bars]
+        else:
+            binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
+            bars = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=30)
+            closes = [b["close"] for b in bars]
+        if len(closes) < 15:
+            return None
+        change_24h = ((closes[-1] - closes[-2]) / closes[-2]) * 100.0 if closes[-2] else 0.0
+        rsi = compute_rsi(closes, period=14)
+        if rsi is None:
+            return None
+        return {"change_24h": change_24h, "rsi": rsi}
+    except Exception:
+        return None
+
+
+def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_price: float) -> Optional[Dict[str, Any]]:
+    """Bir pozisyon kapandiginda (TP/SL veya AI karariyla) tetiklenir.
+    Kullanicinin talebi: 'bir varlikta daha once ciddi bir fiyat artisi
+    oldugunda devaminda dusus oluyorsa SHORT, ciddi bir dususun ardindan
+    artis oluyorsa LONG zincir emri ac'. Burada 'ciddi hareket + tersine
+    donus egilimi' RSI(14) asiri alim/satim ile teyit edilir (Binance
+    Futures'ta hem SHORT hem LONG, IBKR/Spot'ta short mumkun olmadigi icin
+    sadece LONG zincirlenir). Sembol basina gunde en fazla 1 zincir emir
+    acilir (bkz. db_chain_order_today)."""
+    if not CHAIN_ORDER_ENABLED or exit_price <= 0 or closed_qty <= 0:
+        return None
+    try:
+        if db_chain_order_today(broker, symbol):
+            return None
+        stats = get_symbol_daily_change_and_rsi(symbol, broker)
+        if not stats:
+            return None
+        change_24h = stats["change_24h"]
+        rsi = stats["rsi"]
+
+        direction: Optional[str] = None
+        pattern_note = ""
+        if change_24h >= CHAIN_ORDER_MOVE_THRESHOLD_PCT and rsi >= CHAIN_ORDER_RSI_OVERBOUGHT:
+            direction = "SELL"
+            pattern_note = (
+                f"Son 24s içinde %{change_24h:.2f} yükseliş + RSI {rsi:.1f} (aşırı alım): "
+                f"geri çekilme beklentisiyle zincir SHORT açıldı."
+            )
+        elif change_24h <= -CHAIN_ORDER_MOVE_THRESHOLD_PCT and rsi <= CHAIN_ORDER_RSI_OVERSOLD:
+            direction = "BUY"
+            pattern_note = (
+                f"Son 24s içinde %{change_24h:.2f} düşüş + RSI {rsi:.1f} (aşırı satım): "
+                f"toparlanma beklentisiyle zincir LONG açıldı."
+            )
+        if direction is None:
+            return None
+        # Spot ve IBKR'de kisa satis (short) desteklenmiyor - bu hesaplar
+        # sadece LONG yonunde zincirlenebilir (bkz. mevcut IBKR/Spot SAT
+        # kisitlamalari).
+        if direction == "SELL" and broker != "BINANCE_FUTURES":
+            return None
+
+        chain_qty = max(0.0, closed_qty * CHAIN_ORDER_SIZE_PCT)
+        if chain_qty <= 0:
+            return None
+
+        execution: Optional[Dict[str, Any]] = None
+        if broker == "BINANCE_FUTURES":
+            leverage = 2
+            ensure_binance_leverage(symbol, leverage)
+            execution = place_futures_order(symbol, direction, chain_qty, reduce_only=False, channel="chain_order")
+        elif broker == "BINANCE_SPOT":
+            notional = chain_qty * exit_price
+            if notional < BINANCE_MIN_POSITION_USD:
+                available_usdt = get_spot_available_usdt()
+                if available_usdt < BINANCE_MIN_POSITION_USD:
+                    return None
+                chain_qty = math.ceil((BINANCE_MIN_POSITION_USD / exit_price) * 1_000_000) / 1_000_000
+            execution = place_spot_order(symbol, "BUY", chain_qty, channel="chain_order")
+            if not execution.get("error"):
+                fill_price = safe_float(execution.get("avg_fill_price")) or exit_price
+                existing = db_get_spot_position(symbol)
+                if existing and safe_float(existing.get("quantity")) > 0:
+                    old_qty = safe_float(existing.get("quantity"))
+                    old_cost = safe_float(existing.get("avg_cost"))
+                    new_qty = old_qty + chain_qty
+                    new_cost = ((old_qty * old_cost) + (chain_qty * fill_price)) / new_qty if new_qty > 0 else fill_price
+                    db_upsert_spot_position(symbol, new_qty, new_cost)
+                else:
+                    db_upsert_spot_position(symbol, chain_qty, fill_price)
+        elif broker == "IBKR":
+            market_info = get_ibkr_symbol_market_info(symbol)
+            asset_type = market_info.get("asset_type", "STK")
+            exchange = market_info.get("exchange", "SMART")
+            currency = market_info.get("currency", "USD")
+            chain_qty = math.floor(chain_qty)
+            if chain_qty < 1:
+                chain_qty = 1
+            available_funds = get_ibkr_available_funds()
+            needed = chain_qty * exit_price
+            if available_funds > 0 and needed > available_funds * 0.8:
+                chain_qty = math.floor((available_funds * 0.8) / exit_price)
+            if chain_qty < 1:
+                return None
+            execution = ibkr_place_market_order(symbol, "BUY", chain_qty, asset_type, exchange, currency)
+        else:
+            return None
+
+        if execution is None or execution.get("error"):
+            return None
+
+        db_log_chain_order(broker, symbol)
+        action_label = "CHAIN_SHORT" if direction == "SELL" else "CHAIN_LONG"
+        db_insert_auto_history(
+            broker=broker,
+            symbol=symbol,
+            action=action_label,
+            confidence=70,
+            price=exit_price,
+            reason=f"Zincir emir: {pattern_note}",
+            execution=execution,
+        )
+        return execution
+    except Exception:
+        return None
+
+
 def reconcile_spot_positions() -> Dict[str, Any]:
     """Binance spot cuzdanindaki GERCEK bakiyeleri, botun kendi takip ettigi
     spot_positions tablosuyla karsilastirir. Kullanicinin talebi: 'bot sadece
@@ -7479,6 +7672,7 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
                     else f"%{BINANCE_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
                 ),
             )
+            maybe_open_chain_order("BINANCE_SPOT", symbol, sell_qty, price)
         return result
     return None
 
@@ -9786,6 +9980,31 @@ def spot_auto_trader_reconcile():
         return jsonify({"ok": not result.get("error"), **result, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "added": [], "removed": [], "last_update": now_text()}), 200
+
+
+@app.route("/chain-order/status", methods=["GET"])
+def chain_order_status():
+    """Zincir emir ozelligi ayarlarini ve son tetiklenen zincir emirleri dondurur.
+    Bir pozisyon (TP/SL veya AI karariyla) kapandiginda, o varlikta son 24s'te
+    esik ustu bir hareket VE bunu teyit eden RSI asiri alim/satim durumu varsa
+    tersine (mean-reversion) bir pozisyon otomatik acilir."""
+    try:
+        db_records = [
+            r for r in db_recent_auto_history(500)
+            if str(r.get("action", "")).upper() in ("CHAIN_SHORT", "CHAIN_LONG")
+        ]
+        return jsonify({
+            "ok": True,
+            "enabled": CHAIN_ORDER_ENABLED,
+            "move_threshold_pct": CHAIN_ORDER_MOVE_THRESHOLD_PCT,
+            "size_pct_of_closed": CHAIN_ORDER_SIZE_PCT,
+            "rsi_overbought": CHAIN_ORDER_RSI_OVERBOUGHT,
+            "rsi_oversold": CHAIN_ORDER_RSI_OVERSOLD,
+            "recent_chain_orders": db_records,
+            "last_update": now_text(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "recent_chain_orders": [], "last_update": now_text()}), 200
 
 
 @app.route("/ai-scenario-analysis", methods=["POST"])
