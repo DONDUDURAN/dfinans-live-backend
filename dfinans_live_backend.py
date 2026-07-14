@@ -6447,10 +6447,21 @@ def _auto_trader_run_symbol(
                     }
             if execution.get("error"):
                 state.last_error = str(execution.get("error"))
-            else:
+            elif qty > 0:
+                # ONEMLI: gunluk islem hakki SADECE gercekten bir emir denendiyse
+                # (qty > 0, gercek ya da simule) tuketilir. Eskiden qty=0'a dusen
+                # atlanmis sinyaller (ornegin 'bakiye yetersiz', 'bugun zaten
+                # buyutme yapildi', 'elde pozisyon yok, SAT atlandi' gibi durumlar)
+                # hicbir emir denenmemesine ragmen gunluk sayaci artiriyordu - bu
+                # yuzden bir kac 'atlanan' sinyalden sonra o gunun geri kalaninda
+                # GERCEK islem firsatlari da 'Emir yok' ile engelleniyordu (kullanici
+                # bunu 'IBKR/Spot hep paper modda kaliyor, islem acmiyor' olarak
+                # gozlemledi).
                 state.last_error = ""
                 state.daily_trade_count += 1
                 queue_signal_for_learning(symbol, action, price, eval_window)
+            else:
+                state.last_error = ""
         else:
             state.last_error = ""
 
