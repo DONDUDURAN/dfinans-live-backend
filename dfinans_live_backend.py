@@ -4380,6 +4380,31 @@ def get_macro_risk_bias(symbol: str, action: str) -> Dict[str, Any]:
     return {"bias": max(-16, min(16, bias)), "notes": notes}
 
 
+def get_recent_move_exhaustion_bias(action: str, change_24h_pct: float) -> Dict[str, Any]:
+    """Kullanicinin talebi: bir varlik son 24 saatte zaten %2 ve uzeri hareket
+    ettiyse (yukselis yonunde ise BUY, dusus yonunde ise SELL icin), o yonde
+    YENI bir islem acmak 'gec kalinmis' (chasing) bir giris olabilir. Bu
+    yuzden hareketin yonuyle AYNI yondeki degerlendirmeye -10 puanlik bir
+    ceza uygulanir (ör. Apple zaten %2.97 arttiysa, yeni BUY degerlendirmesi
+    -10 puan alir). Ters yondeki (mean-reversion) sinyale dokunulmaz."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "note": ""}
+    move = abs(safe_float(change_24h_pct))
+    if move < 2.0:
+        return {"bias": 0, "note": ""}
+    direction = "BUY" if change_24h_pct > 0 else "SELL"
+    if action != direction:
+        return {"bias": 0, "note": ""}
+    verb = "yükseldi" if direction == "BUY" else "düştü"
+    return {
+        "bias": -10,
+        "note": (
+            f"Fiyat zaten son 24s'te %{move:.2f} {verb} - aynı yönde ({action}) "
+            f"yeni giriş geç kalınmış (chasing) olabilir: -10 puan."
+        ),
+    }
+
+
 
     """SP500 ve Dolar Endeksi'nin son 5 islem gunu momentumuna gore 'risk rejimi' belirler.
     Tarihsel analize gore (bkz. 5 yillik senaryo calismasi):
@@ -6175,6 +6200,11 @@ def _auto_trader_run_symbol(
         else:
             signal_order_flow_dir = "WAIT"
 
+    # 'Zaten cok hareket etti' (chasing) cezasi icin hem IBKR hem kripto
+    # tarafinda ayni degiskeni kullanacagiz - broker'a gore dogru 24s
+    # degisim yuzdesini tek bir isimde topluyoruz.
+    recent_move_pct = change if broker == "IBKR" else crypto_change
+
     # Korelasyon/lag/hedge motoru: fiyat gecmisine kaydet ve bu sembol icin
     # en guclu korele oldugu esin (peer) henuz takip edilmemis hareketi var mi bak.
     if price > 0:
@@ -6248,6 +6278,14 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + ext["bias"]))
         if ext["notes"]:
             reason = (reason + " " + " ".join(ext["notes"])).strip()
+
+        # Kullanicinin talebi: varlik son 24s'te zaten %2+ hareket ettiyse,
+        # ayni yondeki (chasing) BUY/SELL degerlendirmesine -10 puan uygula.
+        exhaustion = get_recent_move_exhaustion_bias(action, recent_move_pct)
+        if exhaustion["bias"] != 0:
+            confidence = max(0, min(95, confidence + exhaustion["bias"]))
+        if exhaustion["note"]:
+            reason = (reason + " " + exhaustion["note"]).strip()
 
         # Balon/asiri degerleme, bilanco sagligi, short/long pozisyonlanma-manipulasyon
         # ve sektorler arasi aktif senaryo analizini de karar mekanizmasina dahil et.
