@@ -90,6 +90,17 @@ struct TCBinanceSummary: Codable {
     let unrealized_pnl: Double
 }
 
+struct TCPortfolioTotals: Codable {
+    let cashTry: Double
+    let fundingTry: Double
+    let spotTry: Double
+    let futuresTry: Double
+    let binanceTry: Double
+    let ibkrTry: Double
+    let goldFxTry: Double
+    let totalTry: Double
+}
+
 struct TCPortfolioResponse: Codable {
     let last_update: String
     let live_trading: Bool
@@ -99,6 +110,7 @@ struct TCPortfolioResponse: Codable {
     let total_unrealized_pnl: Double
     let ibkr_connected: Bool?
     let ibkr_error: String?
+    let data: TCPortfolioTotals?
 }
 
 struct TCEngineStatus: Codable {
@@ -153,6 +165,7 @@ final class TradingCenterViewModel: ObservableObject {
     @Published var positions: [TCPosition] = []
     @Published var spotBalances: [TCSpotBalance] = []
     @Published var binanceSummary: TCBinanceSummary?
+    @Published var portfolioTotals: TCPortfolioTotals?
 
     @Published var quantityText: String = "0.01"
     @Published var statusText: String = "Backend bağlantısı bekleniyor."
@@ -241,27 +254,32 @@ final class TradingCenterViewModel: ObservableObject {
     }
 
     func loadPortfolio() async {
+        // Toplam portföy (Binance + IBKR TRY karşılığı) her zaman /portfolio üzerinden
+        // çekilir, seçili broker'a bakılmaksızın - aksi halde IBKR sekmesindeyken
+        // toplam bakiye kartı boş kalıyordu.
+        do {
+            let response: TCPortfolioResponse = try await get("/portfolio")
+            binanceSummary = response.binance_summary
+            portfolioTotals = response.data
+            if response.ibkr_connected == false, let ibkrErr = response.ibkr_error, !ibkrErr.isEmpty {
+                statusText = "Portföy güncellendi (IBKR: \(ibkrErr))"
+            }
+            if selectedBroker != "IBKR" {
+                positions = response.futures_positions.filter { $0.symbol != "HATA" }
+                spotBalances = response.spot_balances.filter { $0.asset != "HATA" }
+            }
+        } catch {
+            statusText = "Portföy alınamadı: \(error.localizedDescription)"
+        }
+
         if selectedBroker == "IBKR" {
             do {
                 let response: TCPositionsResponse = try await get("/ibkr/positions")
                 positions = response.positions.filter { $0.symbol != "HATA" }
                 spotBalances = []
-                binanceSummary = nil
             } catch {
                 statusText = "IBKR pozisyonları alınamadı: \(error.localizedDescription)"
             }
-            return
-        }
-        do {
-            let response: TCPortfolioResponse = try await get("/portfolio")
-            positions = response.futures_positions.filter { $0.symbol != "HATA" }
-            spotBalances = response.spot_balances.filter { $0.asset != "HATA" }
-            binanceSummary = response.binance_summary
-            if response.ibkr_connected == false, let ibkrErr = response.ibkr_error, !ibkrErr.isEmpty {
-                statusText = "Portföy güncellendi (IBKR: \(ibkrErr))"
-            }
-        } catch {
-            statusText = "Portföy alınamadı: \(error.localizedDescription)"
         }
     }
 
@@ -689,27 +707,42 @@ struct TradingCenterView: View {
                     .foregroundColor(.white.opacity(0.60))
             }
         }
+    }
 
-        private var balanceSummaryCard: some View {
-            card {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Binance Toplam")
-                        .font(.headline)
+    private var balanceSummaryCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Toplam Portföy")
+                    .font(.headline)
 
-                    if let summary = vm.binanceSummary {
-                        HStack(spacing: 10) {
-                            bigMetric(title: "Toplam", value: "\(formatNumber(summary.binance_total)) \(summary.currency)")
-                            bigMetric(title: "Spot", value: "\(formatNumber(summary.spot_total)) \(summary.currency)")
-                            bigMetric(title: "Futures", value: "\(formatNumber(summary.futures_total)) \(summary.currency)")
-                        }
+                if let totals = vm.portfolioTotals {
+                    HStack(spacing: 10) {
+                        bigMetric(title: "Genel Toplam", value: "\(formatNumber(totals.totalTry)) TRY")
+                        bigMetric(title: "Binance", value: "\(formatNumber(totals.binanceTry)) TRY")
+                        bigMetric(title: "IBKR", value: "\(formatNumber(totals.ibkrTry)) TRY")
+                    }
+                } else {
+                    emptyText("Toplam portföy bakiyesi henüz alınamadı.")
+                }
+
+                Divider().background(Color.white.opacity(0.15))
+
+                Text("Binance Detay")
+                    .font(.subheadline.bold())
+
+                if let summary = vm.binanceSummary {
+                    HStack(spacing: 10) {
+                        bigMetric(title: "Toplam", value: "\(formatNumber(summary.binance_total)) \(summary.currency)")
+                        bigMetric(title: "Spot", value: "\(formatNumber(summary.spot_total)) \(summary.currency)")
+                        bigMetric(title: "Futures", value: "\(formatNumber(summary.futures_total)) \(summary.currency)")
+                    }
+                } else {
+                    let fallbackTotal = vm.spotBalances.first(where: { $0.asset == "BINANCE_TRY_TOTAL" })?.total
+                    if let fallbackTotal {
+                        Text("\(formatNumber(fallbackTotal)) TRY_EQUIV")
+                            .font(.title3.monospacedDigit().bold())
                     } else {
-                        let fallbackTotal = vm.spotBalances.first(where: { $0.asset == "BINANCE_TRY_TOTAL" })?.total
-                        if let fallbackTotal {
-                            Text("\(formatNumber(fallbackTotal)) TRY_EQUIV")
-                                .font(.title3.monospacedDigit().bold())
-                        } else {
-                            emptyText("Toplam bakiye henüz alınamadı.")
-                        }
+                        emptyText("Toplam bakiye henüz alınamadı.")
                     }
                 }
             }
