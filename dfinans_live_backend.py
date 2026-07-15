@@ -9814,6 +9814,42 @@ def get_profit_summary() -> Dict[str, Any]:
     return result
 
 
+@app.route("/debug/force-tp-check", methods=["GET"])
+def debug_force_tp_check():
+    """GECICI teşhis endpoint'i: enforce_binance_take_profit() fonksiyonunu
+    hemen, dogrudan cagirir ve donen sonucu (veya None ise pozisyonlarin
+    guncel kar/zarar yuzdelerini) rapor eder. Neden bir pozisyon TP esigini
+    gecmesine ragmen kapanmadigini teshis etmek icin. Islem bitince bu
+    endpoint kaldirilacak."""
+    try:
+        positions_before = [
+            {
+                "symbol": p.get("symbol"),
+                "side": p.get("side"),
+                "size": p.get("size"),
+                "entry_price": p.get("entry_price"),
+                "mark_price": p.get("mark_price"),
+                "profit_pct_roi": round(binance_position_profit_pct(p), 4),
+                "ever_scaled": db_position_ever_scaled("BINANCE_FUTURES", str(p.get("symbol", "")).upper()),
+            }
+            for p in get_futures_positions()
+            if p.get("id") != "error" and str(p.get("symbol", "")).upper() != "HATA"
+        ]
+    except Exception as exc:
+        positions_before = f"error: {exc}"
+    try:
+        result = enforce_binance_take_profit(channel="debug_manual")
+    except Exception as exc:
+        result = {"exception": str(exc)}
+    return jsonify({
+        "positions_before": positions_before,
+        "tp_check_result": result,
+        "binance_take_profit_pct": BINANCE_TAKE_PROFIT_PCT,
+        "binance_scaled_take_profit_pct": BINANCE_SCALED_TAKE_PROFIT_PCT,
+        "ok": True,
+    })
+
+
 @app.route("/debug/leverage-probe", methods=["GET"])
 def debug_leverage_probe():
     """GECICI teşhis endpoint'i: Binance kaldirac ayarlamasinin neden hep 1x'te
