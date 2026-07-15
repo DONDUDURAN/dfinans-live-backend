@@ -420,6 +420,12 @@ MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "-500.0"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "5"))
 LAST_ORDER_TIME: Dict[str, float] = {}
 MIN_ORDER_COOLDOWN_SEC = float(os.getenv("MIN_ORDER_COOLDOWN_SEC", "2.0"))
+# Kullanicinin talebi: kar ozeti (/profit-summary) icin 'uygulamanin ilk gunu'
+# sabit olarak 1 Haziran 2026 kabul edilsin - position_closures tablosundaki
+# ilk kaydin tarihine (ki daha sonraki bir bug-fix tarihine denk gelebilir)
+# bagli kalmak yerine, kullanicinin gercekte kullanmaya basladigi tarih baz
+# alinir.
+APP_INCEPTION_DATE = os.getenv("APP_INCEPTION_DATE", "2026-06-01")
 BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "3.0"))
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "3.0"))
@@ -9510,7 +9516,10 @@ def get_profit_summary() -> Dict[str, Any]:
     kayitlarindan hesaplanir - IBKR'nin zorunlu (aracı kurum icin tutulan,
     gercek bir AI islem karari olmayan) hissesi varsayilan olarak haric
     tutulur, boylece rakam sadece GERCEK AI islemlerinin net karini yansitir."""
-    rows = db_all_position_closures(include_mandatory_holdings=False)
+    rows_all = db_all_position_closures(include_mandatory_holdings=False)
+    # 1 Haziran 2026 oncesi (varsa) kayitlar hesaba katilmiyor - kullanicinin
+    # talebi uygulamanin baslangic tarihini 1 Haziran kabul etmek.
+    rows = [r for r in rows_all if str(r.get("created_at", "")) >= APP_INCEPTION_DATE]
     now = datetime.now()
     today_key = now.strftime("%Y-%m-%d")
     month_key = now.strftime("%Y-%m")
@@ -9534,12 +9543,11 @@ def get_profit_summary() -> Dict[str, Any]:
 
     rate = get_live_usdtry_rate() or 0.0
     all_time = _bucket(rows)
-    first_trade_at = rows[0].get("created_at") if rows else None
 
     result = {
         "ok": True,
         "usdtry_rate": rate,
-        "since": first_trade_at,
+        "since": APP_INCEPTION_DATE,
         "daily": _bucket(today_rows),
         "monthly": _bucket(month_rows),
         "yearly": _bucket(year_rows),
