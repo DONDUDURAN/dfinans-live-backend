@@ -6499,17 +6499,28 @@ def _auto_trader_run_symbol(
                             qty = sized_qty
                 if price > 0 and qty * price < effective_min_position_usd(symbol, "FUTURES"):
                     min_pos_usd = effective_min_position_usd(symbol, "FUTURES")
-                    if available_usdt >= min_pos_usd:
+                    # Kullanicinin talebi: bakiye taban tutarin altinda kalsa bile,
+                    # kaldirac sayesinde o taban tutari acmaya YETECEK teminat varsa
+                    # (tam tutarin kendisi degil, kaldiraca bolunmus teminati kadari)
+                    # pozisyon acilsin. Onceden 'available_usdt >= min_pos_usd' (TAM
+                    # NOTIONEL tutari) araniyordu - bu, kaldiracin sagladigi teminat
+                    # avantajini tamamen yok sayiyordu (ornegin 28 USDT bakiye + 3x
+                    # kaldirac ile aslinda 50 USDT'lik pozisyon icin sadece ~16.7 USDT
+                    # teminat yeterliyken, bakiye 50'nin altinda diye islem hic
+                    # acilmiyordu). %10 tampon (fee/marj dalgalanmasi icin) ile
+                    # gercek gereken teminati kontrol ediyoruz.
+                    required_margin = (min_pos_usd / leverage) * 1.10 if leverage > 0 else min_pos_usd
+                    if available_usdt >= required_margin:
                         adj_qty = math.ceil((min_pos_usd / price) * 1000) / 1000.0
                         reason = (
                             reason
-                            + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: taban pozisyon tutarı {min_pos_usd:.0f}$ uygulandı.)"
+                            + f" (Miktar {qty} -> {adj_qty} olarak yükseltildi: taban pozisyon tutarı {min_pos_usd:.0f}$ uygulandı, x{leverage} kaldıraçla {required_margin:.2f} USDT teminat kullanıldı.)"
                         ).strip()
                         qty = adj_qty
                     else:
                         reason = (
                             reason
-                            + f" (İşlem atlandı: kullanılabilir bakiye {available_usdt:.2f} USDT, taban pozisyon tutarı {min_pos_usd:.0f}$'ın altında kaldı.)"
+                            + f" (İşlem atlandı: kullanılabilir bakiye {available_usdt:.2f} USDT, taban pozisyon tutarı {min_pos_usd:.0f}$ için x{leverage} kaldıraçla bile gereken ~{required_margin:.2f} USDT teminatın altında kaldı.)"
                         ).strip()
                         qty = 0
                 # AI'nin bu SELL/BUY karari mevcut acik bir futures pozisyonunu
