@@ -7968,7 +7968,7 @@ def get_live_usdtry_rate() -> float:
     return _USDTRY_RATE_CACHE.get("rate", 0.0)
 
 
-def get_binance_try_totals_live() -> Optional[Dict[str, float]]:
+def get_binance_try_totals_live(futures_positions: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, float]]:
     """Spot ve futures bakiyelerini VPS proxy'sinin HAM (TRY'ye cevrilmemis)
     endpoint'lerinden ceker, her varligi canli fiyatla USD'ye cevirir ve
     canli USDT/TRY kuruyla TRY'ye donusturur. VPS'in kendi hesap-ozeti
@@ -7990,6 +7990,18 @@ def get_binance_try_totals_live() -> Optional[Dict[str, float]]:
         futures_rows = _enrich_balances_with_usd(futures_rows, "FUTURES")
         spot_usd = sum(safe_float(r.get("usdValue")) for r in spot_rows if isinstance(r, dict))
         futures_usd = sum(safe_float(r.get("usdValue")) for r in futures_rows if isinstance(r, dict))
+        # Binance'in kendi uygulamasi "Futures" toplamini cuzdan bakiyesi +
+        # ACIK POZISYONLARIN gerceklesmemis kar/zarari (uPnL) olarak gosteriyor
+        # (marjin bakiyesi = wallet balance + unrealizedProfit). Onceden bu
+        # fonksiyon sadece /futures-balances'tan gelen ham varlik bakiyesini
+        # topluyordu, acik pozisyonlarin uPnL'i toplama hic dahil edilmiyordu -
+        # bu da kullanicinin gercek Binance uygulamasiyla karsilastirdiginda
+        # bakiyenin guncel/dogru gorunmemesine yol aciyordu.
+        if futures_positions:
+            futures_upnl_usd = sum(
+                safe_float(p.get("pnl")) for p in futures_positions if p.get("symbol") != "HATA"
+            )
+            futures_usd += futures_upnl_usd
         return {
             "spot_try": round(spot_usd * rate, 2),
             "futures_try": round(futures_usd * rate, 2),
@@ -8149,7 +8161,7 @@ def get_portfolio() -> Dict[str, Any]:
     # gercek bakiyeden belirgin sekilde dusuk gosterebiliyor (kullanicinin
     # kendi Binance uygulamasindaki gercek bakiyeyle karsilastirmasi bunu
     # dogruladi). Mumkunse canli kurla hesaplanan dogru toplami kullan.
-    live_totals = get_binance_try_totals_live()
+    live_totals = get_binance_try_totals_live(futures_positions)
     if live_totals and live_totals.get("total_try", 0.0) > 0:
         total_try = live_totals["total_try"]
         spot_try = live_totals["spot_try"]
@@ -9489,6 +9501,76 @@ def personal_cash_flow_endpoint():
         return jsonify(get_personal_cash_flow())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "current_total_try": 0.0, "time": now_text()}), 200
+
+
+def get_profit_summary() -> Dict[str, Any]:
+    """Kullanicinin 'uygulamanin ilk gununden beri ne kadar kazandim (gunluk/
+    aylik/yillik/tum-zamanlar)' sorusuna cevap verir. position_closures
+    tablosundaki (hicbir zaman silinmeyen) TUM gerceklesen kar/zarar
+    kayitlarindan hesaplanir - IBKR'nin zorunlu (aracı kurum icin tutulan,
+    gercek bir AI islem karari olmayan) hissesi varsayilan olarak haric
+    tutulur, boylece rakam sadece GERCEK AI islemlerinin net karini yansitir."""
+    rows = db_all_position_closures(include_mandatory_holdings=False)
+    now = datetime.now()
+    today_key = now.strftime("%Y-%m-%d")
+    month_key = now.strftime("%Y-%m")
+    year_key = now.strftime("%Y")
+
+    def _bucket(rows_subset: List[Dict[str, Any]]) -> Dict[str, Any]:
+        pnl_total = sum(safe_float(r.get("realized_pnl")) for r in rows_subset)
+        wins = [r for r in rows_subset if safe_float(r.get("realized_pnl")) > 0]
+        return {
+            "realized_pnl_usd": round(pnl_total, 2),
+            "trade_count": len(rows_subset),
+            "win_count": len(wins),
+        }
+
+    today_rows = [r for r in rows if str(r.get("created_at", "")).startswith(today_key)]
+    month_rows = [r for r in rows if str(r.get("created_at", "")).startswith(month_key)]
+    year_rows = [r for r in rows if str(r.get("created_at", "")).startswith(year_key)]
+
+    binance_rows = [r for r in rows if "BINANCE" in str(r.get("broker", "")).upper()]
+    ibkr_rows = [r for r in rows if "IBKR" in str(r.get("broker", "")).upper()]
+
+    rate = get_live_usdtry_rate() or 0.0
+    all_time = _bucket(rows)
+    first_trade_at = rows[0].get("created_at") if rows else None
+
+    result = {
+        "ok": True,
+        "usdtry_rate": rate,
+        "since": first_trade_at,
+        "daily": _bucket(today_rows),
+        "monthly": _bucket(month_rows),
+        "yearly": _bucket(year_rows),
+        "all_time": all_time,
+        "by_broker_all_time": {
+            "binance": _bucket(binance_rows),
+            "ibkr": _bucket(ibkr_rows),
+        },
+        "note": (
+            "Bu rakamlar sadece GERCEKLESEN (kapanmis) AI islem karini/zararini "
+            "gosterir; hala acik olan pozisyonlarin gerceklesmemis kar/zarari "
+            "dahil degildir. IBKR'nin zorunlu (islem yapmak icin tutulan) hissesi "
+            "haric tutulmustur."
+        ),
+        "time": now_text(),
+    }
+    if rate > 0:
+        for key in ("daily", "monthly", "yearly", "all_time"):
+            result[key]["realized_pnl_try"] = round(result[key]["realized_pnl_usd"] * rate, 2)
+    return result
+
+
+@app.route("/profit-summary", methods=["GET"])
+def profit_summary_endpoint():
+    """Mobil uygulamanin 'uygulamanin ilk gununden beri ne kadar kazandim'
+    ekraninda kullanacagi endpoint: gunluk/aylik/yillik/tum-zamanlar
+    gerceklesen kar-zarar ozetini (USD ve TRY) doner."""
+    try:
+        return jsonify(get_profit_summary())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
 
 
 @app.route("/portfolio", methods=["GET"])
