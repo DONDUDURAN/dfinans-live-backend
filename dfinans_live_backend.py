@@ -2701,15 +2701,33 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
             item = portfolio_by_key.get((pos.contract.secType, pos.contract.symbol, pos.account))
             mark_price = safe_float(getattr(item, "marketPrice", 0.0)) if item else 0.0
             pnl = safe_float(getattr(item, "unrealizedPNL", 0.0)) if item else 0.0
-            if mark_price <= 0 and item is None:
-                # portfolio() bu pozisyonu icermiyorsa (nadir) canli fiyati
-                # dogrudan reqMktData ile cekmeyi dene.
+            if mark_price <= 0:
+                # Onceden bu fallback SADECE portfolio() pozisyonu hic
+                # icermiyorsa (item is None) calisiyordu. Ancak canlida
+                # goruldu ki item MEVCUT olabilir ama marketPrice alani 0
+                # donebiliyor (ornegin IBKR'in kendi streaming market data
+                # akisi o an icin bu sembole tik atmamissa - ozellikle
+                # mesai-disi/az islem goren semboller icin) - bu durumda
+                # kullanici portfoyde fiyatsiz/PnL'siz (0.0) pozisyonlar
+                # goruyordu. Artik item var/yok fark etmeksizin, mark_price
+                # 0 kaldigi surece canli fiyati dogrudan reqMktData ile
+                # cekmeyi deniyoruz.
                 try:
                     contract = pos.contract
                     ib.qualifyContracts(contract)
                     ticker = ib.reqMktData(contract, "", True, False)
                     ib.sleep(1.5)
                     mp = safe_float(ticker.marketPrice())
+                    if not (mp == mp and mp > 0):
+                        # marketPrice hala gelmediyse son/kapanis fiyatina (close)
+                        # veya bid/ask ortalamasina dus - mesai-disi sembollerde
+                        # marketPrice genelde bos kalir ama close/bid/ask dolu olur.
+                        mp = safe_float(ticker.close)
+                        if not (mp == mp and mp > 0):
+                            bid = safe_float(ticker.bid)
+                            ask = safe_float(ticker.ask)
+                            if bid > 0 and ask > 0:
+                                mp = (bid + ask) / 2.0
                     if mp == mp and mp > 0:
                         mark_price = mp
                         pnl = (mark_price - avg_cost) * qty
