@@ -427,8 +427,8 @@ IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
 # Kullanicinin talebi: bir pozisyon buyutulmus (piramitlenmis) ise, normal
 # (buyutulmemis) pozisyondan DAHA DUSUK bir kar yuzdesinde kapatilsin - boyut
 # arttigi icin risk de arttigindan kari daha erken realize etmek mantikli.
-BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "2.0"))
-IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "2.0"))
+BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "1.5"))
+IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.5"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
 # dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
