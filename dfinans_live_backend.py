@@ -2553,6 +2553,18 @@ def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, curren
     assert_ibkr_market_allowed(ex, cur, sym)
 
     if kind == "STK":
+        # LSE/SEHK gibi ABD-disi borsalar icin exchange dogrudan o borsaya
+        # (ör. "LSE") ayarlanirsa IBKR, emri o borsaya DOGRUDAN yonlendirir ve
+        # bu "direct routed order" oldugu icin Global Configuration >
+        # Precautionary Settings uyarisiyla (Error 10311) otomatik iptal
+        # edilir - kullaniciya "islem acildi" gibi loglanip bakiyede hic
+        # gorunmemesine yol acan bug buydu. Cozum: exchange'i SMART birakip
+        # gercek borsayi primaryExchange olarak vermek - IBKR akilli
+        # yonlendirme (smart routing) kullanir, dogrudan yonlendirme uyarisi
+        # tetiklenmez, ama sembol yine dogru borsadan (LSE/SEHK) dogru
+        # sekilde tanimlanir.
+        if ex and ex != "SMART":
+            return ibs.Stock(sym, "SMART", cur, primaryExchange=ex)
         return ibs.Stock(sym, ex, cur)
     if kind == "CRYPTO":
         if len(sym) < 6:
