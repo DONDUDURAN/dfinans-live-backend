@@ -9508,53 +9508,6 @@ def circuit_breaker_status():
         return jsonify({"triggered": False, "error": str(e), "time": now_text()}), 200
 
 
-@app.route("/debug/scaled-tp-check", methods=["GET"])
-def debug_scaled_tp_check():
-    """Gecici/salt-okunur teshis endpoint'i: hicbir islem yapmaz, sadece
-    su an acik olan pozisyonlardan hangilerinin daha once buyutulmus
-    (piramitlenmis) oldugunu ve yeni %1,5 kar esigine gore kapanmaya
-    aday olup olmadigini raporlar."""
-    try:
-        pf = get_portfolio()
-        results = []
-        for p in pf.get("futures_positions", []) or []:
-            symbol = p.get("symbol")
-            ever_scaled = db_position_ever_scaled("BINANCE_FUTURES", symbol)
-            pnl_pct = safe_float(p.get("pnl_pct"))
-            threshold = BINANCE_SCALED_TAKE_PROFIT_PCT if ever_scaled else BINANCE_TAKE_PROFIT_PCT
-            results.append({
-                "broker": "BINANCE_FUTURES", "symbol": symbol, "side": p.get("side"),
-                "pnl_pct": pnl_pct, "ever_scaled": ever_scaled,
-                "applicable_tp_threshold": threshold,
-                "would_close_now": pnl_pct >= threshold,
-            })
-        for p in pf.get("spot_positions", []) or []:
-            symbol = p.get("symbol")
-            ever_scaled = db_position_ever_scaled("BINANCE_SPOT", symbol)
-            pnl_pct = safe_float(p.get("pnl_pct"))
-            threshold = BINANCE_SCALED_TAKE_PROFIT_PCT if ever_scaled else BINANCE_TAKE_PROFIT_PCT
-            results.append({
-                "broker": "BINANCE_SPOT", "symbol": symbol, "side": p.get("side"),
-                "pnl_pct": pnl_pct, "ever_scaled": ever_scaled,
-                "applicable_tp_threshold": threshold,
-                "would_close_now": pnl_pct >= threshold,
-            })
-        for p in pf.get("ibkr_positions", []) or []:
-            symbol = p.get("symbol")
-            ever_scaled = db_position_ever_scaled("IBKR", symbol)
-            pnl_pct = safe_float(p.get("pnl_pct"))
-            threshold = IBKR_SCALED_TAKE_PROFIT_PCT if ever_scaled else IBKR_TAKE_PROFIT_PCT
-            results.append({
-                "broker": "IBKR", "symbol": symbol, "side": p.get("side"),
-                "pnl_pct": pnl_pct, "ever_scaled": ever_scaled,
-                "applicable_tp_threshold": threshold,
-                "would_close_now": pnl_pct >= threshold,
-            })
-        return jsonify({"ok": True, "positions": results, "time": now_text()})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 200
-
-
 @app.route("/positions", methods=["GET"])
 def positions():
     return jsonify({"positions": get_futures_positions(), "last_update": now_text()})
