@@ -442,14 +442,14 @@ SHADOW_WATCHLIST_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_WATCHLIST_TAKE_PROFIT
 SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT", "10.0"))
 SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
 SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "0.6"))
-BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "3.0"))
+BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "2.0"))
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "2.0"))
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
 # Kullanicinin talebi: bir pozisyon buyutulmus (piramitlenmis) ise, normal
 # (buyutulmemis) pozisyondan DAHA DUSUK bir kar yuzdesinde kapatilsin - boyut
 # arttigi icin risk de arttigindan kari daha erken realize etmek mantikli.
-BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "1.5"))
+BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "1.0"))
 IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.0"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
