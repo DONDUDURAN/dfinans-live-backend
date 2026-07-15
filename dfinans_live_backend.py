@@ -9814,6 +9814,53 @@ def get_profit_summary() -> Dict[str, Any]:
     return result
 
 
+@app.route("/debug/leverage-probe", methods=["GET"])
+def debug_leverage_probe():
+    """GECICI teşhis endpoint'i: Binance kaldirac ayarlamasinin neden hep 1x'te
+    kaldigini bulmak icin VPS proxy'sindeki olasi rota isimlerini dogru token ile
+    dener ve her birinin sonucunu/hatasini raporlar. Gercek emir gondermez,
+    sadece POST /fapi/v1/leverage benzeri bir ayar cagrisi yapar (Binance'te
+    zarasiz, sadece kaldirac degistirir). Islem bitince bu endpoint kaldirilacak."""
+    symbol = request.args.get("symbol", "ETHUSDT").upper()
+    candidates = [
+        "/binance/private/leverage",
+        "/binance/private/set-leverage",
+        "/binance/private/change-leverage",
+        "/binance/leverage",
+        "/leverage",
+        "/binance/private/futures/leverage",
+        "/binance/private/futures-leverage",
+    ]
+    results = {}
+    for path in candidates:
+        try:
+            data = _binance_proxy_request(
+                "POST", path,
+                json_body={"symbol": symbol, "leverage": 2},
+                base_url=BINANCE_ORDER_PROXY_BASE_URL,
+            )
+            results[path] = {"ok": True, "data": data}
+        except Exception as e:
+            results[path] = {"ok": False, "error": str(e)}
+
+    direct_error = None
+    try:
+        signed_request("POST", FUTURES_BASE, "/fapi/v1/leverage", {"symbol": symbol, "leverage": 2})
+        direct_ok = True
+    except Exception as e:
+        direct_ok = False
+        direct_error = str(e)
+
+    return jsonify({
+        "ok": True,
+        "symbol": symbol,
+        "proxy_base_url": BINANCE_ORDER_PROXY_BASE_URL,
+        "proxy_candidates": results,
+        "direct_signed_request": {"ok": direct_ok, "error": direct_error},
+        "time": now_text(),
+    })
+
+
 @app.route("/profit-summary", methods=["GET"])
 def profit_summary_endpoint():
     """Mobil uygulamanin 'uygulamanin ilk gununden beri ne kadar kazandim'
