@@ -4384,9 +4384,9 @@ def get_recent_move_exhaustion_bias(action: str, change_24h_pct: float) -> Dict[
     """Kullanicinin talebi: bir varlik son 24 saatte zaten %2 ve uzeri hareket
     ettiyse (yukselis yonunde ise BUY, dusus yonunde ise SELL icin), o yonde
     YENI bir islem acmak 'gec kalinmis' (chasing) bir giris olabilir. Bu
-    yuzden hareketin yonuyle AYNI yondeki degerlendirmeye -10 puanlik bir
+    yuzden hareketin yonuyle AYNI yondeki degerlendirmeye -20 puanlik bir
     ceza uygulanir (ör. Apple zaten %2.97 arttiysa, yeni BUY degerlendirmesi
-    -10 puan alir). Ters yondeki (mean-reversion) sinyale dokunulmaz."""
+    -20 puan alir). Ters yondeki (mean-reversion) sinyale dokunulmaz."""
     if action not in ("BUY", "SELL"):
         return {"bias": 0, "note": ""}
     move = abs(safe_float(change_24h_pct))
@@ -4397,10 +4397,10 @@ def get_recent_move_exhaustion_bias(action: str, change_24h_pct: float) -> Dict[
         return {"bias": 0, "note": ""}
     verb = "yükseldi" if direction == "BUY" else "düştü"
     return {
-        "bias": -10,
+        "bias": -20,
         "note": (
             f"Fiyat zaten son 24s'te %{move:.2f} {verb} - aynı yönde ({action}) "
-            f"yeni giriş geç kalınmış (chasing) olabilir: -10 puan."
+            f"yeni giriş geç kalınmış (chasing) olabilir: -20 puan."
         ),
     }
 
@@ -6280,7 +6280,7 @@ def _auto_trader_run_symbol(
             reason = (reason + " " + " ".join(ext["notes"])).strip()
 
         # Kullanicinin talebi: varlik son 24s'te zaten %2+ hareket ettiyse,
-        # ayni yondeki (chasing) BUY/SELL degerlendirmesine -10 puan uygula.
+        # ayni yondeki (chasing) BUY/SELL degerlendirmesine -20 puan uygula.
         exhaustion = get_recent_move_exhaustion_bias(action, recent_move_pct)
         if exhaustion["bias"] != 0:
             confidence = max(0, min(95, confidence + exhaustion["bias"]))
