@@ -413,6 +413,7 @@ IBKR_TASK_QUEUE: "queue.Queue" = queue.Queue()
 IBKR_JOB_STARTED_EPOCH: float = 0.0
 IBKR_WATCHDOG_STUCK_SEC = float(os.getenv("IBKR_WATCHDOG_STUCK_SEC", "90"))
 IBKR_WATCHDOG_THREAD_STARTED = False
+SHADOW_WATCHLIST_THREAD_STARTED = False
 
 # Risk management state
 DAILY_REALIZED_PNL = 0.0
@@ -426,6 +427,21 @@ MIN_ORDER_COOLDOWN_SEC = float(os.getenv("MIN_ORDER_COOLDOWN_SEC", "2.0"))
 # bagli kalmak yerine, kullanicinin gercekte kullanmaya basladigi tarih baz
 # alinir.
 APP_INCEPTION_DATE = os.getenv("APP_INCEPTION_DATE", "2026-06-01")
+# Kullanicinin talebi: ciddi fiyat hareketi olan (spekulatif/oynak) hisseler icin
+# AYRI bir izleme listesi - esas IBKR_AUTO_WATCHLIST'e KARISTIRILMAZ. Bu liste
+# icin GERCEK emir acilmaz, sadece 'bakiyenin en fazla %10'u ile bu hisselerde
+# islem yapsaydik kar eder miydik' sorusuna bir hafta boyunca sanal (paper)
+# takiple cevap aranir.
+SHADOW_WATCHLIST_ENABLED = os.getenv("SHADOW_WATCHLIST_ENABLED", "true").lower() == "true"
+SHADOW_WATCHLIST_SYMBOLS = _parse_symbol_list(os.getenv(
+    "SHADOW_WATCHLIST_SYMBOLS",
+    "PLTR,SMCI,MSTR,COIN,MARA,RIOT,TQQQ,SQQQ,SOXL,MRNA,SAVA,NVAX,GME,AMC",
+))
+SHADOW_WATCHLIST_POSITION_PCT = float(os.getenv("SHADOW_WATCHLIST_POSITION_PCT", "10.0"))
+SHADOW_WATCHLIST_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_WATCHLIST_TAKE_PROFIT_PCT", "3.0"))
+SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT", "4.0"))
+SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
+SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "0.6"))
 BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "3.0"))
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "3.0"))
@@ -655,6 +671,42 @@ def init_runtime_db() -> None:
                     order_date TEXT NOT NULL,
                     last_order_at TEXT NOT NULL,
                     PRIMARY KEY (broker, symbol, order_date)
+                )
+                """
+            )
+            # Kullanicinin talebi: ciddi fiyat hareketi olan (spekulatif) hisseler
+            # icin AYRI bir izleme listesi - GERCEK emir acilmaz, sadece 'eger bu
+            # hisselerde bakiyenin en fazla %10'u ile islem yapsaydik kar eder
+            # miydik' sorusunu bir hafta boyunca gozlemlemek icin sanal (paper)
+            # pozisyon takibi yapilir.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shadow_watchlist_positions (
+                    symbol TEXT PRIMARY KEY,
+                    side TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    notional_usd REAL NOT NULL,
+                    entry_time TEXT NOT NULL,
+                    entry_reason TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shadow_watchlist_closures (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL NOT NULL,
+                    notional_usd REAL NOT NULL,
+                    realized_pnl_usd REAL NOT NULL,
+                    realized_pnl_pct REAL NOT NULL,
+                    entry_time TEXT NOT NULL,
+                    close_reason TEXT NOT NULL
                 )
                 """
             )
@@ -900,6 +952,101 @@ def db_clear_position_add_log(broker: str, symbol: str) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def db_shadow_get_position(symbol: str) -> Optional[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT * FROM shadow_watchlist_positions WHERE symbol = ?", (symbol,)
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row else None
+
+
+def db_shadow_all_positions() -> List[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT * FROM shadow_watchlist_positions ORDER BY entry_time DESC"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def db_shadow_open_position(
+    symbol: str, side: str, qty: float, entry_price: float, notional_usd: float, entry_reason: str
+) -> None:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO shadow_watchlist_positions
+                    (symbol, side, qty, entry_price, notional_usd, entry_time, entry_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (symbol, side, qty, entry_price, notional_usd, now_text(), entry_reason),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_shadow_close_position(
+    symbol: str, exit_price: float, realized_pnl_usd: float, realized_pnl_pct: float, close_reason: str
+) -> None:
+    pos = db_shadow_get_position(symbol)
+    if not pos:
+        return
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO shadow_watchlist_closures
+                    (id, created_at, symbol, side, qty, entry_price, exit_price, notional_usd,
+                     realized_pnl_usd, realized_pnl_pct, entry_time, close_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"{symbol}-{int(time.time() * 1000)}",
+                    now_text(),
+                    symbol,
+                    pos["side"],
+                    pos["qty"],
+                    pos["entry_price"],
+                    exit_price,
+                    pos["notional_usd"],
+                    realized_pnl_usd,
+                    realized_pnl_pct,
+                    pos["entry_time"],
+                    close_reason,
+                ),
+            )
+            conn.execute("DELETE FROM shadow_watchlist_positions WHERE symbol = ?", (symbol,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_shadow_all_closures() -> List[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT * FROM shadow_watchlist_closures ORDER BY created_at ASC"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
 
 
 def db_chain_order_today(broker: str, symbol: str) -> bool:
@@ -6807,8 +6954,101 @@ def _auto_trader_loop():
         time.sleep(1.0)
 
 
+def get_total_account_usd() -> float:
+    """Binance + IBKR toplam hesap degerini (TRY) canli kurla USD'ye cevirir.
+    Shadow watchlist sanal pozisyon boyutlandirmasi (bakiyenin en fazla %X'i)
+    icin kullanilir."""
+    try:
+        pf = get_cached_portfolio() or get_portfolio()
+        total_try = safe_float((pf.get("data") or {}).get("totalTry"))
+        rate = get_live_usdtry_rate() or 0.0
+        if total_try > 0 and rate > 0:
+            return total_try / rate
+    except Exception:
+        pass
+    return 0.0
+
+
+def shadow_watchlist_cycle() -> None:
+    """Kullanicinin talebi: ciddi fiyat hareketi olan (spekulatif) hisseler icin
+    GERCEK emir acmadan, 'bakiyenin en fazla %10'u ile bu hisselerde islem
+    yapsaydik kar eder miydik' sorusuna sanal (paper) pozisyon takibiyle cevap
+    arar. Esas IBKR_AUTO_WATCHLIST'ten tamamen bagimsizdir, hicbir gercek emir
+    gondermez - sadece shadow_watchlist_positions/closures tablolarina yazar."""
+    if not SHADOW_WATCHLIST_ENABLED or not SHADOW_WATCHLIST_SYMBOLS:
+        return
+    if not IBKR_RUNTIME.get("connected"):
+        return
+    total_usd = get_total_account_usd()
+    for symbol in SHADOW_WATCHLIST_SYMBOLS:
+        try:
+            market_info = get_ibkr_symbol_market_info(symbol)
+            snap = ibkr_market_snapshot(symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"))
+            price = safe_float(snap.get("price"))
+            if price <= 0:
+                continue
+            change = safe_float(snap.get("change_24h"))
+            order_flow = str(snap.get("order_flow_signal", "NEUTRAL")).upper()
+
+            existing = db_shadow_get_position(symbol)
+            if existing:
+                entry_price = safe_float(existing.get("entry_price"))
+                side = str(existing.get("side"))
+                qty = safe_float(existing.get("qty"))
+                notional_usd = safe_float(existing.get("notional_usd"))
+                if entry_price <= 0:
+                    continue
+                if side == "LONG":
+                    pnl_pct = ((price - entry_price) / entry_price) * 100.0
+                else:
+                    pnl_pct = ((entry_price - price) / entry_price) * 100.0
+                pnl_usd = notional_usd * (pnl_pct / 100.0)
+                close_reason = None
+                if pnl_pct >= SHADOW_WATCHLIST_TAKE_PROFIT_PCT:
+                    close_reason = "TAKE_PROFIT"
+                elif pnl_pct <= -SHADOW_WATCHLIST_STOP_LOSS_PCT:
+                    close_reason = "STOP_LOSS"
+                if close_reason:
+                    db_shadow_close_position(symbol, price, round(pnl_usd, 4), round(pnl_pct, 3), close_reason)
+                continue
+
+            # Henuz sanal pozisyon yok - IBKR auto-trader ile ayni iki-bagimsiz-
+            # sinyal (momentum + emir akisi) mantigiyla giris karari verilir.
+            momentum_signal = "WAIT"
+            if change > SHADOW_WATCHLIST_MIN_CHANGE_PCT:
+                momentum_signal = "BUY"
+            elif change < -SHADOW_WATCHLIST_MIN_CHANGE_PCT:
+                momentum_signal = "SELL"
+            if momentum_signal in ("BUY", "SELL") and order_flow in ("BUY", "SELL") and momentum_signal != order_flow:
+                continue  # celiskili sinyal, giris yok
+            action = momentum_signal if momentum_signal in ("BUY", "SELL") else (order_flow if order_flow in ("BUY", "SELL") else "WAIT")
+            if action not in ("BUY", "SELL"):
+                continue
+            if total_usd <= 0:
+                continue
+            notional_usd = total_usd * (SHADOW_WATCHLIST_POSITION_PCT / 100.0)
+            qty = notional_usd / price
+            side = "LONG" if action == "BUY" else "SHORT"
+            reason = (
+                f"Sanal giris: momentum {momentum_signal} (24s degisim %{change:.2f}), "
+                f"emir akisi {order_flow}."
+            )
+            db_shadow_open_position(symbol, side, qty, price, round(notional_usd, 2), reason)
+        except Exception:
+            continue
+
+
+def _shadow_watchlist_loop() -> None:
+    while True:
+        try:
+            shadow_watchlist_cycle()
+        except Exception:
+            pass
+        time.sleep(max(15, SHADOW_WATCHLIST_INTERVAL_SEC))
+
+
 def start_background_workers_once():
-    global KEEPALIVE_THREAD_STARTED, AUTO_THREAD_STARTED, IBKR_WORKER_THREAD_STARTED, IBKR_WATCHDOG_THREAD_STARTED
+    global KEEPALIVE_THREAD_STARTED, AUTO_THREAD_STARTED, IBKR_WORKER_THREAD_STARTED, IBKR_WATCHDOG_THREAD_STARTED, SHADOW_WATCHLIST_THREAD_STARTED
     if not IBKR_WORKER_THREAD_STARTED:
         t0 = threading.Thread(target=_ibkr_worker_thread_main, daemon=True)
         t0.start()
@@ -6825,6 +7065,10 @@ def start_background_workers_once():
         t3 = threading.Thread(target=_ibkr_stuck_watchdog_loop, daemon=True)
         t3.start()
         IBKR_WATCHDOG_THREAD_STARTED = True
+    if not SHADOW_WATCHLIST_THREAD_STARTED:
+        t4 = threading.Thread(target=_shadow_watchlist_loop, daemon=True)
+        t4.start()
+        SHADOW_WATCHLIST_THREAD_STARTED = True
 
 
 def get_24h(symbol: str, market: str) -> Dict[str, Any]:
@@ -9577,6 +9821,88 @@ def profit_summary_endpoint():
     gerceklesen kar-zarar ozetini (USD ve TRY) doner."""
     try:
         return jsonify(get_profit_summary())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
+
+
+@app.route("/shadow-watchlist/status", methods=["GET"])
+def shadow_watchlist_status_endpoint():
+    """Ciddi fiyat hareketi olan (spekulatif) hisseler icin sanal (paper) izleme
+    listesinin anlik durumu: hangi semboller takip ediliyor, su an acik olan
+    sanal pozisyonlar ve gerceklesmemis kar/zararlari. GERCEK emir yoktur."""
+    try:
+        positions = db_shadow_all_positions()
+        rows = []
+        for pos in positions:
+            symbol = pos.get("symbol")
+            try:
+                market_info = get_ibkr_symbol_market_info(symbol)
+                snap = ibkr_market_snapshot(symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"))
+                price = safe_float(snap.get("price"))
+            except Exception:
+                price = 0.0
+            entry_price = safe_float(pos.get("entry_price"))
+            side = pos.get("side")
+            notional_usd = safe_float(pos.get("notional_usd"))
+            pnl_pct = 0.0
+            if entry_price > 0 and price > 0:
+                if side == "LONG":
+                    pnl_pct = ((price - entry_price) / entry_price) * 100.0
+                else:
+                    pnl_pct = ((entry_price - price) / entry_price) * 100.0
+            rows.append({
+                "symbol": symbol,
+                "side": side,
+                "entry_price": entry_price,
+                "current_price": price,
+                "notional_usd": notional_usd,
+                "unrealized_pnl_usd": round(notional_usd * (pnl_pct / 100.0), 2),
+                "unrealized_pnl_pct": round(pnl_pct, 3),
+                "entry_time": pos.get("entry_time"),
+                "entry_reason": pos.get("entry_reason"),
+            })
+        return jsonify({
+            "ok": True,
+            "enabled": SHADOW_WATCHLIST_ENABLED,
+            "watchlist_symbols": SHADOW_WATCHLIST_SYMBOLS,
+            "position_size_pct_of_balance": SHADOW_WATCHLIST_POSITION_PCT,
+            "open_positions": rows,
+            "note": "Bu liste GERCEK emir acmaz, sadece sanal (paper) takip yapar.",
+            "time": now_text(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
+
+
+@app.route("/shadow-watchlist/results", methods=["GET"])
+def shadow_watchlist_results_endpoint():
+    """Ciddi fiyat hareketi olan (spekulatif) hisseler icin sanal takibin
+    SONUCLARINI (kapanmis sanal islemler + toplam kar/zarar, kazanma orani)
+    doner - kullanicinin 'bir hafta sonra sonuclara bakariz' talebi icin."""
+    try:
+        closures = db_shadow_all_closures()
+        total_pnl = sum(safe_float(c.get("realized_pnl_usd")) for c in closures)
+        wins = [c for c in closures if safe_float(c.get("realized_pnl_usd")) > 0]
+        first_entry = closures[0].get("entry_time") if closures else None
+        by_symbol: Dict[str, Dict[str, Any]] = {}
+        for c in closures:
+            sym = c.get("symbol")
+            by_symbol.setdefault(sym, {"trade_count": 0, "realized_pnl_usd": 0.0})
+            by_symbol[sym]["trade_count"] += 1
+            by_symbol[sym]["realized_pnl_usd"] = round(
+                by_symbol[sym]["realized_pnl_usd"] + safe_float(c.get("realized_pnl_usd")), 2
+            )
+        return jsonify({
+            "ok": True,
+            "tracking_since": first_entry,
+            "total_realized_pnl_usd": round(total_pnl, 2),
+            "trade_count": len(closures),
+            "win_count": len(wins),
+            "win_rate_pct": round((len(wins) / len(closures) * 100.0), 1) if closures else 0.0,
+            "by_symbol": by_symbol,
+            "closures": closures,
+            "time": now_text(),
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
 
