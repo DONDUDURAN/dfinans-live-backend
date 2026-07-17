@@ -3045,6 +3045,7 @@ def ibkr_place_market_order(
     exchange: str,
     currency: str,
     request_id: Optional[str] = None,
+    allow_fractional: bool = False,
 ) -> Dict[str, Any]:
     def _run(ib, ibs):
         if quantity <= 0:
@@ -3059,7 +3060,15 @@ def ibkr_place_market_order(
             raise RuntimeError("IBKR contract doğrulanamadı.")
         order = ibs.MarketOrder(order_side, quantity)
         order.tif = "DAY"
-        order.outsideRth = True
+        # IBKR kesirli hisse (fractional share) emirleri SADECE normal seans
+        # saatlerinde (RTH) kabul edilir - outsideRth=True ile birlikte
+        # gonderilirse "Error 10243: Fractional-sized order cannot be placed
+        # via API" hatasi alinir. Bu yuzden kesirli miktar gonderiliyorsa
+        # (allow_fractional=True, sadece ABD/SMART hisseleri icin kullanilir)
+        # outsideRth KAPATILIR; tam sayi miktarlarda eski davranis (mesai-disi
+        # da islem yapabilme) korunur.
+        is_fractional_qty = abs(quantity - round(quantity)) > 1e-9
+        order.outsideRth = not (allow_fractional and is_fractional_qty)
         if IBKR_ACCOUNT:
             order.account = IBKR_ACCOUNT
         trade = ib.placeOrder(qualified[0], order)
@@ -6512,44 +6521,86 @@ def _auto_trader_run_symbol(
                     # miktar artik tam sayiya (whole share) yuvarlaniyor - eskiden kesirli
                     # birakiliyordu ve bu, asla kapatilamayan "askida" pozisyonlara
                     # (ornegin 0.0952 IBKR, 0.8682 AMD) yol aciyordu.
+                    #
+                    # GUNCELLEME (kullanicinin talebi): Error 10243'un asil sebebi kesirli
+                    # emirlerin outsideRth=True ile gonderilmesiydi - IBKR kesirli hisse
+                    # emirlerini SADECE normal seans saatlerinde (RTH) kabul eder. Bu artik
+                    # ibkr_place_market_order icinde duzeltildi (kesirli miktarda outsideRth
+                    # otomatik kapatiliyor). Bu sayede SADECE ABD (SMART) hisselerinde -
+                    # LSE/SEHK gibi yabanci borsalarda DEGIL, kullanicinin talebiyle - ve
+                    # SADECE normal seans saatleri icindeyken, 1 tam hisseye yetecek kadar
+                    # fon olmadiginda kesirli (ör. %20-%30 hisse) emir gonderilebilir.
+                    ibkr_fractional_order = False
+                    ibkr_allow_fractional_here = (
+                        exchange == "SMART" and not _is_outside_regular_trading_hours(exchange)
+                    )
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
                         needed = qty * price
                         safe_budget = available_funds * 0.8
                         if available_funds > 0 and needed > safe_budget:
-                            affordable_qty = math.floor(safe_budget / price)
-                            if affordable_qty < 1:
-                                execution = {
-                                    "simulated": False,
-                                    "broker": "IBKR",
-                                    "symbol": symbol,
-                                    "side": action,
-                                    "quantity": 0,
-                                    "error": (
-                                        f"Yetersiz alım gücü: kullanılabilir fon {available_funds:.2f} USD, "
-                                        f"1 hisse dahi karşılamıyor. Emir gönderilmedi."
-                                    ),
-                                    "time": now_text(),
-                                }
-                                qty = 0
-                            else:
+                            if ibkr_allow_fractional_here and safe_budget >= 1.0:
+                                fractional_qty = math.floor((safe_budget / price) * 10000) / 10000.0
                                 reason = (
                                     reason
-                                    + f" (Miktar {qty} -> {affordable_qty} olarak düşürüldü (tam sayı): kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
+                                    + f" (Miktar {qty} -> {fractional_qty} olarak düşürüldü (kesirli hisse, ABD/SMART + normal seans): "
+                                    f"kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
                                 ).strip()
-                                qty = affordable_qty
+                                qty = fractional_qty
+                                ibkr_fractional_order = True
+                            else:
+                                affordable_qty = math.floor(safe_budget / price)
+                                if affordable_qty < 1:
+                                    execution = {
+                                        "simulated": False,
+                                        "broker": "IBKR",
+                                        "symbol": symbol,
+                                        "side": action,
+                                        "quantity": 0,
+                                        "error": (
+                                            f"Yetersiz alım gücü: kullanılabilir fon {available_funds:.2f} USD, "
+                                            f"1 hisse dahi karşılamıyor. Emir gönderilmedi."
+                                        ),
+                                        "time": now_text(),
+                                    }
+                                    qty = 0
+                                else:
+                                    reason = (
+                                        reason
+                                        + f" (Miktar {qty} -> {affordable_qty} olarak düşürüldü (tam sayı): kullanılabilir fon {available_funds:.2f} USD ile sınırlı.)"
+                                    ).strip()
+                                    qty = affordable_qty
                         else:
                             qty = math.floor(qty)
                             if qty < 1:
-                                execution = {
-                                    "simulated": False,
-                                    "broker": "IBKR",
-                                    "symbol": symbol,
-                                    "side": action,
-                                    "quantity": 0,
-                                    "error": "IBKR API kesirli hisse emrini desteklemiyor, miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
-                                    "time": now_text(),
-                                }
+                                if ibkr_allow_fractional_here:
+                                    # Zaten hedeflenen miktar 1 hisseden kucuk (ör. AI
+                                    # 0.3 hisselik bir tutar hesaplamis) - fon yeterliyse
+                                    # dogrudan kesirli emir gonder, hatayla iptal etme.
+                                    fractional_qty = math.floor((base_qty if base_qty > 0 else qty) * 10000) / 10000.0
+                                    if fractional_qty > 0 and fractional_qty * price <= safe_budget + 1e-9:
+                                        qty = fractional_qty
+                                        ibkr_fractional_order = True
+                                    else:
+                                        execution = {
+                                            "simulated": False,
+                                            "broker": "IBKR",
+                                            "symbol": symbol,
+                                            "side": action,
+                                            "quantity": 0,
+                                            "error": "IBKR API kesirli hisse emrini desteklemiyor (mesai-dışı ya da fon yetersiz), miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
+                                            "time": now_text(),
+                                        }
+                                else:
+                                    execution = {
+                                        "simulated": False,
+                                        "broker": "IBKR",
+                                        "symbol": symbol,
+                                        "side": action,
+                                        "quantity": 0,
+                                        "error": "IBKR API kesirli hisse emrini desteklemiyor, miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
+                                        "time": now_text(),
+                                    }
                     # Ayni yonde (LONG) mevcut acik pozisyon uzerine ekleme (piramitleme)
                     # yapiliyor mu kontrol et - kullanicinin talebi: ayni yonde ekleme
                     # sembol basina gunde en fazla 1 kez yapilabilir.
@@ -6662,7 +6713,10 @@ def _auto_trader_run_symbol(
                                 ).strip()
                             elif fx_result.get("error"):
                                 reason = (reason + f" (FX cevrim uyarisi: {fx_result['error']})").strip()
-                        execution = ibkr_place_market_order(symbol, action, qty, asset_type, exchange, currency)
+                        execution = ibkr_place_market_order(
+                            symbol, action, qty, asset_type, exchange, currency,
+                            allow_fractional=ibkr_fractional_order,
+                        )
                         # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
                         # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
                         # cache'i temizliyoruz.
