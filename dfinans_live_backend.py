@@ -3857,6 +3857,85 @@ def get_earnings_calendar_bias(symbol: str, action: str) -> Dict[str, Any]:
     return {"bias": max(-8, min(8, bias)), "notes": notes}
 
 
+def get_earnings_surprise_reaction_bias(symbol: str, action: str, asset_type: str, exchange: str, currency: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'TSMC bugun iyi bilanço açıkladı ama fiyat düştü, tüm
+    sektörü hatta ABD endekslerini de düşürdü - piyasa bunu nasıl fiyatlıyor,
+    geriye dönük bak sisteme'. Bu, klasik 'bilançoyu al, haberi sat' (sell the
+    news) ya da rakamlar iyi olsa bile gelecek çeyrek beklentisinin/marj
+    görünümünün (guidance) zayıf olması örüntüsüdür - EPS rakamı tek başına
+    piyasanın gerçek tepkisini açıklamıyor. Bu fonksiyon yfinance'in
+    earnings_dates verisinden (EPS Estimate/Reported EPS/Surprise%) en son
+    GEÇMİŞ kazanç açıklamasını bulup, o açıklamadan bu yana GERÇEK fiyat
+    hareketiyle EPS surprise yönünü karşılaştırır:
+      - Bilanço İYİ (surprise >= 0) ama fiyat DÜŞTÜYSE (>= %1.5): piyasa
+        rakamların ötesinde bir şeye (guidance, marj, sektörel/makro baskı)
+        tepki veriyor demektir - rakamların iyi olmasına güvenip hemen alım
+        yapmak riskli olabilir, bu yüzden BUY'a karşı hafifçe SELL'i destekler.
+      - Bilanço KÖTÜ (surprise < 0) ama fiyat YÜKSELDİYSE (>= %1.5): piyasa
+        kötü rakamı zaten fiyatlamış/önemsememiş demektir - BUY'ı hafifçe
+        destekler.
+      - Yön uyumluysa (bilanço iyi + fiyat yükselmiş, ya da bilanço kötü +
+        fiyat düşmüş) nötrdür - normal/beklenen tepki, ekstra bias verilmez.
+    Sadece son 5 iş günü içindeki bir açıklama için geçerlidir (daha eskisi
+    zaten fiyata gömülmüştür). Sadece IBKR (hisse) sembolleri için anlamlıdır."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+    try:
+        def _fetch():
+            import yfinance as yf
+            df = yf.Ticker(to_yfinance_symbol(symbol)).earnings_dates
+            if df is None or df.empty:
+                raise RuntimeError(f"{symbol} için kazanç sürpriz verisi bulunamadı.")
+            df = df.dropna(subset=["Reported EPS"])
+            if df.empty:
+                raise RuntimeError(f"{symbol} için açıklanmış kazanç kaydı yok.")
+            df = df.sort_index(ascending=False)
+            latest = df.iloc[0]
+            latest_date = df.index[0]
+            return {
+                "symbol": symbol,
+                "earnings_date": str(latest_date.date()),
+                "surprise_pct": safe_float(latest.get("Surprise(%)")),
+                "time": now_text(),
+            }
+        earnings = _cache_get_or_fetch(f"earnings_surprise:{symbol}", 21600, _fetch)
+        if earnings.get("error"):
+            return {"bias": 0, "notes": []}
+        earnings_date = datetime.strptime(earnings["earnings_date"], "%Y-%m-%d")
+        days_since = (datetime.now() - earnings_date).days
+        if days_since < 0 or days_since > 5:
+            return {"bias": 0, "notes": []}
+        surprise_pct = safe_float(earnings.get("surprise_pct"))
+
+        bars = get_ibkr_daily_bars(symbol, asset_type, exchange, currency, num_days=10)
+        closes = [b["close"] for b in bars if b.get("close", 0) > 0]
+        if len(closes) < 2:
+            return {"bias": 0, "notes": []}
+        idx_from_end = max(1, min(len(closes) - 1, days_since if days_since > 0 else 1))
+        ref_idx = len(closes) - 1 - idx_from_end
+        ref_price = closes[ref_idx] if ref_idx >= 0 else closes[0]
+        current_price = closes[-1]
+        price_change_pct = ((current_price - ref_price) / ref_price * 100.0) if ref_price else 0.0
+
+        bias = 0
+        notes: List[str] = []
+        if surprise_pct >= 0 and price_change_pct <= -1.5:
+            bias += 6 if action == "SELL" else -6
+            notes.append(
+                f"{symbol} bilançoda beklentiyi %{surprise_pct:.1f} aştı ama açıklamadan bu yana fiyat %{price_change_pct:.1f} düştü: "
+                f"piyasa rakamların ötesinde (guidance/marj/sektörel baskı) olumsuz bir şey fiyatlıyor olabilir, temkinli olunmalı."
+            )
+        elif surprise_pct < 0 and price_change_pct >= 1.5:
+            bias += 6 if action == "BUY" else -6
+            notes.append(
+                f"{symbol} bilançoda beklentiyi %{abs(surprise_pct):.1f} kaçırdı ama fiyat açıklamadan bu yana %{price_change_pct:.1f} yükseldi: "
+                f"piyasa kötü rakamı zaten fiyatlamış/önemsememiş görünüyor."
+            )
+        return {"bias": max(-6, min(6, bias)), "notes": notes}
+    except Exception:
+        return {"bias": 0, "notes": []}
+
+
 def get_google_trends_signal(keyword: str = "bitcoin") -> Dict[str, Any]:
     """Google Trends (pytrends, resmi olmayan/gayri-resmi kutuphane) uzerinden ani arama
     ilgisi artisini tespit eder. Bu servis resmi API olmadigi ve sunucu ortamlarinda siklikla
@@ -6528,6 +6607,16 @@ def _auto_trader_run_symbol(
                 confidence = max(0, min(95, confidence + earnings["bias"]))
             if earnings["notes"]:
                 reason = (reason + " " + " ".join(earnings["notes"])).strip()
+
+            # Kullanicinin talebi: 'bilanço iyi ama fiyat düştü' (guidance/marj/
+            # sektörel baskı) örüntüsünü tespit et - geçmiş EPS surprise yönü ile
+            # gerçek fiyat tepkisi ters düşüyorsa bu, rakamların ötesinde bir
+            # şeyin fiyatlandığının işaretidir.
+            earnings_reaction = get_earnings_surprise_reaction_bias(symbol, action, asset_type, exchange, currency)
+            if earnings_reaction["bias"] != 0:
+                confidence = max(0, min(95, confidence + earnings_reaction["bias"]))
+            if earnings_reaction["notes"]:
+                reason = (reason + " " + " ".join(earnings_reaction["notes"])).strip()
 
             # Icerden kisi acik piyasa alim/satim yonu (Form 4, P/S kodlari) -
             # eski SEC sinyali sadece dosyalama SAYISINI (sicrama) sayiyordu,
