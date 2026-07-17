@@ -6856,7 +6856,7 @@ def _auto_trader_run_symbol(
                 if do_live:
                     ensure_binance_leverage(symbol, leverage)
                     if qty > 0:
-                        execution = place_futures_order(symbol, action, qty, reduce_only=False)
+                        execution = place_futures_order(symbol, action, qty, reduce_only=False, leverage=leverage)
                         if futures_is_position_add and not execution.get("error"):
                             db_log_position_add("BINANCE_FUTURES", symbol)
                         if pre_close_futures_position and not execution.get("error"):
@@ -8042,7 +8042,7 @@ def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_pri
         if broker == "BINANCE_FUTURES":
             leverage = 2
             ensure_binance_leverage(symbol, leverage)
-            execution = place_futures_order(symbol, direction, chain_qty, reduce_only=False, channel="chain_order")
+            execution = place_futures_order(symbol, direction, chain_qty, reduce_only=False, channel="chain_order", leverage=leverage)
         elif broker == "BINANCE_SPOT":
             min_pos_usd = effective_min_position_usd(symbol, "SPOT")
             notional = chain_qty * exit_price
@@ -9464,6 +9464,7 @@ def place_futures_order(
     request_id: Optional[str] = None,
     channel: str = "auto",
     use_proxy: bool = True,
+    leverage: Optional[int] = None,
 ) -> Dict[str, Any]:
     request_id = str(request_id or uuid.uuid4())
 
@@ -9588,6 +9589,18 @@ def place_futures_order(
             "request_id": request_id,
             "channel": channel,
         }
+        # DENEME (kullanicinin talebi: 'sen yaptin, tara/duzelt'): ayri bir
+        # '/binance/private/leverage' rotasi VPS proxy'sinde hep 404 donuyor
+        # (bkz. ensure_binance_leverage docstring) ama BU emir rotasi
+        # ('/binance/private/order') calisiyor - proxy her gercek emri
+        # basariyla yerine getiriyor. Proxy'nin kendi tarafinda emirden once
+        # leverage'i set edip etmedigini bilmiyoruz; payload'a ekstra bir
+        # 'leverage' alani eklemek (destekleniyorsa kaldiraci nihayet
+        # duzeltir, desteklenmiyorsa REST API'lerin standart davranisi geregi
+        # sessizce yok sayilir - regresyon riski yok) dusuk riskli bir
+        # deneme-yaniliş duzeltmesidir.
+        if leverage and leverage > 1 and not reduce_only:
+            payload["leverage"] = int(leverage)
         try:
             data = _binance_proxy_request("POST", "/binance/private/order", json_body=payload, base_url=BINANCE_ORDER_PROXY_BASE_URL)
             result = dict(data.get("result", data))
@@ -11523,6 +11536,7 @@ def _resolve_place_order_market(payload: Dict[str, Any]) -> Dict[str, Any]:
         result = place_futures_order(
             symbol, side, quantity,
             reduce_only=False, request_id=request_id, channel="manual",
+            leverage=leverage if leverage > 1 else None,
         )
         if result.get("error"):
             return {"ok": False, "error": result.get("error")}
