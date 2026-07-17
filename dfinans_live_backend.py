@@ -438,10 +438,21 @@ SHADOW_WATCHLIST_SYMBOLS = _parse_symbol_list(os.getenv(
     "PLTR,SMCI,MSTR,COIN,MARA,RIOT,TQQQ,SQQQ,SOXL,MRNA,SAVA,NVAX,GME,AMC",
 ))
 SHADOW_WATCHLIST_POSITION_PCT = float(os.getenv("SHADOW_WATCHLIST_POSITION_PCT", "10.0"))
-SHADOW_WATCHLIST_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_WATCHLIST_TAKE_PROFIT_PCT", "5.0"))
-SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT", "10.0"))
+# GUNCELLEME (kullanicinin talebi - performans kotu, ayarla): canli sonuclar
+# incelendiginde (bkz. /shadow-watchlist/results) 14 islemden 7'si kazandi
+# (%50 kazanma orani) ama STOP_LOSS'a takilan islemler ortalama -%14 kaybettiriyordu
+# (eski SL esigi %10 ama kontrol 60sn'de bir yapildigi icin oynak/kaldiracli
+# sembollerde (SOXL/TQQQ/SQQQ 3x ETF, MARA/RIOT/MSTR/COIN kripto-korelasyonlu)
+# fiyat esigi asip devam edebiliyordu), TAKE_PROFIT'e ulasan islemler ise
+# ortalama sadece +%7 kazandiriyordu - yani kazanc/kayip orani ~1:2 idi ve
+# %50 kazanma oranina ragmen toplam sonuc negatifti (-47.53 USD). Zarar-kes
+# esigi kar-al esigine yaklastirilarak (10 -> 6) risk/odul orani dengelendi;
+# ayrica giris esigi (0.6 -> 1.2) yukseltilerek zayif/gurultu seviyesindeki
+# hareketlerde acilan dusuk-kaliteli islemler azaltildi.
+SHADOW_WATCHLIST_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_WATCHLIST_TAKE_PROFIT_PCT", "6.0"))
+SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT", "6.0"))
 SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
-SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "0.6"))
+SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "1.2"))
 BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "2.0"))
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "2.0"))
