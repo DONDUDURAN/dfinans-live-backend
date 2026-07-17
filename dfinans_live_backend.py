@@ -466,6 +466,29 @@ IBKR_AI_SELL_MIN_LOSS_PCT = float(os.getenv("IBKR_AI_SELL_MIN_LOSS_PCT", "10.0")
 IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "3"))
 BINANCE_AI_SELL_MIN_LOSS_PCT = float(os.getenv("BINANCE_AI_SELL_MIN_LOSS_PCT", "10.0"))
 
+# Kullanicinin talebi: 'acigа satis islemi yapamiyor mu sistem, açığa satış
+# yapılabilecek hisselerde açığa satış denenebilir'. Onceden bu hesap SADECE
+# LONG islem yapiyordu - elde pozisyon yokken SELL sinyali geldiginde emir
+# hic gonderilmiyordu. Artik, asagidaki guvenlik sartlari saglandiginda kisa
+# satis (short sell) acilabilir:
+#  1) IBKR_SHORT_SELLING_ENABLED acik olmali (varsayilan: acik).
+#  2) Sembol, likit/kolay odunc alinabilir onceden onaylanmis bir ABD (SMART)
+#     hisse listesinde (IBKR_SHORTABLE_SYMBOLS) olmali - kucuk/az islem goren
+#     hisselerde odunc bulunamama veya "short squeeze" riski cok daha yuksek.
+#  3) Hesapta short icin IBKR_MIN_MARGIN_FOR_SHORT_USD uzerinde kullanilabilir
+#     teminat olmali, aksi halde IBKR Error 201 (yetersiz teminat) ile
+#     reddedilir.
+IBKR_SHORT_SELLING_ENABLED = os.getenv("IBKR_SHORT_SELLING_ENABLED", "true").lower() in ("1", "true", "yes")
+IBKR_SHORTABLE_SYMBOLS = set(
+    s.strip().upper()
+    for s in os.getenv(
+        "IBKR_SHORTABLE_SYMBOLS",
+        "AAPL,MSFT,NVDA,AMD,TSLA,GOOGL,AMZN,META,NFLX,INTC",
+    ).split(",")
+    if s.strip()
+)
+IBKR_MIN_MARGIN_FOR_SHORT_USD = float(os.getenv("IBKR_MIN_MARGIN_FOR_SHORT_USD", "5000.0"))
+
 # Varlik bazli pozisyon boyutlandirma: her BUY/SELL sinyalinde sabit miktar yerine,
 # bosta bekleyen (available) Binance futures USDT bakiyesinin belirli bir yuzdesi
 # kadar pozisyon acilir. BTC icin %25, ETH icin %20, diger tum varliklar icin %10
@@ -3478,6 +3501,8 @@ def get_insider_transaction_direction_signal(symbol: str) -> Dict[str, Any]:
         buy_count = 0
         sell_count = 0
         inspected = 0
+        most_recent_sell_date: Optional[str] = None
+        most_recent_sell_price = 0.0
         for date_str, accn, doc in candidates:
             try:
                 accn_nodash = accn.replace("-", "")
@@ -3504,6 +3529,14 @@ def get_insider_transaction_direction_signal(symbol: str) -> Dict[str, Any]:
                     elif code == "S":
                         sell_value += value
                         sell_count += 1
+                        # candidates SEC'ten en yeniden en eskiye siralı geldigi icin
+                        # (submissions JSON "recent" listesi bu sirada), ilk rastlanan
+                        # S kodu en guncel icerden satistir - insider-satis-sonrasi
+                        # toparlanma stratejisi (asagida get_insider_sell_reversal_bias)
+                        # icin bu tarih/fiyat referans noktasi olarak kullanilir.
+                        if most_recent_sell_date is None and price > 0:
+                            most_recent_sell_date = date_str
+                            most_recent_sell_price = price
             except Exception:
                 continue
 
@@ -3519,6 +3552,8 @@ def get_insider_transaction_direction_signal(symbol: str) -> Dict[str, Any]:
             "buy_value_usd": round(buy_value, 2),
             "sell_value_usd": round(sell_value, 2),
             "net_value_usd": round(net_value, 2),
+            "most_recent_sell_date": most_recent_sell_date,
+            "most_recent_sell_price": round(most_recent_sell_price, 4),
             "time": now_text(),
         }
     return _cache_get_or_fetch(f"sec_insider_direction:{symbol}", 21600, _fetch)
@@ -3566,6 +3601,89 @@ def get_insider_direction_bias(symbol: str, action: str) -> Dict[str, Any]:
         pass
 
     return {"bias": max(-9, min(9, bias)), "notes": notes}
+
+
+def get_insider_sell_reversal_bias(symbol: str, action: str, asset_type: str, exchange: str, currency: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'bazi donemlerde fiyat cok artinca patronlar pay satiyor,
+    fiyat dusunce dusukten alip tekrar yukseltiyor fiyati - boyle satislar yapilan
+    sirketlerin gecmiste benzer sekilde satis sonrasi fiyati tekrar yukseltip
+    yukseltmedigini analiz et, eger yukselmisse once short acariz, dusunce (dip'te)
+    aliriz/kapariz, sonra tekrar aliriz (long), yukselince satariz'.
+
+    Tam bir cok-yillik geriye-donuk backtest (SEC EDGAR + fiyat gecmisi es-zamanlamasi)
+    bu ortamda pratik degil (agir SEC/yfinance sorgusu + rate limit riski); bunun
+    yerine EN SON tespit edilen icerden satisin (Form 4, S kodu, get_insider_
+    transaction_direction_signal icinde tarih+fiyati kaydedilir) o gunku fiyatina
+    gore, o satistan bu yana fiyatin ne kadar dustugunu ve dipten ne kadar
+    toparlandigini olcup asagidaki 3 asamali dongude nerede oldugumuzu tahmin eder:
+      1) Satis COK YAKIN zamanda (<=3 is gunu) ve fiyat henuz belirgin dusmemis ->
+         dusus BEKLENIYOR: SELL'i destekler (kisa pozisyon acmak/agirlik vermek icin).
+      2) Satistan bu yana belirgin bir dusus (>= %4) olmus ama fiyat hala dip
+         civarinda (dipten toparlanma < %3) -> DIP: BUY'i destekler (short'u
+         kapatmak/long acmak icin).
+      3) Dusus sonrasi belirgin bir toparlanma (dipten >= %6) gerceklesmis ->
+         TOPARLANMA TAMAMLANMIS: SELL'i destekler (long'u satmak/tekrar short
+         icin agirlik vermek icin).
+    Sadece IBKR (hisse) sembolleri icin anlamlidir; kripto/ETF'lerde Form 4
+    verisi yok, sessizce notr doner (fail-open)."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+    try:
+        insider = get_insider_transaction_direction_signal(symbol)
+        if insider.get("error"):
+            return {"bias": 0, "notes": []}
+        sell_date_str = insider.get("most_recent_sell_date")
+        sell_price = safe_float(insider.get("most_recent_sell_price"))
+        if not sell_date_str or sell_price <= 0:
+            return {"bias": 0, "notes": []}
+        sell_date = datetime.strptime(sell_date_str, "%Y-%m-%d")
+        days_since_sell = (datetime.now() - sell_date).days
+        if days_since_sell < 0 or days_since_sell > 30:
+            return {"bias": 0, "notes": []}
+
+        bars = get_ibkr_daily_bars(symbol, asset_type, exchange, currency, num_days=35)
+        closes = [b["close"] for b in bars if b.get("close", 0) > 0]
+        if len(closes) < 3:
+            return {"bias": 0, "notes": []}
+        current_price = closes[-1]
+        # Bar dizisi eskiden-yeniye sirali; satis tarihine en yakin bari kaba
+        # takvim-gunu farkiyla (hafta sonlari nedeniyle bir miktar sapma
+        # olabilir, bu bir sezgisel yaklasim, kesin bir eslesme degildir) tahmin et.
+        idx_from_end = max(0, min(len(closes) - 1, days_since_sell))
+        sell_ref_idx = len(closes) - 1 - idx_from_end
+        window_since_sell = closes[sell_ref_idx:] if sell_ref_idx < len(closes) else [current_price]
+        dip_low = min(window_since_sell) if window_since_sell else current_price
+        base_price = sell_price if sell_price > 0 else window_since_sell[0]
+
+        drop_since_sell_pct = ((base_price - dip_low) / base_price * 100.0) if base_price else 0.0
+        recovery_from_dip_pct = ((current_price - dip_low) / dip_low * 100.0) if dip_low else 0.0
+
+        bias = 0
+        notes: List[str] = []
+        if days_since_sell <= 3 and drop_since_sell_pct < 2.0:
+            if action == "SELL":
+                bias += 10
+                notes.append(
+                    f"{symbol} için içerden satış çok yakın zamanda tespit edildi ({days_since_sell} iş günü önce, "
+                    f"${sell_price:.2f}'den) ve fiyat henüz düşmedi: geçmiş örüntüye göre düşüş beklenebilir, SELL'i destekler."
+                )
+        elif drop_since_sell_pct >= 4.0 and recovery_from_dip_pct < 3.0:
+            if action == "BUY":
+                bias += 10
+                notes.append(
+                    f"{symbol} içerden satıştan bu yana %{drop_since_sell_pct:.1f} düştü ve hâlâ dip civarında "
+                    f"(dipten toparlanma %{recovery_from_dip_pct:.1f}): geçmiş örüntüye göre dipten alım fırsatı, BUY'ı destekler."
+                )
+        elif drop_since_sell_pct >= 4.0 and recovery_from_dip_pct >= 6.0:
+            if action == "SELL":
+                bias += 8
+                notes.append(
+                    f"{symbol} içerden satış sonrası dip yapıp (%{drop_since_sell_pct:.1f} düşüş) dipten %{recovery_from_dip_pct:.1f} "
+                    f"toparlandı: geçmiş örüntüye göre toparlanma tamamlanmış olabilir, SELL'i destekler (kâr realizasyonu/tekrar short)."
+                )
+        return {"bias": max(-10, min(10, bias)), "notes": notes}
+    except Exception:
+        return {"bias": 0, "notes": []}
 
 
 def get_stock_specific_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
@@ -4237,6 +4355,48 @@ def get_macro_regime() -> Dict[str, Any]:
             "time": now_text(),
         }
     return _cache_get_or_fetch("macro_regime", 14400, _fetch)
+
+
+def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'genel piyasa dususlerinde (ör. bir cip sirketi
+    yuzunden tum borsalar dustugunde) nakitte beklemek yerine guvenli limana
+    (altin/petrol) yonelinebilir, ya da dusup toparlanmaya baslayan
+    hisselerde (ör. NVDA once dustu sonra toparlanmaya basladi) alim
+    yapilabilir'. Iki senaryo degerlendirilir:
+      1) Piyasa geneli RISK_OFF rejimindeyse (bkz. get_macro_regime, SP500
+         asagi + Dolar yukari) ve sembol GLD/USO (altin/petrol ETF) ise, BUY'a
+         guvenli-liman bias'i eklenir.
+      2) Herhangi bir sembolde uzun vadeli (IBKR: 5 gun, kripto: 24s) degisim
+         belirgin negatifken kisa vadeli (IBKR: 1 gun, kripto: 1 saat) degisim
+         pozitife donmusse ('dipten toparlanma'), BUY'a bias eklenir - dusmus
+         ama tekrar yukselmeye baslamis varliklari yakalamak icindir."""
+    if action != "BUY":
+        return {"bias": 0, "notes": []}
+    bias = 0
+    notes: List[str] = []
+    try:
+        regime = get_macro_regime()
+        if regime.get("regime") == "RISK_OFF" and symbol.upper() in ("GLD", "USO"):
+            bias += 10
+            notes.append(
+                f"Piyasa geneli RISK_OFF rejiminde (SP500 5g %{regime.get('sp500_5d_pct')}, "
+                f"DXY 5g %{regime.get('dxy_5d_pct')}): {symbol} güvenli liman olarak BUY'ı destekler."
+            )
+    except Exception:
+        pass
+    try:
+        mtf = get_multi_timeframe_momentum_signal(symbol, market, broker)
+        short_c = safe_float(mtf.get("short_change_pct"))
+        long_c = safe_float(mtf.get("long_change_pct"))
+        if long_c <= -1.5 and short_c >= 0.3:
+            bias += 8
+            notes.append(
+                f"{symbol} uzun vadede (%{long_c:.2f}) düştü ama kısa vadede (%{short_c:.2f}) toparlanmaya "
+                f"başladı: düşüşten fırsat olarak BUY'ı destekler."
+            )
+    except Exception:
+        pass
+    return {"bias": max(0, min(18, bias)), "notes": notes}
 
 
 def get_region_session_bias(region: str) -> Dict[str, Any]:
@@ -6304,6 +6464,15 @@ def _auto_trader_run_symbol(
         if macro_risk["notes"]:
             reason = (reason + " " + " ".join(macro_risk["notes"])).strip()
 
+        # Kullanicinin talebi: genel piyasa dususlerinde nakitte beklemek yerine
+        # guvenli limana (altin/petrol) yonelme veya dipten toparlanan
+        # varliklarda firsat degerlendirme.
+        dip_recovery = get_dip_recovery_bias(symbol, action, market, broker)
+        if dip_recovery["bias"] != 0:
+            confidence = max(0, min(95, confidence + dip_recovery["bias"]))
+        if dip_recovery["notes"]:
+            reason = (reason + " " + " ".join(dip_recovery["notes"])).strip()
+
         # Klasik teknik analiz katmani (RSI(14) + SMA20/SMA50 trend hizalanmasi).
         # Hem kripto hem IBKR (hisse) icin gecerlidir - daha once sistemde HICBIR
         # teknik indikator yoktu, sadece 24s momentum + emir defteri baskisi vardi.
@@ -6368,6 +6537,16 @@ def _auto_trader_run_symbol(
                 confidence = max(0, min(95, confidence + insider_dir["bias"]))
             if insider_dir["notes"]:
                 reason = (reason + " " + " ".join(insider_dir["notes"])).strip()
+
+            # Kullanicinin talebi: icerden satis sonrasi gecmiste fiyat
+            # dusup-toparlanma yasayan sirketlerde bu dongunun (satis ->
+            # dusus bekle -> dipte al -> toparlaninca sat) hangi asamasinda
+            # oldugumuzu tahmin edip BUY/SELL'e bias uygula.
+            insider_reversal = get_insider_sell_reversal_bias(symbol, action, asset_type, exchange, currency)
+            if insider_reversal["bias"] != 0:
+                confidence = max(0, min(95, confidence + insider_reversal["bias"]))
+            if insider_reversal["notes"]:
+                reason = (reason + " " + " ".join(insider_reversal["notes"])).strip()
     resolve_learning(symbol, price)
 
     with lock:
@@ -6624,6 +6803,33 @@ def _auto_trader_run_symbol(
                                 reason
                                 + " (Pozisyon büyütme: aynı yönde mevcut açık IBKR pozisyonu üzerine ekleme yapılıyor.)"
                             ).strip()
+                    # Kullanicinin talebi: acigа satis (short) destegi eklendi. AI BUY
+                    # sinyali geldiginde elde acik bir SHORT pozisyon varsa, bu bir
+                    # "buy to cover" (kisa pozisyonu kapatma) islemidir - LONG pozisyon
+                    # buyutme ile karistirilmamasi icin ibkr_is_position_add=False
+                    # oldugunda kontrol edilir. Emirden ONCE kaydedip, basariyla
+                    # dolarsa gerceklesen kar/zarari (short'ta fiyat dusunce kar
+                    # edilir, bu yuzden entry-exit ters yonlu) position_closures'a
+                    # yaziyoruz.
+                    pre_close_short_position = None
+                    if action == "BUY" and qty > 0 and not ibkr_is_position_add:
+                        try:
+                            for p in ibkr_positions_snapshot():
+                                if str(p.get("symbol", "")).upper() == symbol and str(p.get("side", "")).upper() == "SHORT":
+                                    pre_close_short_position = p
+                                    break
+                        except Exception:
+                            pre_close_short_position = None
+                        if pre_close_short_position:
+                            held_short_qty = abs(math.floor(safe_float(
+                                pre_close_short_position.get("position") or pre_close_short_position.get("size")
+                            )))
+                            if held_short_qty > 0 and qty > held_short_qty:
+                                qty = held_short_qty
+                            reason = (
+                                reason
+                                + f" (Açığa satış kapatılıyor (buy to cover): {symbol} short pozisyonu kapatılıyor.)"
+                            ).strip()
                     # AI'nin SELL karariyla mevcut acik (LONG) bir IBKR pozisyonunu kapatip
                     # kapatmadigini anlamak icin emirden ONCE mevcut pozisyonu (varsa) kaydediyoruz.
                     # Boylece emir basariyla dolarsa gerceklesen kar/zarari hesaplayip
@@ -6665,20 +6871,56 @@ def _auto_trader_run_symbol(
                                 if held_qty < qty:
                                     qty = held_qty
                         else:
-                            # KRITIK: elde HICBIR LONG pozisyon yokken SELL emri gonderilirse
-                            # IBKR bunu "kisa satis" (short sell) olarak degerlendirir ve
-                            # hesap marj/kisa-satis icin yeterli teminata (min 2000 USD)
-                            # sahip degilse "Error 201: Order rejected - YOUR ORDER IS NOT
-                            # ACCEPTED..." ile reddeder (canli loglarda MSFT/TSLA icin
-                            # gorulen tam olarak bu hataydi). Bu hesap sadece LONG islem
-                            # yapiyor, short satis hic istenmiyor - bu yuzden elde pozisyon
-                            # yoksa SAT sinyali tamamen atlanir, emir hic gonderilmez.
-                            reason = (
-                                reason + " (AI SAT sinyali atlandı: bu sembolde açık IBKR pozisyonu yok, "
-                                "kısa satış (short sell) denenmedi.)"
-                            ).strip()
-                            action = "WAIT"
-                            qty = 0
+                            # Elde LONG pozisyon yokken SELL sinyali geldi: bu bir acigа
+                            # satis (short sell) girisimi. Kullanicinin talebi uzerine,
+                            # onceden HER ZAMAN atlanan bu durum artik guvenlik sartlari
+                            # saglandiginda gercek short pozisyon acmaya donusturuldu
+                            # (bkz. IBKR_SHORT_SELLING_ENABLED / IBKR_SHORTABLE_SYMBOLS /
+                            # IBKR_MIN_MARGIN_FOR_SHORT_USD tanimlari). Guvenlik sartlari
+                            # saglanmazsa (ör. yetersiz teminat veya onayli listede degil)
+                            # onceki gibi emir hic gonderilmez.
+                            ibkr_can_short = (
+                                IBKR_SHORT_SELLING_ENABLED
+                                and exchange == "SMART"
+                                and symbol in IBKR_SHORTABLE_SYMBOLS
+                            )
+                            if ibkr_can_short:
+                                try:
+                                    available_funds_for_short = get_ibkr_available_funds()
+                                except Exception:
+                                    available_funds_for_short = 0.0
+                                if available_funds_for_short < IBKR_MIN_MARGIN_FOR_SHORT_USD:
+                                    ibkr_can_short = False
+                                    reason = (
+                                        reason
+                                        + f" (Açığa satış atlandı: kullanılabilir teminat {available_funds_for_short:.2f} USD, "
+                                        f"short için gereken minimum {IBKR_MIN_MARGIN_FOR_SHORT_USD:.0f} USD'nin altında.)"
+                                    ).strip()
+                            if ibkr_can_short:
+                                # IBKR API kesirli hisse short emrini kabul etmiyor -
+                                # tam sayiya yuvarla.
+                                qty = math.floor(qty)
+                                if qty < 1:
+                                    ibkr_can_short = False
+                            if ibkr_can_short:
+                                reason = (
+                                    reason
+                                    + f" (Açığa satış (short) açılıyor: {symbol} onaylı short listesinde ve "
+                                    f"yeterli teminat mevcut.)"
+                                ).strip()
+                            else:
+                                if not IBKR_SHORT_SELLING_ENABLED:
+                                    detail = "açığa satış devre dışı"
+                                elif exchange != "SMART" or symbol not in IBKR_SHORTABLE_SYMBOLS:
+                                    detail = "bu sembol onaylı açığa satış listesinde değil"
+                                else:
+                                    detail = "koşullar sağlanmadı"
+                                reason = (
+                                    reason + f" (AI SAT sinyali atlandı: bu sembolde açık IBKR pozisyonu yok, "
+                                    f"kısa satış (short sell) denenmedi: {detail}.)"
+                                ).strip()
+                                action = "WAIT"
+                                qty = 0
                     if qty > 0 and action in ("BUY", "SELL"):
                         # Kullanicinin talebi: IBKR'de asgari teyit sarti. Momentum, emir
                         # akisi, korelasyon, teknik trend ve coklu zaman dilimi olmak uzere
@@ -6742,6 +6984,26 @@ def _auto_trader_run_symbol(
                                 detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
                             )
                             maybe_open_chain_order("IBKR", symbol, filled_qty, exit_price)
+                        if pre_close_short_position and not execution.get("error") and safe_float(execution.get("filled")) > 0:
+                            # Short pozisyonda kar, fiyat DUSTUGUNDE olusur - bu yuzden
+                            # LONG'un tersine (entry - exit) * qty formulu kullanilir.
+                            filled_qty = safe_float(execution.get("filled"))
+                            entry_price = safe_float(pre_close_short_position.get("avgCost") or pre_close_short_position.get("entry_price"))
+                            exit_price = safe_float(execution.get("avg_fill_price")) or price
+                            pnl_amount = (entry_price - exit_price) * filled_qty
+                            pnl_pct = ((entry_price - exit_price) / entry_price * 100.0) if entry_price else 0.0
+                            db_record_position_closure(
+                                broker="IBKR",
+                                symbol=symbol,
+                                side="SHORT",
+                                qty=filled_qty,
+                                entry_price=entry_price,
+                                exit_price=exit_price,
+                                realized_pnl=pnl_amount,
+                                realized_pnl_pct=pnl_pct,
+                                close_reason="AI_KARARI",
+                                detail=f"AI BUY (buy to cover) kararıyla short pozisyon kapandı: {reason[:200]}",
+                            )
                 else:
                     execution = {
                         "simulated": True,
