@@ -562,6 +562,13 @@ IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "5"))
 # '2,3 saat olsun' - eski (window disina cikan) sinyaller otomatik olarak
 # sayaçtan dusuyor (pruning), boylece 'bugunun teyidi' guncel kaliyor.
 IBKR_CONFIRMATION_WINDOW_HOURS = float(os.getenv("IBKR_CONFIRMATION_WINDOW_HOURS", "3"))
+# Kullanicinin talebi: hafta sonu (borsalar/forex kapaliyken) kripto (BTCUSD/
+# ETHUSD gibi asset_type=CRYPTO semboller) icin daha dusuk bir esik kullanilsin,
+# cunku kripto 7/24 islem goruyor ve STK/FOREX ile ayni esikte tutulmasi hafta
+# sonu boyunca gereksiz yere paranin boşta beklemesine sebep oluyordu.
+IBKR_MIN_CONFIRMATIONS_CRYPTO_WEEKEND = int(
+    os.getenv("IBKR_MIN_CONFIRMATIONS_CRYPTO_WEEKEND", "3")
+)
 
 # ATR (Average True Range) bazli volatilite-adaptif pozisyon boyutlandirma esikleri
 # (kullanicinin talebi: 'ATR ekle'). atr_pct = ATR(14) / son kapanis * 100.
@@ -8231,11 +8238,20 @@ def _auto_trader_run_symbol(
                         )
                         _log_ibkr_confirmation_event(symbol, action, max(ibkr_agree_count, 1))
                         cum_confirm = _get_ibkr_confirmation_net_score(symbol, action)
-                        if cum_confirm["net"] < IBKR_MIN_CONFIRMATIONS:
+                        # Kullanicinin talebi: hafta sonu kripto (BTCUSD/ETHUSD gibi
+                        # asset_type=CRYPTO) icin daha dusuk esik kullan - STK/FOREX
+                        # borsalari kapali oldugu icin kripto tek "aktif" varlik sinifi
+                        # kaliyor ve normal esikte para hafta sonu boyunca boşta kaliyordu.
+                        _is_weekend_now = datetime.utcnow().weekday() >= 5
+                        if asset_type == "CRYPTO" and _is_weekend_now:
+                            _effective_min_confirmations = IBKR_MIN_CONFIRMATIONS_CRYPTO_WEEKEND
+                        else:
+                            _effective_min_confirmations = IBKR_MIN_CONFIRMATIONS
+                        if cum_confirm["net"] < _effective_min_confirmations:
                             reason = (
                                 reason
                                 + f" (IBKR emri atlandı: son {IBKR_CONFIRMATION_WINDOW_HOURS:.0f} saatte net "
-                                f"{cum_confirm['net']}/{IBKR_MIN_CONFIRMATIONS} {action} teyidi birikti "
+                                f"{cum_confirm['net']}/{_effective_min_confirmations} {action} teyidi birikti "
                                 f"(bu taramada {ibkr_agree_count}/10 anlık sinyal hizalı; BUY toplam "
                                 f"{cum_confirm['buy_weight']}, SELL toplam {cum_confirm['sell_weight']}), "
                                 f"henüz yeterli değil.)"
