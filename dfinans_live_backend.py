@@ -557,7 +557,7 @@ IBKR_AI_SELL_MIN_LOSS_PCT = float(os.getenv("IBKR_AI_SELL_MIN_LOSS_PCT", "10.0")
 # yonde bir tarama gelirse net sayaç dogal olarak azalir (BUY agirligi - SELL
 # agirligi), sifirlanmaz. Anlik "X/10" alani hala Teyit gosteriminde bilgi
 # amacli tutulur ama artik GATE (emir acma kilidi) degildir.
-IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "4"))
+IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "5"))
 # Birikimli teyit sayacinin ne kadar geriye baktigi (saat). Kullanicinin talebi:
 # '2,3 saat olsun' - eski (window disina cikan) sinyaller otomatik olarak
 # sayaçtan dusuyor (pruning), boylece 'bugunun teyidi' guncel kaliyor.
