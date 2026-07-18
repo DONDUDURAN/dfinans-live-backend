@@ -445,6 +445,14 @@ MIN_ORDER_COOLDOWN_SEC = float(os.getenv("MIN_ORDER_COOLDOWN_SEC", "2.0"))
 # bagli kalmak yerine, kullanicinin gercekte kullanmaya basladigi tarih baz
 # alinir.
 APP_INCEPTION_DATE = os.getenv("APP_INCEPTION_DATE", "2026-06-01")
+# Kullanicinin talebi: 'hedefime ulaşmam için ne kadar daha kar elde etmem
+# lazım, yıl sonuna kadar günlük ne kadar kazanmalıyım' sorusuna cevap veren
+# 'Hedef Takip' (goal tracker) ozelligi icin hedef tutar/tarih. Kullanici
+# somut olarak Sincan'da sifir 3+1 bir ev icin 5.000.000 TL / 2026 yil sonu
+# hedefini belirtti; env degiskeniyle degistirilebilir.
+GOAL_TARGET_TRY = float(os.getenv("GOAL_TARGET_TRY", "5000000"))
+GOAL_TARGET_DATE = os.getenv("GOAL_TARGET_DATE", "2026-12-31")
+GOAL_LABEL = os.getenv("GOAL_LABEL", "Sincan sıfır 3+1 ev")
 # Kullanicinin talebi: ciddi fiyat hareketi olan (spekulatif/oynak) hisseler icin
 # AYRI bir izleme listesi - esas IBKR_AUTO_WATCHLIST'e KARISTIRILMAZ. Bu liste
 # icin GERCEK emir acilmaz, sadece 'bakiyenin en fazla %10'u ile bu hisselerde
@@ -4974,6 +4982,91 @@ def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) ->
     return {"bias": max(0, min(18, bias)), "notes": notes}
 
 
+def get_early_reversal_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'dönüş yapmaya başlamadan toplamak hisseyi' - yani
+    get_dip_recovery_bias GIBI kesin donus TEYIDINI (kisa vadeli degisim zaten
+    pozitife donmus) BEKLEMEDEN, henuz dususte olan ama dususun 'tukenmekte'
+    oldugunu gosteren erken belirtileri (oncu gostergeler) tespit eder:
+      1) Asiri satim: RSI(14) <= 35.
+      2) Dusuş yavaslamasi (deceleration): son 2 mumun ortalama gunluk dususu,
+         onceki 3 mumun ortalama gunluk dususunden en az %40 daha kucuk -
+         satis baskisi azaliyor, tukeniyor olabilir.
+      3) Uzun vadeli degisim hala belirgin negatif (<=-1.5%) - yani henuz
+         gercek bir 'toparlanma' baslamamis, sadece dususun hizi kesiliyor.
+    Bu ucu de saglanirsa 'erken sinyal' (dusuk guvenli, kucuk baslangic
+    pozisyonu icin) doner - get_dip_recovery_bias'in aksine KESIN TEYIT
+    DEGILDIR, sadece 'yakinda donebilir' uyarisidir."""
+    try:
+        if broker == "IBKR":
+            market_info = get_ibkr_symbol_market_info(symbol)
+            bars = get_ibkr_daily_bars(
+                symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=25,
+            )
+            closes = [b["close"] for b in bars]
+            long_window = 5
+        else:
+            binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
+            candles = fetch_binance_klines(symbol, binance_market, interval="1h", total_candles=25)
+            closes = [c["close"] for c in candles]
+            long_window = 24
+
+        if len(closes) < 18:
+            return {"is_early_signal": False, "bias": 0, "notes": []}
+
+        rsi = compute_rsi(closes, period=14)
+        long_change = ((closes[-1] - closes[-1 - long_window]) / closes[-1 - long_window]) * 100.0 if len(closes) > long_window and closes[-1 - long_window] else 0.0
+
+        recent_daily_changes = [
+            ((closes[i] - closes[i - 1]) / closes[i - 1]) * 100.0 if closes[i - 1] else 0.0
+            for i in range(len(closes) - 5, len(closes))
+        ]
+        last_2 = recent_daily_changes[-2:]
+        prior_3 = recent_daily_changes[-5:-2]
+        avg_recent_decline = abs(sum(min(v, 0.0) for v in last_2) / max(len(last_2), 1))
+        avg_prior_decline = abs(sum(min(v, 0.0) for v in prior_3) / max(len(prior_3), 1))
+        decelerating = avg_prior_decline > 0.01 and avg_recent_decline <= avg_prior_decline * 0.6
+
+        oversold = rsi is not None and rsi <= 35.0
+        still_falling_long_term = long_change <= -1.5
+        already_reversed = recent_daily_changes[-1] >= 0.3
+
+        if oversold and decelerating and still_falling_long_term and not already_reversed:
+            note = (
+                f"{symbol} için ERKEN dönüş sinyali (henüz teyit değil): RSI {rsi:.1f} (aşırı satım), "
+                f"düşüş hızı yavaşlıyor (son dönem ort. %{avg_recent_decline:.2f} vs önceki %{avg_prior_decline:.2f}), "
+                f"uzun vadede hâlâ %{long_change:.2f} aşağıda. Satış baskısı tükeniyor olabilir - "
+                f"küçük bir başlangıç pozisyonu düşünülebilir, kesin teyit (dip-recovery) geldiğinde artırılabilir."
+            )
+            return {
+                "is_early_signal": True,
+                "bias": 4,
+                "rsi": round(rsi, 1) if rsi is not None else None,
+                "long_change_pct": round(long_change, 3),
+                "avg_recent_decline_pct": round(avg_recent_decline, 3),
+                "avg_prior_decline_pct": round(avg_prior_decline, 3),
+                "notes": [note],
+            }
+        return {"is_early_signal": False, "bias": 0, "notes": []}
+    except Exception:
+        return {"is_early_signal": False, "bias": 0, "notes": []}
+
+
+def get_early_reversal_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
+    """get_early_reversal_signal'i BUY karar aggregatorune baglar - dusuk
+    guvenli erken sinyal, dip-recovery'nin (+8/+18) aksine kucuk (+4) bir
+    bias ekler, boylece AI donus TEYIT EDILMEDEN once kucuk bir baslangic
+    pozisyonu alabilir, ama tam boyutta islem yapmaz."""
+    if action != "BUY":
+        return {"bias": 0, "notes": []}
+    try:
+        signal = get_early_reversal_signal(symbol, market, broker)
+        if signal.get("is_early_signal"):
+            return {"bias": signal.get("bias", 0), "notes": signal.get("notes", [])}
+    except Exception:
+        pass
+    return {"bias": 0, "notes": []}
+
+
 def get_region_session_bias(region: str) -> Dict[str, Any]:
     """Bir bolgenin (ASIA/UK/US) o gunku ortalama fiyat degisimini (change_24h)
     IBKR_SYMBOL_MARKET_INFO'daki o bolgeye ait semboller uzerinden hesaplar.
@@ -7310,6 +7403,17 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + dip_recovery["bias"]))
         if dip_recovery["notes"]:
             reason = (reason + " " + " ".join(dip_recovery["notes"])).strip()
+
+        # Kullanicinin talebi: 'dönüş yapmaya başlamadan toplamak hisseyi' -
+        # kesin teyit (yukaridaki dip_recovery) gelmeden ONCE, dususun
+        # tukendigine dair oncu belirtileri (RSI asiri satim + dususun
+        # yavaslamasi) yakalayip kucuk bir baslangic pozisyonu icin dusuk
+        # guvenli bir sinyal ekler.
+        early_reversal = get_early_reversal_bias(symbol, action, market, broker)
+        if early_reversal["bias"] != 0:
+            confidence = max(0, min(95, confidence + early_reversal["bias"]))
+        if early_reversal["notes"]:
+            reason = (reason + " " + " ".join(early_reversal["notes"])).strip()
 
         # Kullanicinin talebi: 'ayi ve boga piyasalari icin bir sistem
         # gelistirsek, ona gore hareket etse yapay zeka'. Uzun vadeli (50/200
@@ -11132,6 +11236,95 @@ def get_profit_summary() -> Dict[str, Any]:
         for key in ("daily", "monthly", "yearly", "all_time"):
             result[key]["realized_pnl_try"] = round(result[key]["realized_pnl_usd"] * rate, 2)
     return result
+
+
+def get_goal_progress() -> Dict[str, Any]:
+    """Kullanicinin talebi: 'hedefime ulaşmam için ne kadar daha kar elde
+    etmem lazım, hedefime ne kadar kaldı, yıl sonuna kadar günlük ne kadar
+    kazanmalıyım' sorusuna cevap verir (ornegin: ev almak icin 5.000.000 TL
+    hedef, 2026 yil sonuna kadar). Ilerleme, get_profit_summary()'nin
+    all_time gerceklesen (kapanmis) AI kar/zarari - APP_INCEPTION_DATE'den
+    bugune - baz alinarak hesaplanir; boylece 'ne kadar biriktirdim' sorusu
+    zaten var olan, sifirdan yeniden hesaplanmayan tek bir kaynaktan gelir."""
+    summary = get_profit_summary()
+    progress_try = safe_float((summary.get("all_time") or {}).get("realized_pnl_try"))
+    rate = safe_float(summary.get("usdtry_rate"))
+
+    now = datetime.now()
+    try:
+        start_date = datetime.strptime(APP_INCEPTION_DATE, "%Y-%m-%d")
+    except Exception:
+        start_date = now
+    try:
+        target_date = datetime.strptime(GOAL_TARGET_DATE, "%Y-%m-%d")
+    except Exception:
+        target_date = now
+
+    days_elapsed = max((now - start_date).total_seconds() / 86400.0, 0.5)
+    days_remaining = max((target_date - now).total_seconds() / 86400.0, 0.0)
+
+    remaining_try = max(GOAL_TARGET_TRY - progress_try, 0.0)
+    progress_pct = (progress_try / GOAL_TARGET_TRY * 100.0) if GOAL_TARGET_TRY > 0 else 0.0
+    progress_pct = max(0.0, min(100.0, progress_pct))
+
+    current_daily_pace_try = progress_try / days_elapsed if days_elapsed > 0 else 0.0
+    required_daily_try = (remaining_try / days_remaining) if days_remaining > 0 else remaining_try
+
+    projected_completion = None
+    projected_days_from_now = None
+    if current_daily_pace_try > 0 and remaining_try > 0:
+        projected_days_from_now = remaining_try / current_daily_pace_try
+        projected_completion = (now + timedelta(days=projected_days_from_now)).strftime("%Y-%m-%d")
+    elif remaining_try <= 0:
+        projected_completion = now.strftime("%Y-%m-%d")
+        projected_days_from_now = 0.0
+
+    on_track = bool(remaining_try <= 0 or (current_daily_pace_try >= required_daily_try > 0) or required_daily_try <= 0)
+
+    if remaining_try <= 0:
+        status_note = f"Hedefe ulaşıldı! ({GOAL_LABEL}) Şu ana kadar {progress_try:,.0f} TL gerçekleşen kâr birikti.".replace(",", ".")
+    elif on_track:
+        status_note = (
+            f"Şu anki günlük ortalama kâr temponuzla ({current_daily_pace_try:,.0f} TL/gün) hedefe "
+            f"{GOAL_TARGET_DATE} tarihinden önce ulaşmanız bekleniyor."
+        ).replace(",", ".")
+    else:
+        status_note = (
+            f"Mevcut tempo ({current_daily_pace_try:,.0f} TL/gün) hedefi {GOAL_TARGET_DATE} tarihine "
+            f"kadar yetiştirmeye yetmiyor; günlük ortalama {required_daily_try:,.0f} TL kâr gerekiyor."
+        ).replace(",", ".")
+
+    return {
+        "ok": True,
+        "goal_label": GOAL_LABEL,
+        "goal_target_try": GOAL_TARGET_TRY,
+        "goal_target_date": GOAL_TARGET_DATE,
+        "since": APP_INCEPTION_DATE,
+        "usdtry_rate": rate,
+        "progress_try": round(progress_try, 2),
+        "progress_pct": round(progress_pct, 2),
+        "remaining_try": round(remaining_try, 2),
+        "days_elapsed": round(days_elapsed, 1),
+        "days_remaining": round(days_remaining, 1),
+        "current_daily_pace_try": round(current_daily_pace_try, 2),
+        "required_daily_try": round(required_daily_try, 2),
+        "on_track": on_track,
+        "projected_completion_date": projected_completion,
+        "projected_days_from_now": round(projected_days_from_now, 1) if projected_days_from_now is not None else None,
+        "note": status_note,
+        "time": now_text(),
+    }
+
+
+@app.route("/goal-tracker", methods=["GET"])
+def goal_tracker_endpoint():
+    """Kullanicinin finansal hedefine (ör. ev almak icin 5.000.000 TL, yil
+    sonuna kadar) ne kadar yaklastigini, kalan tutari ve hedefi yakalamak
+    icin gereken gunluk ortalama kar miktarini dondurur."""
+    try:
+        return jsonify(get_goal_progress())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
 
 
 @app.route("/debug/force-tp-check", methods=["GET"])
