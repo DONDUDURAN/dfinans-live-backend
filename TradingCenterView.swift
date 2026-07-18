@@ -143,6 +143,23 @@ struct TCInvestmentAdviceResponse: Codable {
     let error: String?
 }
 
+struct TCGoalTracker: Codable {
+    let ok: Bool
+    let goal_label: String?
+    let goal_target_try: Double?
+    let goal_target_date: String?
+    let progress_try: Double?
+    let progress_pct: Double?
+    let remaining_try: Double?
+    let days_remaining: Double?
+    let current_daily_pace_try: Double?
+    let required_daily_try: Double?
+    let on_track: Bool?
+    let projected_completion_date: String?
+    let note: String?
+    let error: String?
+}
+
 // MARK: - ViewModel
 
 @MainActor
@@ -162,6 +179,7 @@ final class TradingCenterViewModel: ObservableObject {
     @Published var aiSignal: TCAISignal?
     @Published var engineStatus: TCEngineStatus?
     @Published var investmentAdvice: TCInvestmentAdviceResponse?
+    @Published var goalTracker: TCGoalTracker?
     @Published var positions: [TCPosition] = []
     @Published var spotBalances: [TCSpotBalance] = []
     @Published var binanceSummary: TCBinanceSummary?
@@ -214,11 +232,12 @@ final class TradingCenterViewModel: ObservableObject {
         async let engineTask: Void = loadEngineStatus()
         async let marketTask: Void = loadMarketAndSignal()
         async let adviceTask: Void = loadInvestmentAdvice()
+        async let goalTask: Void = loadGoalTracker()
         if refreshTick % 3 == 1 {
             Task { await self.loadSymbols() }
             Task { await self.loadPortfolio() }
         }
-        _ = await (healthTask, engineTask, marketTask, adviceTask)
+        _ = await (healthTask, engineTask, marketTask, adviceTask, goalTask)
 
         lastRefresh = Date()
         isLoading = false
@@ -313,6 +332,14 @@ final class TradingCenterViewModel: ObservableObject {
             investmentAdvice = try await get("/ai/investment-plan")
         } catch {
             // Tavsiye endpoint'i kritik değil; ana akışı bozmasın.
+        }
+    }
+
+    func loadGoalTracker() async {
+        do {
+            goalTracker = try await get("/goal-tracker")
+        } catch {
+            // Hedef takip kritik değil; ana akışı bozmasın.
         }
     }
 
@@ -429,6 +456,7 @@ struct TradingCenterView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     header
+                    goalCard
                     backendCard
                     selectorCard
                     aiDecisionCard
@@ -637,6 +665,74 @@ struct TradingCenterView: View {
                 }
             }
         }
+    }
+
+    private var goalCard: some View {
+        card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("🏠 Hedef: \(vm.goalTracker?.goal_label ?? "Ev Hedefi")")
+                        .font(.headline)
+                    Spacer()
+                    if let onTrack = vm.goalTracker?.on_track {
+                        Text(onTrack ? "YOLUNDA" : "TEMPO YETERSİZ")
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background((onTrack ? Color.green : Color.orange).opacity(0.30))
+                            .clipShape(Capsule())
+                    }
+                }
+
+                if let goal = vm.goalTracker, goal.ok {
+                    let pct = min(max(goal.progress_pct ?? 0, 0), 100)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.12))
+                                .frame(height: 14)
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(LinearGradient(colors: [.green, .mint], startPoint: .leading, endPoint: .trailing))
+                                .frame(width: geo.size.width * CGFloat(pct / 100.0), height: 14)
+                        }
+                    }
+                    .frame(height: 14)
+
+                    Text("%\(String(format: "%.2f", pct)) tamamlandı — Hedef: \(goalTryText(goal.goal_target_try)) TL, \(goal.goal_target_date ?? "-")")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.75))
+
+                    HStack(spacing: 10) {
+                        bigMetric(title: "Birikmiş", value: "\(goalTryText(goal.progress_try)) TL")
+                        bigMetric(title: "Kalan", value: "\(goalTryText(goal.remaining_try)) TL")
+                    }
+                    HStack(spacing: 10) {
+                        bigMetric(title: "Günlük Tempo", value: "\(goalTryText(goal.current_daily_pace_try)) TL")
+                        bigMetric(title: "Gereken Günlük", value: "\(goalTryText(goal.required_daily_try)) TL")
+                    }
+
+                    if let note = goal.note, !note.isEmpty {
+                        Text(note)
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    Text("Hedef takip verisi yükleniyor.")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.75))
+                }
+            }
+        }
+    }
+
+    private func goalTryText(_ value: Double?) -> String {
+        guard let v = value else { return "-" }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        formatter.groupingSeparator = "."
+        return formatter.string(from: NSNumber(value: v)) ?? String(format: "%.0f", v)
     }
 
     private var investmentAdviceCard: some View {
