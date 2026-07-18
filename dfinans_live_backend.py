@@ -310,6 +310,17 @@ IBKR_SYMBOL_MARKET_INFO: Dict[str, Dict[str, str]] = {
     # (Mar/Haz/Eyl/Ara) manuel guncellenmelidir - suresi gecen kontrat IBKR
     # tarafindan reddedilir/qualify edilemez. Su an: Eylul 2026 (202609).
     "MES": {"exchange": "CME", "currency": "USD", "region": "US_FUTURES", "sector": "INDEX_FUTURES", "asset_type": "FUT", "contract_month": "202609"},
+    # --- Emtia vadeli islemleri (COMEX/NYMEX / USD) - kullanicinin talebi:
+    # 'metal alamıyor muyum ibkr den altın falan, yada petrol' - GLD/USO ETF
+    # olarak zaten mevcuttu ama dogrudan vadeli islem (futures) de istendigi
+    # icin MES'teki gibi kucuk kontrat buyuklugune sahip MIKRO versiyonlar
+    # secildi: MGC (Micro Gold, 10 troy ons - GC'nin 1/10'u) ve MCL (Micro WTI
+    # Ham Petrol, 100 varil - CL'nin 1/10'u). KRITIK: contract_month bu ikisi
+    # icin AYLIK sozlesmeler oldugundan MES'ten (ceyreklik) DAHA SIK
+    # guncellenmelidir - suresi gecen kontrat IBKR tarafindan reddedilir.
+    # Su an: Eylul 2026 (202609).
+    "MGC": {"exchange": "COMEX", "currency": "USD", "region": "US_FUTURES", "sector": "METALS_FUTURES", "asset_type": "FUT", "contract_month": "202609"},
+    "MCL": {"exchange": "NYMEX", "currency": "USD", "region": "US_FUTURES", "sector": "ENERGY_FUTURES", "asset_type": "FUT", "contract_month": "202609"},
 }
 
 # Kullanicinin talebi: 'sektör rotasyonu ekle' - kripto icin sabit/varsayimsal
@@ -2923,10 +2934,10 @@ def _is_outside_regular_trading_hours(exchange: str) -> bool:
     now_utc = datetime.now(timezone.utc)
     minute_of_day = now_utc.hour * 60 + now_utc.minute
     weekday = now_utc.weekday()  # Pazartesi=0 ... Pazar=6
-    if ex in ("IDEALPRO", "CME"):
-        # Forex (IDEALPRO) ve vadeli islem/Globex (CME) neredeyse 23/6 islem
-        # gorur: Cuma ~22:00 UTC'den Pazar ~22:00 UTC'ye kadar kapalidir
-        # (gunluk kisa bakim molasi basitlik icin ihmal edilmistir).
+    if ex in ("IDEALPRO", "CME", "COMEX", "NYMEX"):
+        # Forex (IDEALPRO) ve vadeli islem/Globex (CME/COMEX/NYMEX) neredeyse
+        # 23/6 islem gorur: Cuma ~22:00 UTC'den Pazar ~22:00 UTC'ye kadar
+        # kapalidir (gunluk kisa bakim molasi basitlik icin ihmal edilmistir).
         if weekday == 4 and minute_of_day >= 22 * 60:      # Cuma 22:00 sonrasi
             return True
         if weekday == 5:                                    # Cumartesi tamamen kapali
@@ -3553,12 +3564,12 @@ def _ibkr_closed_exchange_message(exchange: str) -> str:
     bilgilendirilsin; SMART/US borsalari icin bos string doner (US hisseleri
     IBKR'de gercekten pre/post-market destekler, hicbir sey degismez)."""
     ex = str(exchange or "SMART").upper()
-    if ex not in ("LSE", "SEHK", "IBIS", "SBF", "IDEALPRO", "CME"):
+    if ex not in ("LSE", "SEHK", "IBIS", "SBF", "IDEALPRO", "CME", "COMEX", "NYMEX"):
         return ""
     if not _is_outside_regular_trading_hours(ex):
         return ""
-    if ex in ("IDEALPRO", "CME"):
-        name = "Forex (IDEALPRO)" if ex == "IDEALPRO" else "Vadeli işlem (CME/Globex)"
+    if ex in ("IDEALPRO", "CME", "COMEX", "NYMEX"):
+        name = "Forex (IDEALPRO)" if ex == "IDEALPRO" else f"Vadeli işlem ({ex})"
         return (
             f"{name} piyasası hafta sonu kapalı (Cuma ~22:00 UTC - Pazar ~22:00 UTC arası), "
             f"bu aralıkta gönderilen emir gerçekleşmez. Piyasa hafta içi normal seansa "
