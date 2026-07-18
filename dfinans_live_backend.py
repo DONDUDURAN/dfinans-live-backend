@@ -4498,6 +4498,107 @@ def get_macro_regime() -> Dict[str, Any]:
     return _cache_get_or_fetch("macro_regime", 14400, _fetch)
 
 
+def get_bull_bear_market_regime(market: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'ayi ve boga piyasalari icin bir sistem gelistirsek,
+    ona gore hareket etse yapay zeka'. get_macro_regime() KISA vadeli (5 gunluk)
+    risk-istahi olcer (RISK_ON/RISK_OFF); bu fonksiyon ise UZUN vadeli (50/200
+    gunluk hareketli ortalama, klasik 'golden/death cross' yapisi) piyasa
+    dongusunu (BULL/BEAR/TRANSITION) belirler - hisseler icin SP500 (^GSPC),
+    kripto icin BTC-USD kullanilir (kripto piyasasi hisse senedi piyasasindan
+    ayrisabildigi/decouple olabildigi icin ayri hesaplanir).
+      - BULL: fiyat > SMA50 > SMA200 (klasik yukselis trend yapisi - 'golden cross')
+      - BEAR: fiyat < SMA50 < SMA200 (klasik dusus trend yapisi - 'death cross')
+      - TRANSITION: yukaridakilerin disinda (karisik/belirsiz - guclu bias uygulanmaz)
+    Sonuc 6 saat cache'lenir (uzun vadeli rejim sik degismez); hata durumunda
+    sessizce TRANSITION'a duser (fail-open)."""
+    is_crypto = str(market or "").upper() in ("CRYPTO", "BINANCE")
+    cache_key = "bull_bear_regime_crypto" if is_crypto else "bull_bear_regime_equity"
+
+    def _fetch():
+        import yfinance as yf
+        ticker = "BTC-USD" if is_crypto else "^GSPC"
+        hist = yf.Ticker(ticker).history(period="300d", interval="1d", auto_adjust=True)
+        close = hist["Close"].dropna()
+        if len(close) < 210:
+            raise RuntimeError("Yetersiz uzun vadeli veri (200g SMA icin en az 210 gun gerekli)")
+        last_price = float(close.iloc[-1])
+        sma50 = float(close.iloc[-50:].mean())
+        sma200 = float(close.iloc[-200:].mean())
+        if last_price > sma50 > sma200:
+            regime = "BULL"
+        elif last_price < sma50 < sma200:
+            regime = "BEAR"
+        else:
+            regime = "TRANSITION"
+        return {
+            "market": "CRYPTO" if is_crypto else "EQUITY",
+            "reference_symbol": ticker,
+            "regime": regime,
+            "price": round(last_price, 2),
+            "sma50": round(sma50, 2),
+            "sma200": round(sma200, 2),
+            "pct_vs_sma200": round(((last_price / sma200) - 1.0) * 100.0, 2) if sma200 > 0 else 0.0,
+            "time": now_text(),
+        }
+    try:
+        return _cache_get_or_fetch(cache_key, 21600, _fetch)
+    except Exception:
+        return {
+            "market": "CRYPTO" if is_crypto else "EQUITY",
+            "reference_symbol": "BTC-USD" if is_crypto else "^GSPC",
+            "regime": "TRANSITION",
+            "price": 0.0,
+            "sma50": 0.0,
+            "sma200": 0.0,
+            "pct_vs_sma200": 0.0,
+            "time": now_text(),
+        }
+
+
+def get_market_cycle_bias(symbol: str, action: str, market: str) -> Dict[str, Any]:
+    """Uzun vadeli boga/ayi piyasa dongusune (bkz. get_bull_bear_market_regime)
+    gore islem yonune bias ekler ve kripto pozisyon boyutlandirmasi icin bir
+    olcek katsayisi (qty_scale) oneri. Mantik:
+      - BOGA (BULL) piyasasinda: yeni LONG (BUY) acmak trend yonunde oldugu icin
+        desteklenir (+8 bias); yeni SHORT (SELL) acmak trende karsi gitmek
+        oldugundan hem cesaretlendirilmez (-6 bias) hem de acilirsa daha kucuk
+        boyutta acilmasi onerilir (qty_scale 0.6).
+      - AYI (BEAR) piyasasinda: yeni SHORT (SELL) trend yonunde oldugu icin
+        desteklenir (+8 bias, normal boyut); yeni LONG (BUY) trende karsi
+        gitmek oldugundan hem cesaretlendirilmez (-6 bias) hem de acilirsa
+        daha kucuk boyutta acilmasi onerilir (qty_scale 0.6) - boylece dusus
+        trendinde riske girilse bile pozisyon boyutu kucultulerek zarar
+        sinirlanir. (Not: bu genel/otomatik caydiricidir - kisa vadede
+        toparlanma teyidi olan durumlar ayrica get_dip_recovery_bias ile
+        pozitif BUY bias'i alarak net etkiyi dengeler.)
+      - TRANSITION (belirsiz): bias yok, normal boyut (qty_scale 1.0)."""
+    try:
+        regime_info = get_bull_bear_market_regime(market)
+        regime = regime_info.get("regime", "TRANSITION")
+    except Exception:
+        return {"bias": 0, "qty_scale": 1.0, "notes": []}
+    if regime == "TRANSITION" or action not in ("BUY", "SELL"):
+        return {"bias": 0, "qty_scale": 1.0, "notes": [], "regime": regime}
+    trend_label = "Boğa (BULL)" if regime == "BULL" else "Ayı (BEAR)"
+    with_trend = (regime == "BULL" and action == "BUY") or (regime == "BEAR" and action == "SELL")
+    if with_trend:
+        bias = 8
+        qty_scale = 1.0
+        note = (
+            f"[Piyasa Döngüsü] Uzun vadeli {trend_label} piyasasında ({regime_info.get('reference_symbol')} "
+            f"fiyat SMA200'e göre %{regime_info.get('pct_vs_sma200')}): {action} trend yönünde, desteklenir."
+        )
+    else:
+        bias = -6
+        qty_scale = 0.6
+        note = (
+            f"[Piyasa Döngüsü] Uzun vadeli {trend_label} piyasasında ({regime_info.get('reference_symbol')} "
+            f"fiyat SMA200'e göre %{regime_info.get('pct_vs_sma200')}): {action} trende karşı gidiyor, "
+            f"caydırılır ve (kripto için) pozisyon boyutu küçültülür."
+        )
+    return {"bias": bias, "qty_scale": qty_scale, "notes": [note], "regime": regime}
+
+
 def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
     """Kullanicinin talebi: 'genel piyasa dususlerinde (ör. bir cip sirketi
     yuzunden tum borsalar dustugunde) nakitte beklemek yerine guvenli limana
@@ -6421,6 +6522,7 @@ def _auto_trader_run_symbol(
     reason = "Koşullar bekleniyor."
     price = 0.0
     execution: Dict[str, Any] = {"simulated": True, "message": "Emir yok"}
+    market_cycle_qty_scale = 1.0
 
     if broker == "IBKR":
         # Cok-borsali havuz destegi: her sembolun kendi borsa/para birimi vardir
@@ -6614,6 +6716,17 @@ def _auto_trader_run_symbol(
         if dip_recovery["notes"]:
             reason = (reason + " " + " ".join(dip_recovery["notes"])).strip()
 
+        # Kullanicinin talebi: 'ayi ve boga piyasalari icin bir sistem
+        # gelistirsek, ona gore hareket etse yapay zeka'. Uzun vadeli (50/200
+        # gunluk SMA) piyasa dongusu trend yonundeki islemleri destekler, trende
+        # karsi islemleri hem caydirir hem (kripto icin) kucuk boyutta acar.
+        market_cycle = get_market_cycle_bias(symbol, action, market)
+        if market_cycle["bias"] != 0:
+            confidence = max(0, min(95, confidence + market_cycle["bias"]))
+        if market_cycle["notes"]:
+            reason = (reason + " " + " ".join(market_cycle["notes"])).strip()
+        market_cycle_qty_scale = market_cycle.get("qty_scale", 1.0)
+
         # Klasik teknik analiz katmani (RSI(14) + SMA20/SMA50 trend hizalanmasi).
         # Hem kripto hem IBKR (hisse) icin gecerlidir - daha once sistemde HICBIR
         # teknik indikator yoktu, sadece 24s momentum + emir defteri baskisi vardi.
@@ -6753,7 +6866,7 @@ def _auto_trader_run_symbol(
                     elif price > 0:
                         available_usdt = get_spot_available_usdt()
                         if available_usdt > 0:
-                            pct = spot_auto_trader_size_pct(symbol)
+                            pct = spot_auto_trader_size_pct(symbol) * market_cycle_qty_scale
                             min_pos_usd = effective_min_position_usd(symbol, "SPOT")
                             sized_qty = round((available_usdt * pct) / price, 6)
                             if sized_qty * price < min_pos_usd:
@@ -7190,7 +7303,7 @@ def _auto_trader_run_symbol(
                 if price > 0:
                     available_usdt = get_futures_available_usdt()
                     if available_usdt > 0:
-                        pct = asset_size_pct(symbol)
+                        pct = asset_size_pct(symbol) * market_cycle_qty_scale
                         sized_qty = round((available_usdt * pct * leverage) / price, 3)
                         if sized_qty > 0:
                             reason = (
@@ -10449,6 +10562,21 @@ def profit_summary_endpoint():
         return jsonify(get_profit_summary())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
+
+
+@app.route("/market-cycle/status", methods=["GET"])
+def market_cycle_status_endpoint():
+    """Uzun vadeli (50/200 gunluk SMA) boga/ayi piyasa dongusu durumu - hisse
+    (SP500 bazli) ve kripto (BTC-USD bazli) icin ayri ayri gosterilir."""
+    try:
+        equity = get_bull_bear_market_regime("STOCK")
+    except Exception as e:
+        equity = {"regime": "TRANSITION", "error": str(e)}
+    try:
+        crypto = get_bull_bear_market_regime("CRYPTO")
+    except Exception as e:
+        crypto = {"regime": "TRANSITION", "error": str(e)}
+    return jsonify({"equity": equity, "crypto": crypto, "time": now_text()})
 
 
 @app.route("/shadow-watchlist/status", methods=["GET"])
