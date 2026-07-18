@@ -2984,6 +2984,57 @@ def ibkr_account_summary_snapshot() -> List[Dict[str, Any]]:
     return ibkr_execute(_run)
 
 
+_FX_RATE_TO_USD_FALLBACK = {"GBP": 1.27, "HKD": 0.128, "EUR": 1.08}
+
+
+def get_fx_rate_to_usd(currency: str) -> float:
+    """{currency}/USD kurunu yfinance uzerinden ceker (1 saat cache); basarisiz
+    olursa sabit yaklasik bir kur degerine (fail-open, _FX_RATE_TO_USD_FALLBACK)
+    duser. USD hedefse dogrudan 1.0 doner."""
+    cur = str(currency or "USD").upper()
+    if cur == "USD":
+        return 1.0
+
+    def _fetch():
+        import yfinance as yf
+        hist = yf.Ticker(f"{cur}USD=X").history(period="5d")
+        if hist is None or hist.empty:
+            raise RuntimeError(f"{cur}USD kuru alınamadı.")
+        return {"rate": float(hist["Close"].iloc[-1])}
+
+    try:
+        result = _cache_get_or_fetch(f"fx_rate_to_usd:{cur}", 3600, _fetch)
+        rate = safe_float(result.get("rate"))
+        if rate > 0:
+            return rate
+    except Exception:
+        pass
+    return _FX_RATE_TO_USD_FALLBACK.get(cur, 1.0)
+
+
+def get_ibkr_price_usd_equivalent(price: float, exchange: str, currency: str) -> float:
+    """KRITIK BUG DUZELTMESI: IBKR API, LSE'de (Londra Borsasi) islem goren
+    hisselerin fiyatini (ULVR, SHEL, RIO, AZN, HSBA) hissenin ana para biriminin
+    ALT biriminde (pence/GBX) dondurur - GBP DEGIL - contract'in currency alani
+    'GBP' olsa bile (1 GBP = 100 GBX/pence). Ayrica GBP/HKD gibi ABD-disi para
+    birimlerindeki fiyatlar dogrudan USD bazli 'kullanilabilir fon' (AvailableFunds,
+    hep USD) ile HICBIR FX cevrimi yapilmadan karsilastiriliyordu.
+    Bu iki sorun birlikte, canli ortamda ULVR icin (gercek fiyat ~59 USD/hisse)
+    kodun ~5900+ USD gerekiyormus gibi degerlendirmesine ve boylece asla
+    karsilanamayacak sahte 'yetersiz alim gucu' hatasiyla GUNLERCE hicbir
+    IBKR emrinin gonderilmemesine yol acti (kullanicinin bildirdigi 'iki gundur
+    IBKR hic pozisyon acmadi' sorunu). Bu fonksiyon fiyati once ana para birimine
+    (LSE icin GBX -> GBP: /100), sonra guncel FX kuruyla USD'ye cevirir - boylece
+    fon yeterliligi karsilastirmasi dogru birimlerde yapilir."""
+    base_price = safe_float(price)
+    if str(exchange or "").upper() == "LSE" and str(currency or "").upper() == "GBP":
+        base_price = base_price / 100.0
+    cur = str(currency or "USD").upper()
+    if cur == "USD":
+        return base_price
+    return base_price * get_fx_rate_to_usd(cur)
+
+
 def get_ibkr_available_funds() -> float:
     """IBKR hesabindaki kullanilabilir alim gucunu (AvailableFunds) USD olarak dondurur.
     Auto-trader IBKR icin sabit miktarli (ör. 1 hisse) emir gonderdiginde, hesaptaki
@@ -6815,11 +6866,19 @@ def _auto_trader_run_symbol(
                     )
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
-                        needed = qty * price
+                        # KRITIK DUZELTME: price, LSE hisselerinde (ULVR/SHEL/RIO/AZN/
+                        # HSBA) pence/GBX biriminde donuyor (GBP degil) ve GBP/HKD gibi
+                        # ABD-disi para birimlerinde dogrudan USD fon ile karsilastirma
+                        # FX cevrimi olmadan yapiliyordu - bu, gercekte karsilanabilir
+                        # olan hisselerde bile (ör. ULVR ~59 USD/hisse) fiyati ~100 kat
+                        # buyuk gosterip sahte 'yetersiz alim gucu' hatasina yol aciyordu
+                        # (bkz. get_ibkr_price_usd_equivalent doc'u).
+                        price_usd = get_ibkr_price_usd_equivalent(price, exchange, currency)
+                        needed = qty * price_usd
                         safe_budget = available_funds * 0.8
                         if available_funds > 0 and needed > safe_budget:
                             if ibkr_allow_fractional_here and safe_budget >= 1.0:
-                                fractional_qty = math.floor((safe_budget / price) * 10000) / 10000.0
+                                fractional_qty = math.floor((safe_budget / price_usd) * 10000) / 10000.0
                                 reason = (
                                     reason
                                     + f" (Miktar {qty} -> {fractional_qty} olarak düşürüldü (kesirli hisse, ABD/SMART + normal seans): "
@@ -6828,7 +6887,7 @@ def _auto_trader_run_symbol(
                                 qty = fractional_qty
                                 ibkr_fractional_order = True
                             else:
-                                affordable_qty = math.floor(safe_budget / price)
+                                affordable_qty = math.floor(safe_budget / price_usd)
                                 if affordable_qty < 1:
                                     execution = {
                                         "simulated": False,
@@ -6857,7 +6916,7 @@ def _auto_trader_run_symbol(
                                     # 0.3 hisselik bir tutar hesaplamis) - fon yeterliyse
                                     # dogrudan kesirli emir gonder, hatayla iptal etme.
                                     fractional_qty = math.floor((base_qty if base_qty > 0 else qty) * 10000) / 10000.0
-                                    if fractional_qty > 0 and fractional_qty * price <= safe_budget + 1e-9:
+                                    if fractional_qty > 0 and fractional_qty * price_usd <= safe_budget + 1e-9:
                                         qty = fractional_qty
                                         ibkr_fractional_order = True
                                     else:
@@ -7047,7 +7106,12 @@ def _auto_trader_run_symbol(
                         # 'nakit parayi gerektiginde farkli para birimine donusturup islem
                         # yapabilecek sekilde ayarla'.
                         if action == "BUY" and currency.upper() != "USD" and price > 0:
-                            fx_result = ensure_ibkr_currency_funds(currency, qty * price)
+                            # LSE hisselerinde price pence/GBX biriminde donuyor (GBP degil) -
+                            # ensure_ibkr_currency_funds hedef para biriminin (GBP) kendisinde
+                            # bir tutar bekliyor, bu yuzden pence->GBP cevrimi burada da
+                            # uygulanmali (aksi halde 100 kat fazla FX cevrimi denenir).
+                            native_price = price / 100.0 if (exchange.upper() == "LSE" and currency.upper() == "GBP") else price
+                            fx_result = ensure_ibkr_currency_funds(currency, qty * native_price)
                             if fx_result.get("converted"):
                                 reason = (
                                     reason
