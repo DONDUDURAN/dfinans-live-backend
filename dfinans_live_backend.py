@@ -3341,6 +3341,42 @@ def ensure_ibkr_currency_funds(target_currency: str, needed_amount: float) -> Di
         return {"converted": False, "error": str(exc)}
 
 
+def _ibkr_closed_exchange_message(exchange: str) -> str:
+    """LSE/SEHK gibi ABD-disi borsalarda 'outside RTH' (mesai-disi) emir
+    calistirma US borsalari gibi desteklenmez - seans kapaliyken gonderilen
+    bir Market emri IBKR'de sessizce 'Inactive/Cancelled' durumunda kalir,
+    kullaniciya hicbir sey olmamis gibi gorunur (bkz. kullanici sikayeti:
+    'ai emir gönderebiliyor ama trading centerda ben manuel emir giremiyorum'
+    - aslinda emir backend'e ulasiyordu ama LSE kapaliyken 9 kez ULVR icin
+    'Inactive' donuyordu). Bu fonksiyon, seans disindaysa NET bir hata mesaji
+    dondurur ki kullanici/AI doomed bir emir denemek yerine net sekilde
+    bilgilendirilsin; SMART/US borsalari icin bos string doner (US hisseleri
+    IBKR'de gercekten pre/post-market destekler, hicbir sey degismez)."""
+    ex = str(exchange or "SMART").upper()
+    if ex not in ("LSE", "SEHK"):
+        return ""
+    if not _is_outside_regular_trading_hours(ex):
+        return ""
+    if ex == "LSE":
+        start_utc, end_utc = 8 * 60, 16 * 60 + 30
+        name = "Londra (LSE)"
+    else:
+        start_utc, end_utc = 1 * 60 + 30, 8 * 60
+        name = "Hong Kong (SEHK)"
+
+    def _utc_minutes_to_local_text(total_minutes: int) -> str:
+        # Sunucu/kullanici saat dilimi TR (UTC+3) kabul edilir - mevcut
+        # sistemde baska bir yerde de bu varsayim kullaniliyor (bkz. now_text).
+        local_total = (total_minutes + 3 * 60) % (24 * 60)
+        return f"{local_total // 60:02d}:{local_total % 60:02d}"
+
+    return (
+        f"{name} borsası şu an kapalı, bu borsada normal seans dışında emir çalıştırılamıyor "
+        f"(gönderilse bile IBKR'de 'Inactive' durumunda beklemede kalır, gerçekleşmez). "
+        f"Seans TR saatiyle {_utc_minutes_to_local_text(start_utc)}-{_utc_minutes_to_local_text(end_utc)} arası."
+    )
+
+
 def ibkr_place_market_order(
     symbol: str,
     side: str,
@@ -3357,6 +3393,9 @@ def ibkr_place_market_order(
         order_side = str(side or "").upper()
         if order_side not in ["BUY", "SELL"]:
             raise RuntimeError("side BUY veya SELL olmalı.")
+        closed_msg = _ibkr_closed_exchange_message(exchange)
+        if closed_msg:
+            raise RuntimeError(closed_msg)
 
         contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
         qualified = ib.qualifyContracts(contract)
