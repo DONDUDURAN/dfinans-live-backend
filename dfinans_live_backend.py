@@ -250,32 +250,46 @@ def assert_ibkr_market_allowed(exchange: str, currency: str, symbol: str = "") -
 # alinip-satilmamali (kullanici talebiyle havuzdan cikarildi).
 IBKR_SYMBOL_MARKET_INFO: Dict[str, Dict[str, str]] = {
     # --- ABD (SMART / USD) ---
-    "AAPL": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "MSFT": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "NVDA": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "AMD": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "TSLA": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "F": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "T": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "GOOGL": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "AMZN": {"exchange": "SMART", "currency": "USD", "region": "US"},
-    "META": {"exchange": "SMART", "currency": "USD", "region": "US"},
+    "AAPL": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
+    "MSFT": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
+    "NVDA": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "SEMICONDUCTOR"},
+    "AMD": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "SEMICONDUCTOR"},
+    "TSLA": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "AUTO_EV"},
+    "F": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "AUTO_EV"},
+    "T": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TELECOM"},
+    "GOOGL": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
+    "AMZN": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
+    "META": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
     # --- Emtia ETF'leri (SMART / USD) - fiziksel kontrat degil, ETF uzerinden ---
-    "GLD": {"exchange": "SMART", "currency": "USD", "region": "US"},   # SPDR Gold Shares (altin)
-    "USO": {"exchange": "SMART", "currency": "USD", "region": "US"},   # United States Oil Fund (petrol)
+    "GLD": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "GOLD"},   # SPDR Gold Shares (altin)
+    "USO": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "ENERGY"},   # United States Oil Fund (petrol)
     # --- Ingiltere (LSE / GBP) ---
-    "SHEL": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
-    "AZN": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
-    "HSBA": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
-    "ULVR": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
-    "RIO": {"exchange": "LSE", "currency": "GBP", "region": "UK"},
+    "SHEL": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "ENERGY"},
+    "AZN": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "HEALTHCARE"},
+    "HSBA": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "FINANCIALS"},
+    "ULVR": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "CONSUMER_STAPLES"},
+    "RIO": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "MINING_MATERIALS"},
     # --- Hong Kong (SEHK / HKD) ---
-    "700": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},   # Tencent
-    "9988": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},  # Alibaba
-    "5": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},     # HSBC (HK listesi)
-    "1299": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},  # AIA
-    "3690": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA"},  # Meituan
+    "700": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH"},   # Tencent
+    "9988": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH"},  # Alibaba
+    "5": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "FINANCIALS"},     # HSBC (HK listesi)
+    "1299": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "FINANCIALS"},  # AIA (sigorta)
+    "3690": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH"},  # Meituan
 }
+
+# Kullanicinin talebi: 'sektör rotasyonu ekle' - kripto icin sabit/varsayimsal
+# bir gruplama (IBKR_SYMBOL_MARKET_INFO'daki 'sector' alaniyla ayni mantik).
+_CRYPTO_SECTOR_MAP: Dict[str, str] = {
+    "BTCUSDT": "CRYPTO_MAJOR",
+    "ETHUSDT": "CRYPTO_MAJOR",
+    "BNBUSDT": "CRYPTO_EXCHANGE",
+    "SOLUSDT": "CRYPTO_L1",
+    "ADAUSDT": "CRYPTO_L1",
+    "AVAXUSDT": "CRYPTO_L1",
+    "XRPUSDT": "CRYPTO_PAYMENTS",
+    "DOGEUSDT": "CRYPTO_MEME",
+}
+
 
 _IBKR_WATCHLIST_DEFAULT = ",".join(IBKR_SYMBOL_MARKET_INFO.keys())
 
@@ -478,7 +492,12 @@ IBKR_AI_SELL_MIN_LOSS_PCT = float(os.getenv("IBKR_AI_SELL_MIN_LOSS_PCT", "10.0")
 # Kullanicinin talebi: IBKR'de asgari teyit sayisi. 5 bagimsiz sinyalden
 # (momentum, emir akisi, korelasyon, teknik trend, coklu zaman dilimi) en az
 # bu kadari action ile ayni yonde olmadan GERCEK IBKR emri gonderilmez.
-IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "3"))
+IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "4"))
+
+# ATR (Average True Range) bazli volatilite-adaptif pozisyon boyutlandirma esikleri
+# (kullanicinin talebi: 'ATR ekle'). atr_pct = ATR(14) / son kapanis * 100.
+ATR_HIGH_VOL_THRESHOLD_PCT = float(os.getenv("ATR_HIGH_VOL_THRESHOLD_PCT", "6.0"))
+ATR_LOW_VOL_THRESHOLD_PCT = float(os.getenv("ATR_LOW_VOL_THRESHOLD_PCT", "1.5"))
 BINANCE_AI_SELL_MIN_LOSS_PCT = float(os.getenv("BINANCE_AI_SELL_MIN_LOSS_PCT", "10.0"))
 
 # Kullanicinin talebi: 'acigа satis islemi yapamiyor mu sistem, açığa satış
@@ -1784,6 +1803,41 @@ _AI_DECISION_MARKET_LABELS: Dict[str, str] = {
 }
 
 
+def _execution_fill_state(execution: Dict[str, Any]) -> str:
+    """execution sozlugunden emrin gercek doldurma durumunu cikarir:
+    'FILLED' (borsada/IBKR'de gercekten gerceklesmis), 'PENDING' (emir
+    iletilmis/borsaya gonderilmis ama henuz DOLMAMIS - ozellikle IBKR'de
+    mesai-disi/DAY Market emirlerinde orderStatus 'Submitted'/'PreSubmitted'
+    olarak kalip filled=0 gorulebiliyor), 'REJECTED' (hata/iptal/red) veya
+    'UNKNOWN' (eski kayitlarda status bilgisi yok - geriye donuk uyumluluk
+    icin dolmus sayilir). Kullanicinin bildirdigi 'ULVR emri iletildi ama
+    işlem gerçekleşmedi, AI Karar Merkezi'nde yine de AÇILDI görünüyor'
+    sorunu bu ayrimin eksikliginden kaynaklaniyordu."""
+    if not isinstance(execution, dict) or not execution:
+        return "UNKNOWN"
+    if execution.get("error"):
+        return "REJECTED"
+    status = str(execution.get("status", "") or "").upper()
+    filled = safe_float(execution.get("filled", execution.get("executedQty", 0)))
+    remaining = safe_float(execution.get("remaining", 0))
+    if status == "FILLED":
+        return "FILLED"
+    if status in (
+        "SUBMITTED", "PRESUBMITTED", "PENDINGSUBMIT", "APIPENDING",
+        "NEW", "PARTIALLYFILLED", "PARTIALLY_FILLED",
+    ):
+        if filled > 0 and remaining <= 0:
+            return "FILLED"
+        return "PENDING"
+    if status in ("CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "INACTIVE"):
+        return "REJECTED"
+    if not status:
+        # status alani hic yoksa (eski kayitlar / bazi API yanitlari) ama
+        # acikca hata da yoksa, geriye donuk uyumluluk icin dolmus varsay.
+        return "FILLED"
+    return "UNKNOWN"
+
+
 def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
     """iOS 'AI Karar Merkezi' (AIDecisionCenterView) ekraninin bekledigi
     GET /ai-decision-center semasina uygun karar listesini auto_history'den
@@ -1815,6 +1869,7 @@ def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
     rows = db_recent_auto_history(raw_pool)
 
     trades: List[Dict[str, Any]] = []
+    submitted: List[Dict[str, Any]] = []
     blocked_by_symbol: Dict[str, Dict[str, Any]] = {}
     blocked_order: List[str] = []
 
@@ -1830,12 +1885,19 @@ def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
         exec_error = str(execution.get("error", "") or "").strip()
         exec_simulated = bool(execution.get("simulated", True))
         action_is_trade = action in ("BUY", "SELL")
-        # Gercekten calistirilmis (emir borsaya/IBKR'ye gitmis) sayilmasi icin:
-        # hata olmamasi VE simulasyon olmamasi gerekir.
-        really_executed = action_is_trade and not exec_error and not exec_simulated
+        # Gercekten dolmus (borsada/IBKR'de gerceklesmis) sayilmasi icin: hata
+        # olmamasi, simulasyon olmamasi VE emrin fiilen DOLMUS olmasi gerekir.
+        # Onceden sadece 'hata yok + simulasyon degil' yeterli sayiliyordu -
+        # bu da IBKR'de gonderilmis ama henuz DOLMAMIS (mesai-disi Market
+        # emri Submitted/PreSubmitted'te bekleyen) siparisleri 'AÇILDI' gibi
+        # gosteriyordu (kullanicinin ULVR sikayeti). Simdi 3 durum var:
+        # FILLED -> AÇILDI/İŞLEME DÖNÜŞTÜ, PENDING -> EMİR İLETİLDİ, digerleri -> BLOCKED.
+        fill_state = _execution_fill_state(execution) if action_is_trade else "UNKNOWN"
+        really_executed = action_is_trade and not exec_error and not exec_simulated and fill_state == "FILLED"
+        is_pending_submit = action_is_trade and not exec_error and not exec_simulated and fill_state == "PENDING"
         symbol = str(r.get("symbol", "-"))
 
-        if action_is_trade and not really_executed:
+        if action_is_trade and not really_executed and not is_pending_submit:
             # AI BUY/SELL karari verdi ama emir gercekten calismadi (paper-mode
             # simulasyon veya IBKR/Binance hatasi) - bunu 'AÇILDI' gibi gostermek
             # yaniltici oldugu icin BLOCKED say, sebebi reason'a ekle.
@@ -1843,29 +1905,39 @@ def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
                 reason = f"{reason} (Emir başarısız/reddedildi: {exec_error})"
             elif exec_simulated:
                 reason = f"{reason} (Paper-mode/simülasyon: gerçek emir gönderilmedi.)"
+        elif is_pending_submit:
+            reason = f"{reason} (Emir iletildi, borsada henüz gerçekleşmeyi bekliyor.)"
 
+        status_label = "OPENED" if really_executed else ("SUBMITTED" if is_pending_submit else "BLOCKED")
         entry = {
             "id": str(r.get("id") or f"{r.get('time')}-{symbol}"),
             "symbol": symbol,
             "market": market_label,
             "side": action,
-            "status": "OPENED" if really_executed else "BLOCKED",
+            "status": status_label,
             "score": confidence,
             "timeText": _relative_time_tr(r.get("time")),
             "positiveReasons": [reason] if really_executed else [],
-            "negativeReasons": [] if really_executed else [reason],
+            "negativeReasons": [] if (really_executed or is_pending_submit) else [reason],
             "resultText": (
                 f"{symbol} için {action} kararı verildi ve işleme geçildi: {reason}"
                 if really_executed
                 else (
-                    f"{symbol} için {action} kararı verildi ama işlem gerçekleşmedi: {reason}"
-                    if action_is_trade
-                    else f"{symbol} için net bir işlem sinyali bulunmadı, pas geçildi: {reason}"
+                    f"{symbol} için {action} emri iletildi, borsada gerçekleşmesi bekleniyor: {reason}"
+                    if is_pending_submit
+                    else (
+                        f"{symbol} için {action} kararı verildi ama işlem gerçekleşmedi: {reason}"
+                        if action_is_trade
+                        else f"{symbol} için net bir işlem sinyali bulunmadı, pas geçildi: {reason}"
+                    )
                 )
             ),
         }
         if really_executed:
             trades.append(entry)
+            continue
+        if is_pending_submit:
+            submitted.append(entry)
             continue
         # rows en yeniden en eskiye siralidir (created_at DESC); bu sembol
         # icin ilk gordugumuz (=en guncel) BLOCKED kaydi tutulur, ayni
@@ -1874,15 +1946,16 @@ def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
             blocked_by_symbol[symbol] = entry
             blocked_order.append(symbol)
 
-    # Acilan islemler her zaman basa (zaten en yeniden en eskiye), ardindan
-    # sembol basina sadelestirilmis engellenen kararlar skor (guven) buyukten
-    # kucuge, esitlikte en yeni ise once gelecek sekilde eklenir.
+    # Acilan islemler ve iletilmis-ama-bekleyen emirler her zaman basa (zaten
+    # en yeniden en eskiye), ardindan sembol basina sadelestirilmis engellenen
+    # kararlar skor (guven) buyukten kucuge, esitlikte en yeni ise once
+    # gelecek sekilde eklenir.
     blocked_sorted = sorted(
         (blocked_by_symbol[s] for s in blocked_order),
         key=lambda e: e["score"],
         reverse=True,
     )
-    out = trades + blocked_sorted
+    out = trades + submitted + blocked_sorted
     return out[: max(1, limit)]
 
 
@@ -1916,6 +1989,24 @@ def build_ai_performance_stats_payload() -> Dict[str, Any]:
         "avgProfit": avg_profit,
         "avgLoss": avg_loss,
     }
+
+
+def db_update_auto_history_execution(history_id: str, execution: Dict[str, Any]) -> None:
+    """auto_history kaydinin execution_json alanini gunceller - IBKR'de
+    Submitted/PreSubmitted durumunda kaydedilmis bir emir daha sonra
+    (mesela seans acildiginda) gerceklestiginde, AI Karar Merkezi'nin
+    kaydi 'EMİR İLETİLDİ'de takili birakmamasi icin kullanilir (bkz.
+    reconcile_pending_ibkr_order_fills)."""
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                "UPDATE auto_history SET execution_json = ? WHERE id = ?",
+                (json.dumps(execution, ensure_ascii=False), str(history_id)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def db_recent_auto_history(limit: int = 120) -> List[Dict[str, Any]]:
@@ -2880,6 +2971,130 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
     if item.get("error"):
         raise RuntimeError(f"IBKR işlem hatası: {item['error']}")
     return item["result"]
+
+
+def ibkr_open_orders_snapshot() -> List[Dict[str, Any]]:
+    """IBKR'de gonderilmis ama henuz TAMAMEN dolmamis (Submitted/PreSubmitted/
+    PendingSubmit, filled < toplam miktar) emirleri dondurur. Kullanicinin
+    bildirdigi sorun: ULVR icin emir gonderilmis ama gercekte islem
+    gerceklesmemis, ancak AI Karar Merkezi'nde 'AÇILDI' gibi gorunuyordu -
+    bu emirlerin Trading Center'da 'açık emirler' olarak gorulebilmesi ve AI
+    tarafinin da bunlari ayri bir durum (SUBMITTED/'Emir iletildi') olarak
+    isaretleyebilmesi icin bu anlik goruntu eklendi. ib.openTrades() henuz
+    tamamlanmamis (Done olmayan) tum trade'leri dondurur."""
+    def _run(ib, _):
+        rows: List[Dict[str, Any]] = []
+        for trade in ib.openTrades():
+            try:
+                if IBKR_ACCOUNT and str(getattr(trade.order, "account", "") or "") not in ("", IBKR_ACCOUNT):
+                    continue
+                status = str(getattr(trade.orderStatus, "status", "") or "")
+                filled = safe_float(getattr(trade.orderStatus, "filled", 0))
+                remaining = safe_float(getattr(trade.orderStatus, "remaining", 0))
+                contract = trade.contract
+                order = trade.order
+                rows.append({
+                    "broker": "IBKR",
+                    "symbol": getattr(contract, "symbol", "-"),
+                    "exchange": getattr(contract, "exchange", "-"),
+                    "currency": getattr(contract, "currency", "-"),
+                    "type": getattr(order, "orderType", "-"),
+                    "side": getattr(order, "action", "-"),
+                    "amount": str(getattr(order, "totalQuantity", "-")),
+                    "filled": filled,
+                    "remaining": remaining,
+                    "price": str(getattr(order, "lmtPrice", "") or getattr(trade.orderStatus, "avgFillPrice", "") or "-"),
+                    "status": status or "Submitted",
+                    "orderId": getattr(order, "orderId", None),
+                })
+            except Exception:
+                continue
+        return rows
+    try:
+        return ibkr_execute(_run) or []
+    except Exception:
+        return []
+
+
+def ibkr_order_status_by_id(order_id: Any) -> Optional[Dict[str, Any]]:
+    """Belirli bir IBKR orderId'sinin GUNCEL durumunu dondurur - ib.trades()
+    hem acik hem tamamlanmis (Filled/Cancelled) tum emirleri kapsar, boylece
+    daha once 'Submitted/PreSubmitted' iken kaydedilmis bir emrin sonradan
+    (mesela seans acildiginda) FILLED olup olmadigi kontrol edilebilir.
+    Bulunamazsa/hata olursa None doner (fail-open)."""
+    try:
+        oid = int(order_id)
+    except Exception:
+        return None
+
+    def _run(ib, _):
+        for trade in ib.trades():
+            try:
+                if int(getattr(trade.order, "orderId", -1)) == oid:
+                    return {
+                        "status": str(getattr(trade.orderStatus, "status", "") or ""),
+                        "filled": safe_float(getattr(trade.orderStatus, "filled", 0)),
+                        "remaining": safe_float(getattr(trade.orderStatus, "remaining", 0)),
+                        "avg_fill_price": safe_float(getattr(trade.orderStatus, "avgFillPrice", 0)),
+                    }
+            except Exception:
+                continue
+        return None
+    try:
+        return ibkr_execute(_run)
+    except Exception:
+        return None
+
+
+def reconcile_pending_ibkr_order_fills() -> None:
+    """Kullanicinin bildirdigi sorun: IBKR'de 'Submitted/PreSubmitted' durumunda
+    (henuz DOLMAMIS) kaydedilen bir emir daha sonra (mesela seans acildiginda)
+    gerceklestiginde, AI Karar Merkezi'ndeki kayit surekli 'EMİR İLETİLDİ'de
+    takili kaliyordu - cunku auto_history kaydi, karar verildigi andaki
+    (donmus) execution goruntusunu tutuyor. Bu fonksiyon son kayitlar
+    arasindan hala PENDING gorunen IBKR emirlerini bulur, IBKR'den guncel
+    durumu sorar ve FILLED ise DB'deki execution_json'u gunceller - boylece
+    bir sonraki /ai-decision-center cagrisinda kayit otomatik olarak
+    'AÇILDI/İŞLEME DÖNÜŞTÜ' olarak gorunur. Auto-trader arka plan
+    dongusunden periyodik cagrilir; hata sessizce yutulur (fail-open, bu
+    sadece goruntu duzeltmesidir - gercek pozisyon/PnL takibini etkilemez)."""
+    try:
+        rows = db_recent_auto_history(60)
+    except Exception:
+        return
+    for r in rows:
+        try:
+            if str(r.get("broker", "")).upper() != "IBKR":
+                continue
+            execution = r.get("execution") or {}
+            if not isinstance(execution, dict) or not execution:
+                continue
+            if _execution_fill_state(execution) != "PENDING":
+                continue
+            order_id = execution.get("order_id")
+            if not order_id:
+                continue
+            live = ibkr_order_status_by_id(order_id)
+            if not live:
+                continue
+            live_status = str(live.get("status", "")).upper()
+            live_filled = safe_float(live.get("filled"))
+            live_remaining = safe_float(live.get("remaining"))
+            if live_status == "FILLED" or (live_filled > 0 and live_remaining <= 0):
+                updated = dict(execution)
+                updated.update({
+                    "status": "Filled",
+                    "filled": live_filled,
+                    "remaining": live_remaining,
+                    "avg_fill_price": live.get("avg_fill_price"),
+                })
+                db_update_auto_history_execution(str(r.get("id")), updated)
+            elif live_status in ("CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "INACTIVE"):
+                updated = dict(execution)
+                updated["status"] = live_status
+                db_update_auto_history_execution(str(r.get("id")), updated)
+        except Exception:
+            continue
 
 
 def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
@@ -4090,11 +4305,36 @@ def compute_sma(closes: List[float], period: int) -> Optional[float]:
     return sum(closes[-period:]) / period
 
 
+def compute_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
+    """Wilder'in ATR (Average True Range) formulu - volatilite olcusu. True
+    Range = max(high-low, |high-prev_close|, |low-prev_close|); ATR bunun
+    Wilder-smoothed ortalamasidir. En az period+1 bar gerektirir, yetersizse
+    None doner (cagiran taraf sessizce notr/varsayilan davranisa duser)."""
+    n = min(len(highs), len(lows), len(closes))
+    if n < period + 1:
+        return None
+    true_ranges = []
+    for i in range(1, n):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        true_ranges.append(tr)
+    if len(true_ranges) < period:
+        return None
+    atr = sum(true_ranges[:period]) / period
+    for tr in true_ranges[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+
 def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60) -> List[Dict[str, float]]:
     """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyati VE hacmini ceker
     (RSI/SMA ve hacim teyidi hesaplamalari icin gecmis veri gerekir). /history
     ucundaki ile ayni desen; burada dogrudan Python liste-of-dict (eskiden-yeniye
-    sirali, {'close', 'volume'}) donuyor."""
+    sirali, {'close', 'volume', 'high', 'low'}) donuyor. high/low, ATR (volatilite)
+    hesaplamasi icin de kullanilir (bkz. compute_atr)."""
     def _run(ib, ibs):
         contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
         qualified = ib.qualifyContracts(contract)
@@ -4110,19 +4350,24 @@ def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: s
             formatDate=1,
         )
         return [
-            {"close": safe_float(b.close), "volume": safe_float(b.volume)}
+            {
+                "close": safe_float(b.close),
+                "volume": safe_float(b.volume),
+                "high": safe_float(b.high),
+                "low": safe_float(b.low),
+            }
             for b in bars if safe_float(b.close) > 0
         ]
     return ibkr_execute(_run)
 
 
 def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> Dict[str, Any]:
-    """Sembolun RSI(14), SMA(20)/SMA(50) ve hacim teyidi verilerini hesaplar - kripto
-    icin Binance gunluk mumlari (fetch_binance_klines), IBKR icin gunluk bar gecmisi
-    (get_ibkr_daily_bars) kullanilir. Sonuc sembol+broker basina cache'lenir
-    (kripto 30dk, IBKR 60dk - IBKR sorgusu daha yavas/pahali oldugu icin daha
-    uzun cache). Daha once sistemde HICBIR klasik teknik indikator yoktu -
-    sadece 24s momentum + emir defteri baskisi vardi."""
+    """Sembolun RSI(14), SMA(20)/SMA(50), ATR(14) (volatilite) ve hacim teyidi
+    verilerini hesaplar - kripto icin Binance gunluk mumlari (fetch_binance_klines),
+    IBKR icin gunluk bar gecmisi (get_ibkr_daily_bars) kullanilir. Sonuc sembol+broker
+    basina cache'lenir (kripto 30dk, IBKR 60dk - IBKR sorgusu daha yavas/pahali
+    oldugu icin daha uzun cache). Daha once sistemde HICBIR klasik teknik indikator
+    yoktu - sadece 24s momentum + emir defteri baskisi vardi."""
     def _fetch():
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
@@ -4131,16 +4376,23 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
             )
             closes = [b["close"] for b in bars]
             volumes = [b["volume"] for b in bars]
+            highs = [b.get("high", b["close"]) for b in bars]
+            lows = [b.get("low", b["close"]) for b in bars]
         else:
             binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
             candles = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=60)
             closes = [safe_float(c.get("close")) for c in candles if safe_float(c.get("close")) > 0]
             volumes = [safe_float(c.get("volume")) for c in candles if safe_float(c.get("close")) > 0]
+            highs = [safe_float(c.get("high")) or safe_float(c.get("close")) for c in candles if safe_float(c.get("close")) > 0]
+            lows = [safe_float(c.get("low")) or safe_float(c.get("close")) for c in candles if safe_float(c.get("close")) > 0]
         if len(closes) < 15:
             raise RuntimeError(f"{symbol} için RSI/SMA hesaplamaya yetecek geçmiş veri yok ({len(closes)} bar).")
         rsi = compute_rsi(closes, 14)
         sma20 = compute_sma(closes, 20)
         sma50 = compute_sma(closes, 50)
+        atr = compute_atr(highs, lows, closes, 14)
+        last_close = closes[-1]
+        atr_pct = (atr / last_close * 100.0) if (atr is not None and last_close > 0) else None
         # Hacim teyidi: son (bugunku/en guncel) mum GUN ICINDE hala olusmakta oldugu
         # icin (henuz kapanmamis) hacmi yapay dusuk gorunur - bu yuzden hacim
         # kiyaslamasinda SON KAPANMIS barı kullaniriz (volumes[-2]), onceki 20
@@ -4161,6 +4413,8 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
             "rsi_14": round(rsi, 2) if rsi is not None else None,
             "sma_20": round(sma20, 4) if sma20 is not None else None,
             "sma_50": round(sma50, 4) if sma50 is not None else None,
+            "atr_14": round(atr, 6) if atr is not None else None,
+            "atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
             "last_close": round(closes[-1], 6),
             "last_closed_volume": round(last_closed_volume, 2),
             "avg_volume_20": round(avg_volume, 2) if avg_volume else None,
@@ -4169,6 +4423,42 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
         }
     ttl = 3600 if broker == "IBKR" else 1800
     return _cache_get_or_fetch(f"tech_indicators:{broker}:{symbol}", ttl, _fetch)
+
+
+def get_atr_position_size_scale(symbol: str, market: str, broker: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'ATR ekle' - volatiliteye gore pozisyon boyutunu
+    otomatik ayarlayan bir katman. ATR(14)/son kapanis (atr_pct) ile olculen
+    volatiliteye gore:
+      - COK YUKSEK volatilite (atr_pct >= ATR_HIGH_VOL_THRESHOLD_PCT, varsayilan
+        %6): pozisyon boyutu kucultulur (qty_scale 0.5) - ani/sert hareketlerde
+        (ör. haber/bilanço şoku) tek islemde asiri risk almamak icin.
+      - DUSUK volatilite (atr_pct <= ATR_LOW_VOL_THRESHOLD_PCT, varsayilan %1.5):
+        pozisyon boyutu biraz buyutulur (qty_scale 1.25) - sakin/yatay piyasada
+        ayni riskle daha fazla pozisyon acilabilir.
+      - ORTA volatilite: degisiklik yok (qty_scale 1.0).
+    ATR verisi alinamazsa (yetersiz gecmis, API hatasi vb.) fail-open olarak
+    qty_scale 1.0 (etkisiz) doner - bu katman asla islemi tamamen engellemez,
+    sadece boyutu ayarlar."""
+    try:
+        tech = get_technical_indicator_snapshot(symbol, market, broker)
+        atr_pct = tech.get("atr_pct")
+        if atr_pct is None:
+            return {"qty_scale": 1.0, "atr_pct": None, "notes": []}
+        if atr_pct >= ATR_HIGH_VOL_THRESHOLD_PCT:
+            return {
+                "qty_scale": 0.5,
+                "atr_pct": atr_pct,
+                "notes": [f"[ATR] {symbol} volatilitesi yüksek (ATR%{atr_pct:.2f}): pozisyon boyutu küçültüldü."],
+            }
+        if atr_pct <= ATR_LOW_VOL_THRESHOLD_PCT:
+            return {
+                "qty_scale": 1.25,
+                "atr_pct": atr_pct,
+                "notes": [f"[ATR] {symbol} volatilitesi düşük (ATR%{atr_pct:.2f}): pozisyon boyutu büyütüldü."],
+            }
+        return {"qty_scale": 1.0, "atr_pct": atr_pct, "notes": []}
+    except Exception:
+        return {"qty_scale": 1.0, "atr_pct": None, "notes": []}
 
 
 def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str) -> Dict[str, Any]:
@@ -6179,6 +6469,156 @@ def compute_correlation_matrix(symbols: List[str]) -> List[Dict[str, Any]]:
     return rows
 
 
+# Kullanicinin talebi: 'etkin risk limti ekle' (etkin risk limiti). Ayni yonde/
+# korele varliklarda ustuste pozisyon acildiginda gercek risk maruziyetinin
+# fark edilmeden artmasini onlemek icin esikler.
+PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT = float(os.getenv("PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT", "40.0"))
+
+
+def get_total_portfolio_value_usd() -> float:
+    """Tum hesaplarin (Binance + IBKR) toplam USD degerini dondurur - TRY
+    bazinda tutulan toplami canli USD/TRY kuruyla cevirir (bkz.
+    get_portfolio_circuit_breaker_status ile ayni yontem). Hata/yetersiz veri
+    durumunda 0.0 doner (cagiran taraf fail-open davranmalidir)."""
+    try:
+        portfolio = get_portfolio()
+        total_try = safe_float((portfolio.get("data") or {}).get("totalTry"))
+        usdtry_rate = get_live_usdtry_rate() or 0.0
+        if total_try > 0 and usdtry_rate > 0:
+            return total_try / usdtry_rate
+    except Exception:
+        pass
+    return 0.0
+
+
+def get_all_open_positions_notional_usd() -> List[Dict[str, Any]]:
+    """Tum acik pozisyonlarin (IBKR + Binance spot + futures) sembol ve USD
+    notional (piyasa degeri) listesini dondurur - etkin korele risk limiti
+    hesaplamasi icin kullanilir. IBKR fiyatlari get_ibkr_price_usd_equivalent
+    ile USD karsiligina cevrilir (LSE/SEHK pence/HKD duzeltmesi dahil - bkz.
+    #93). Hata durumunda bos liste doner (fail-open)."""
+    rows: List[Dict[str, Any]] = []
+    try:
+        portfolio = get_portfolio()
+    except Exception:
+        return rows
+    for p in portfolio.get("ibkr_positions", []) or []:
+        try:
+            sym = str(p.get("symbol", "")).upper()
+            qty = abs(safe_float(p.get("size") or p.get("position")))
+            price_native = safe_float(p.get("mark_price")) or safe_float(p.get("avgCost"))
+            exchange = str(p.get("exchange") or "SMART")
+            currency = str(p.get("currency") or "USD")
+            price_usd = get_ibkr_price_usd_equivalent(price_native, exchange, currency)
+            notional = qty * price_usd
+            if sym and notional > 0:
+                rows.append({"symbol": sym, "notional_usd": notional, "broker": "IBKR"})
+        except Exception:
+            continue
+    for p in portfolio.get("spot_positions", []) or []:
+        try:
+            sym = str(p.get("symbol", "")).upper()
+            qty = safe_float(p.get("quantity"))
+            price = safe_float(p.get("current_price")) or safe_float(p.get("avg_cost"))
+            notional = qty * price
+            if sym and notional > 0:
+                rows.append({"symbol": sym, "notional_usd": notional, "broker": "BINANCE_SPOT"})
+        except Exception:
+            continue
+    for p in portfolio.get("futures_positions", []) or []:
+        try:
+            if p.get("id") == "error":
+                continue
+            sym = str(p.get("symbol", "")).upper()
+            qty = abs(safe_float(p.get("size")))
+            price = safe_float(p.get("mark_price")) or safe_float(p.get("entry_price"))
+            notional = qty * price
+            if sym and notional > 0:
+                rows.append({"symbol": sym, "notional_usd": notional, "broker": "BINANCE_FUTURES"})
+        except Exception:
+            continue
+    return rows
+
+
+def get_portfolio_correlation_risk_bias(symbol: str, action: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'etkin risk limiti ekle' - portfoyde ayni yonde/
+    korele varliklarda ustuste pozisyon acildiginda gercek risk maruziyetinin
+    fark edilmeden artmasini onler. Acik olan TUM pozisyonlarin (IBKR + Binance
+    spot + futures) USD notional (piyasa degeri) toplamini, aday sembolle
+    |korelasyon| >= _CORR_STRONG_THRESHOLD olan (ayni sembol dahil, kendisiyle
+    korelasyon = 1 kabul edilir) mevcut acik pozisyonlar uzerinden hesaplar -
+    korelasyon, zaten var olan canli fiyat-gecmisi altyapisi uzerinden
+    (record_correlation_price/compute_correlation_matrix ile ayni kaynak,
+    _CORR_PRICE_HISTORY) hesaplanir; statik/varsayimsal bir grup listesi
+    DEGILDIR. Bu 'etkin korele maruziyet', toplam portfoy degerinin belirli
+    bir yuzdesini (PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT, varsayilan %40)
+    asarsa BUY/SELL confidence'ina negatif bias uygulanir ve (kripto icin)
+    pozisyon boyutu kucultulur - boylece portfoy zaten yogun oldugu bir
+    varlik/grup uzerine (fark etmeden) daha fazla ekleme yapmasi caydirilir.
+    Herhangi bir hata/yetersiz veri durumunda fail-open (bias=0, qty_scale=1.0)
+    davranir - bu katman asla islemi tek basina engellemez, sadece caydirir/
+    kucultur."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "qty_scale": 1.0, "notes": []}
+    try:
+        sym_norm = normalize_symbol(symbol)
+        positions = get_all_open_positions_notional_usd()
+        if not positions:
+            return {"bias": 0, "qty_scale": 1.0, "notes": []}
+
+        with _CORR_HISTORY_LOCK:
+            snapshot = {s: list(v) for s, v in _CORR_PRICE_HISTORY.items()}
+        cand_returns = _returns_series(snapshot.get(sym_norm, []))
+
+        correlated_notional = 0.0
+        correlated_symbols: List[str] = []
+        for p in positions:
+            p_sym = normalize_symbol(p["symbol"])
+            if p_sym == sym_norm:
+                correlated_notional += p["notional_usd"]
+                correlated_symbols.append(p["symbol"])
+                continue
+            p_returns = _returns_series(snapshot.get(p_sym, []))
+            corr = _pearson_corr(cand_returns, p_returns)
+            if corr is not None and abs(corr) >= _CORR_STRONG_THRESHOLD:
+                correlated_notional += p["notional_usd"]
+                correlated_symbols.append(p["symbol"])
+
+        if correlated_notional <= 0:
+            return {"bias": 0, "qty_scale": 1.0, "notes": []}
+
+        total_portfolio_usd = get_total_portfolio_value_usd()
+        if total_portfolio_usd <= 0:
+            return {"bias": 0, "qty_scale": 1.0, "notes": []}
+
+        exposure_pct = (correlated_notional / total_portfolio_usd) * 100.0
+        warn_threshold = PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT * 0.7
+        peers_txt = ", ".join(sorted(set(correlated_symbols))[:5])
+        if exposure_pct >= PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT:
+            return {
+                "bias": -8,
+                "qty_scale": 0.4,
+                "notes": [
+                    f"[Etkin Risk Limiti] {symbol} ile korele mevcut pozisyonlar ({peers_txt}) "
+                    f"portföyün %{exposure_pct:.1f}'ini oluşturuyor (limit %{PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT:.0f}): "
+                    f"yeni pozisyon caydırılır ve küçültülür."
+                ],
+            }
+        if exposure_pct >= warn_threshold:
+            return {
+                "bias": -4,
+                "qty_scale": 0.7,
+                "notes": [
+                    f"[Etkin Risk Limiti] {symbol} ile korele mevcut pozisyonlar ({peers_txt}) "
+                    f"portföyün %{exposure_pct:.1f}'ini oluşturuyor (limit %{PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT:.0f}'e yaklaşıyor): "
+                    f"pozisyon boyutu hafifçe küçültülür."
+                ],
+            }
+        return {"bias": 0, "qty_scale": 1.0, "notes": []}
+    except Exception:
+        return {"bias": 0, "qty_scale": 1.0, "notes": []}
+
+
 _CROSS_ASSET_PAIR_DEFS: List[Tuple[str, str, str, str]] = [
     # (title, subtitle, yahoo_key_a, yahoo_key_b)
     ("BTC ↔ Nasdaq", "Kripto ile teknoloji risk iştahı", "BTCUSDT", "NASDAQ"),
@@ -6243,6 +6683,102 @@ def get_cross_asset_correlations() -> Dict[str, Any]:
         return {"ok": True, "pairs": results, "time": now_text()}
 
     return _cache_get_or_fetch("cross_asset_correlations", 21600, _fetch)
+
+
+# Kullanicinin talebi: 'sektör rotasyonu ekle'. get_correlation_pair_signal
+# (yukarida) istatistiksel en-guclu-korelasyonlu es varligi bulur - ancak bu,
+# genis piyasa beta'sindan dolayi ayni sektorde OLMAYAN varliklari da
+# eslestirebilir. Sektor rotasyonu ozellikle BILINEN/elle etiketlenmis ayni
+# sektor/grup uyeleri arasinda calisir: bir sektorun 'lideri' belirgin
+# hareket ettiyse ama aday sembol (ayni sektorden) henuz takip etmediyse,
+# bu bir rotasyon (gecikme) firsatidir - once lider hareket eder, sermaye
+# sonra sektordeki digerlerine 'doner'.
+_SECTOR_LEADER_MOVE_MIN_PCT = 4.0
+_SECTOR_LAGGARD_MOVE_MAX_PCT = 1.0
+_SECTOR_ROTATION_BIAS = 6
+
+
+def get_symbol_sector(symbol: str, market: str) -> str:
+    sym = normalize_symbol(symbol)
+    if str(market or "").upper() == "IBKR":
+        info = IBKR_SYMBOL_MARKET_INFO.get(sym)
+        return str(info.get("sector", "")) if info else ""
+    return _CRYPTO_SECTOR_MAP.get(sym, "")
+
+
+def get_sector_peer_symbols(symbol: str, market: str) -> List[str]:
+    sym = normalize_symbol(symbol)
+    sector = get_symbol_sector(symbol, market)
+    if not sector:
+        return []
+    if str(market or "").upper() == "IBKR":
+        return [s for s, info in IBKR_SYMBOL_MARKET_INFO.items() if info.get("sector") == sector and normalize_symbol(s) != sym]
+    return [s for s, sec in _CRYPTO_SECTOR_MAP.items() if sec == sector and normalize_symbol(s) != sym]
+
+
+def _price_points_recent_move_pct(points: List[Tuple[float, float]], lookback: int = 6) -> float:
+    if len(points) < 2:
+        return 0.0
+    window = points[-lookback:] if len(points) >= lookback else points
+    first_price = window[0][1]
+    last_price = window[-1][1]
+    if first_price <= 0:
+        return 0.0
+    return (last_price - first_price) / first_price * 100.0
+
+
+def get_sector_rotation_bias(symbol: str, action: str, market: str) -> Dict[str, Any]:
+    """Sembolun ait oldugu sektordeki (bkz. IBKR_SYMBOL_MARKET_INFO['sector']
+    / _CRYPTO_SECTOR_MAP) en cok hareket eden uyeyi ('lider') bulur. Lider
+    belirgin (>= _SECTOR_LEADER_MOVE_MIN_PCT) hareket ettiyse ama aday sembol
+    henuz (<= _SECTOR_LAGGARD_MOVE_MAX_PCT) takip etmediyse ve onerilen
+    islem yonu liderin yonuyle uyusuyorsa, pozitif bias uygulanir (sektor
+    rotasyonu/gecikme firsati). Yetersiz veri/hata durumunda fail-open
+    (bias=0, notes=[]) doner - bu katman hicbir zaman islemi engellemez,
+    sadece destekler."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+    try:
+        sym = normalize_symbol(symbol)
+        sector = get_symbol_sector(symbol, market)
+        if not sector:
+            return {"bias": 0, "notes": []}
+        peers = get_sector_peer_symbols(symbol, market)
+        if not peers:
+            return {"bias": 0, "notes": []}
+
+        with _CORR_HISTORY_LOCK:
+            sym_points = list(_CORR_PRICE_HISTORY.get(sym, []))
+            peer_points_map = {p: list(_CORR_PRICE_HISTORY.get(normalize_symbol(p), [])) for p in peers}
+
+        sym_move = _price_points_recent_move_pct(sym_points)
+        leader_symbol: Optional[str] = None
+        leader_move = 0.0
+        for peer, pts in peer_points_map.items():
+            mv = _price_points_recent_move_pct(pts)
+            if abs(mv) > abs(leader_move):
+                leader_move = mv
+                leader_symbol = peer
+
+        if leader_symbol is None or abs(leader_move) < _SECTOR_LEADER_MOVE_MIN_PCT:
+            return {"bias": 0, "notes": []}
+        if abs(sym_move) > _SECTOR_LAGGARD_MOVE_MAX_PCT:
+            # Aday zaten hareket etmis - "henuz takip etmedi" durumu gecerli degil.
+            return {"bias": 0, "notes": []}
+
+        expected_action = "BUY" if leader_move > 0 else "SELL"
+        if expected_action != action:
+            return {"bias": 0, "notes": []}
+
+        return {
+            "bias": _SECTOR_ROTATION_BIAS,
+            "notes": [
+                f"[Sektör Rotasyonu] {sector} sektöründe lider {leader_symbol} son periyotta "
+                f"%{leader_move:.1f} hareket etti, {symbol} henüz takip etmedi -> {action} destekleniyor."
+            ],
+        }
+    except Exception:
+        return {"bias": 0, "notes": []}
 
 
 def get_correlation_pair_signal(symbol: str, all_watchlist_symbols: List[str]) -> Dict[str, Any]:
@@ -6527,6 +7063,8 @@ def _auto_trader_run_symbol(
     price = 0.0
     execution: Dict[str, Any] = {"simulated": True, "message": "Emir yok"}
     market_cycle_qty_scale = 1.0
+    atr_qty_scale = 1.0
+    portfolio_risk_qty_scale = 1.0
 
     if broker == "IBKR":
         # Cok-borsali havuz destegi: her sembolun kendi borsa/para birimi vardir
@@ -6682,6 +7220,20 @@ def _auto_trader_run_symbol(
         except Exception:
             signal_mtf_dir = "WAIT"
 
+    # Kullanicinin talebi: teyit esigini 4'e cikarirken, uzun vadeli boga/ayi
+    # piyasa dongusunu (bkz. get_bull_bear_market_regime) de bagimsiz 6.
+    # teyit sinyali olarak ekle - hem IBKR hem kripto icin hesaplanir (kripto
+    # icin sadece bilgi/gosterim amacli, gate SADECE IBKR'de uygulanir).
+    signal_market_cycle_dir = "WAIT"
+    try:
+        cycle_regime = get_bull_bear_market_regime(market).get("regime")
+        if cycle_regime == "BULL":
+            signal_market_cycle_dir = "BUY"
+        elif cycle_regime == "BEAR":
+            signal_market_cycle_dir = "SELL"
+    except Exception:
+        signal_market_cycle_dir = "WAIT"
+
     if action in ["BUY", "SELL"]:
         confidence = max(0, min(95, confidence + learning_bias(action)))
         # Dis sinyaller (SEC dosyalama sicramasi, haber sentiment'i, Fear&Greed, makro
@@ -6730,6 +7282,36 @@ def _auto_trader_run_symbol(
         if market_cycle["notes"]:
             reason = (reason + " " + " ".join(market_cycle["notes"])).strip()
         market_cycle_qty_scale = market_cycle.get("qty_scale", 1.0)
+
+        # Kullanicinin talebi: 'ATR ekle' - volatiliteye gore pozisyon boyutu
+        # otomatik ayarlanir (yuksek volatilitede kucult, dusuk volatilitede
+        # buyut). Sadece boyut/bilgi katmanidir, confidence'a bias eklemez -
+        # cok yuksek volatilite illa kotu bir sinyal degildir (ör. guclu bir
+        # kirilma da yuksek ATR uretir), sadece risk boyutu ayarlanir.
+        atr_scale_info = get_atr_position_size_scale(symbol, market, broker)
+        if atr_scale_info["notes"]:
+            reason = (reason + " " + " ".join(atr_scale_info["notes"])).strip()
+        atr_qty_scale = atr_scale_info.get("qty_scale", 1.0)
+
+        # Kullanicinin talebi: 'etkin risk limti ekle' - portfoyde ayni yonde/
+        # korele varliklarda ustuste pozisyon acildiginda gercek risk
+        # maruziyetinin fark edilmeden artmasini onler (bkz.
+        # get_portfolio_correlation_risk_bias dokumani).
+        portfolio_risk = get_portfolio_correlation_risk_bias(symbol, action)
+        if portfolio_risk["bias"] != 0:
+            confidence = max(0, min(95, confidence + portfolio_risk["bias"]))
+        if portfolio_risk["notes"]:
+            reason = (reason + " " + " ".join(portfolio_risk["notes"])).strip()
+        portfolio_risk_qty_scale = portfolio_risk.get("qty_scale", 1.0)
+
+        # Kullanicinin talebi: 'sektör rotasyonu ekle' - ayni sektordeki lider
+        # varlik belirgin hareket ettiyse ama bu sembol henuz takip etmediyse
+        # destekleyici bias uygulanir (bkz. get_sector_rotation_bias).
+        sector_rotation = get_sector_rotation_bias(symbol, action, market)
+        if sector_rotation["bias"] != 0:
+            confidence = max(0, min(95, confidence + sector_rotation["bias"]))
+        if sector_rotation["notes"]:
+            reason = (reason + " " + " ".join(sector_rotation["notes"])).strip()
 
         # Klasik teknik analiz katmani (RSI(14) + SMA20/SMA50 trend hizalanmasi).
         # Hem kripto hem IBKR (hisse) icin gecerlidir - daha once sistemde HICBIR
@@ -6870,7 +7452,7 @@ def _auto_trader_run_symbol(
                     elif price > 0:
                         available_usdt = get_spot_available_usdt()
                         if available_usdt > 0:
-                            pct = spot_auto_trader_size_pct(symbol) * market_cycle_qty_scale
+                            pct = spot_auto_trader_size_pct(symbol) * market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale
                             min_pos_usd = effective_min_position_usd(symbol, "SPOT")
                             sized_qty = round((available_usdt * pct) / price, 6)
                             if sized_qty * price < min_pos_usd:
@@ -7206,13 +7788,13 @@ def _auto_trader_run_symbol(
                         ibkr_agree_count = sum(
                             1 for d in (
                                 signal_momentum_dir, signal_order_flow_dir, signal_corr_dir,
-                                signal_technical_dir, signal_mtf_dir,
+                                signal_technical_dir, signal_mtf_dir, signal_market_cycle_dir,
                             ) if d == action
                         )
                         if ibkr_agree_count < IBKR_MIN_CONFIRMATIONS:
                             reason = (
                                 reason
-                                + f" (IBKR emri atlandı: sadece {ibkr_agree_count}/5 bağımsız sinyal {action} yönünde "
+                                + f" (IBKR emri atlandı: sadece {ibkr_agree_count}/6 bağımsız sinyal {action} yönünde "
                                 f"hizalandı, minimum {IBKR_MIN_CONFIRMATIONS} teyit gerekiyor.)"
                             ).strip()
                             qty = 0
@@ -7317,7 +7899,7 @@ def _auto_trader_run_symbol(
                 if price > 0:
                     available_usdt = get_futures_available_usdt()
                     if available_usdt > 0:
-                        pct = asset_size_pct(symbol) * market_cycle_qty_scale
+                        pct = asset_size_pct(symbol) * market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale
                         sized_qty = round((available_usdt * pct * leverage) / price, 3)
                         if sized_qty > 0:
                             reason = (
@@ -7483,7 +8065,7 @@ def _auto_trader_run_symbol(
         # uygulama bos degeri '-' olarak gosterir).
         signal_confirmations = ""
         if action in ("BUY", "SELL"):
-            confirmation_pool = (signal_momentum_dir, signal_order_flow_dir, signal_corr_dir)
+            confirmation_pool = (signal_momentum_dir, signal_order_flow_dir, signal_corr_dir, signal_market_cycle_dir)
             if broker == "IBKR":
                 confirmation_pool = confirmation_pool + (signal_technical_dir, signal_mtf_dir)
             agree_count = sum(1 for d in confirmation_pool if d == action)
@@ -7557,15 +8139,28 @@ def _ibkr_stuck_watchdog_loop():
 
 _SPOT_RECONCILE_INTERVAL_SEC = 300
 _SPOT_RECONCILE_LAST_TS = 0.0
+# Kullanicinin talebi: IBKR'de 'emir iletildi ama gerceklesmedi' durumunda
+# takili kalan AI karar kayitlarinin, emir sonradan (mesela seans acildiginda)
+# dolunca otomatik olarak 'İŞLEME DÖNÜŞTÜ' gorunmesi icin periyodik kontrol.
+_IBKR_ORDER_RECONCILE_INTERVAL_SEC = 30
+_IBKR_ORDER_RECONCILE_LAST_TS = 0.0
 
 
 def _auto_trader_loop():
-    global _SPOT_RECONCILE_LAST_TS
+    global _SPOT_RECONCILE_LAST_TS, _IBKR_ORDER_RECONCILE_LAST_TS
     while True:
         if (time.time() - _SPOT_RECONCILE_LAST_TS) >= _SPOT_RECONCILE_INTERVAL_SEC:
             _SPOT_RECONCILE_LAST_TS = time.time()
             try:
                 reconcile_spot_positions()
+            except Exception:
+                pass
+
+        if (time.time() - _IBKR_ORDER_RECONCILE_LAST_TS) >= _IBKR_ORDER_RECONCILE_INTERVAL_SEC:
+            _IBKR_ORDER_RECONCILE_LAST_TS = time.time()
+            try:
+                if IBKR_RUNTIME.get("connected"):
+                    reconcile_pending_ibkr_order_fills()
             except Exception:
                 pass
 
@@ -12184,6 +12779,10 @@ def _open_orders_snapshot() -> List[Dict[str, Any]]:
                 "status": o.get("status", "Açık"),
                 "orderId": o.get("orderId"),
             })
+    except Exception:
+        pass
+    try:
+        rows.extend(ibkr_open_orders_snapshot())
     except Exception:
         pass
     return rows
