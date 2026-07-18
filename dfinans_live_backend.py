@@ -284,6 +284,32 @@ IBKR_SYMBOL_MARKET_INFO: Dict[str, Dict[str, str]] = {
     # kategori olarak islem gorur.
     "BTCUSD": {"exchange": "PAXOS", "currency": "USD", "region": "CRYPTO", "sector": "CRYPTO_MAJOR", "asset_type": "CRYPTO"},
     "ETHUSD": {"exchange": "PAXOS", "currency": "USD", "region": "CRYPTO", "sector": "CRYPTO_MAJOR", "asset_type": "CRYPTO"},
+    # --- Avrupa (Almanya - Xetra/IBIS, Fransa - Euronext Paris/SBF, EUR) ---
+    # Kullanicinin talebi: 'farkli varliklar ekle'. LSE/SEHK ile ayni STK
+    # kalibinda - build_ibkr_contract SMART+primaryExchange yonlendirmesini
+    # otomatik yapar, ekstra bir kod degisikligi gerekmez, sadece hours/closed-
+    # message fonksiyonlarina IBIS/SBF branch'i eklenir.
+    "SAP": {"exchange": "IBIS", "currency": "EUR", "region": "EU", "sector": "TECH_ENTERPRISE", "asset_type": "STK"},   # SAP (Almanya)
+    "SIE": {"exchange": "IBIS", "currency": "EUR", "region": "EU", "sector": "INDUSTRIALS", "asset_type": "STK"},      # Siemens (Almanya)
+    "BMW": {"exchange": "IBIS", "currency": "EUR", "region": "EU", "sector": "AUTO_EV", "asset_type": "STK"},          # BMW (Almanya)
+    "MC": {"exchange": "SBF", "currency": "EUR", "region": "EU", "sector": "LUXURY", "asset_type": "STK"},            # LVMH (Fransa)
+    "OR": {"exchange": "SBF", "currency": "EUR", "region": "EU", "sector": "CONSUMER_STAPLES", "asset_type": "STK"},  # L'Oreal (Fransa)
+    # --- Forex (IDEALPRO / USD) - USD'nin KARSI para birimi (quote) oldugu
+    # majorler secildi (EURUSD, GBPUSD, AUDUSD, NZDUSD): fiyat zaten dogrudan
+    # USD cinsinden oldugu icin mevcut USD-bazli fon/PnL hesaplarina (ekstra
+    # FX cevrimi olmadan) dogrudan uyumlu. USDJPY/USDCAD gibi USD'nin BASE
+    # oldugu ciftler bilincli olarak DISLANDI (fiyat USD degil karsi para
+    # biriminde donerdi, mevcut fon kontrolu yanlis yorumlar).
+    "EURUSD": {"exchange": "IDEALPRO", "currency": "USD", "region": "FOREX", "sector": "FX_MAJOR", "asset_type": "FOREX"},
+    "GBPUSD": {"exchange": "IDEALPRO", "currency": "USD", "region": "FOREX", "sector": "FX_MAJOR", "asset_type": "FOREX"},
+    "AUDUSD": {"exchange": "IDEALPRO", "currency": "USD", "region": "FOREX", "sector": "FX_MAJOR", "asset_type": "FOREX"},
+    "NZDUSD": {"exchange": "IDEALPRO", "currency": "USD", "region": "FOREX", "sector": "FX_MAJOR", "asset_type": "FOREX"},
+    # --- Futures (CME / USD) - Micro E-mini S&P 500 (MES), kucuk kontrat
+    # buyuklugu ($5 x endeks) nedeniyle daha dusuk riskli baslangic urunu.
+    # KRITIK: contract_month (lastTradeDateOrContractMonth) her ceyrekte
+    # (Mar/Haz/Eyl/Ara) manuel guncellenmelidir - suresi gecen kontrat IBKR
+    # tarafindan reddedilir/qualify edilemez. Su an: Eylul 2026 (202609).
+    "MES": {"exchange": "CME", "currency": "USD", "region": "US_FUTURES", "sector": "INDEX_FUTURES", "asset_type": "FUT", "contract_month": "202609"},
 }
 
 # Kullanicinin talebi: 'sektör rotasyonu ekle' - kripto icin sabit/varsayimsal
@@ -304,7 +330,7 @@ _IBKR_WATCHLIST_DEFAULT = ",".join(IBKR_SYMBOL_MARKET_INFO.keys())
 
 # Seans sirasi: Asya en erken kapanir, ardindan Londra, en son ABD. Her
 # bolgenin "onceki" seansi, o gun icin cross-session risk sinyali uretir.
-IBKR_SESSION_SEQUENCE = {"ASIA": None, "UK": "ASIA", "US": "UK"}
+IBKR_SESSION_SEQUENCE = {"ASIA": None, "UK": "ASIA", "EU": "ASIA", "US": "UK"}
 
 
 def get_ibkr_symbol_market_info(symbol: str) -> Dict[str, str]:
@@ -370,6 +396,10 @@ IBKR_AUTO_HISTORY: List[Dict[str, Any]] = []
 # - bunun yerine sabit bir USD tutar (notional) hedeflenir ve fiyata bolunerek
 # kesirli miktar hesaplanir (IBKR PAXOS kesirli kripto miktarini destekler).
 IBKR_CRYPTO_NOTIONAL_USD = float(os.getenv("IBKR_CRYPTO_NOTIONAL_USD", "50"))
+# Forex (EURUSD/GBPUSD/AUDUSD/NZDUSD) icin de kripto gibi sabit USD tutar
+# (notional) bazli kesirli miktar kullanilir - 1 birim (ör. 1 EUR ~1.08 USD)
+# anlamli bir islem buyuklugu olmadigi icin.
+IBKR_FOREX_NOTIONAL_USD = float(os.getenv("IBKR_FOREX_NOTIONAL_USD", "1000"))
 
 # Binance SPOT icin de Futures'tan tamamen bagimsiz ucuncu bir auto-trader ornegi.
 # Futures kaldiracli/short calisirken, spot sadece "elde tutulan varligi al/sat"
@@ -2699,7 +2729,7 @@ def normalize_symbol(symbol: str) -> str:
     return str(symbol).upper().replace("/", "").replace("-", "").strip()
 
 
-def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, currency: str):
+def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, currency: str, contract_month: str = ""):
     sym = normalize_symbol(symbol)
     kind = str(asset_type or "STK").upper()
     cur = str(currency or "USD").upper()
@@ -2715,7 +2745,7 @@ def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, curren
         # gorunmemesine yol acan bug buydu. Cozum: exchange'i SMART birakip
         # gercek borsayi primaryExchange olarak vermek - IBKR akilli
         # yonlendirme (smart routing) kullanir, dogrudan yonlendirme uyarisi
-        # tetiklenmez, ama sembol yine dogru borsadan (LSE/SEHK) dogru
+        # tetiklenmez, ama sembol yine dogru borsadan (LSE/SEHK/IBIS/SBF) dogru
         # sekilde tanimlanir.
         if ex and ex != "SMART":
             return ibs.Stock(sym, "SMART", cur, primaryExchange=ex)
@@ -2732,7 +2762,19 @@ def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, curren
         base = sym[:3]
         quote = sym[3:]
         return ibs.Forex(f"{base}{quote}", exchange=ex or "IDEALPRO")
-    raise RuntimeError("asset_type desteklenmiyor. STK, CRYPTO veya FOREX kullanılmalı.")
+    if kind == "FUT":
+        # Vadeli islem (futures) - kontrat ayina (lastTradeDateOrContractMonth,
+        # YYYYMM formati) ihtiyac duyar. Bu, IBKR_SYMBOL_MARKET_INFO icindeki
+        # 'contract_month' alanindan gelir ve HER CEYREKTE (Mar/Haz/Eyl/Ara)
+        # manuel guncellenmelidir - suresi gecmis (expired) bir kontrat IBKR
+        # tarafindan qualify edilemez/reddedilir.
+        cm = str(contract_month or "").strip()
+        if not cm:
+            raise RuntimeError(
+                f"FUT sembolü {sym} için contract_month (kontrat ayı, YYYYMM) tanımlı değil."
+            )
+        return ibs.Future(symbol=sym, lastTradeDateOrContractMonth=cm, exchange=ex or "CME", currency=cur)
+    raise RuntimeError("asset_type desteklenmiyor. STK, CRYPTO, FOREX veya FUT kullanılmalı.")
 
 
 _IBKR_SNAPSHOT_CACHE: Dict[str, Any] = {}
@@ -2771,12 +2813,28 @@ def _is_outside_regular_trading_hours(exchange: str) -> bool:
         return False
     now_utc = datetime.now(timezone.utc)
     minute_of_day = now_utc.hour * 60 + now_utc.minute
+    weekday = now_utc.weekday()  # Pazartesi=0 ... Pazar=6
+    if ex in ("IDEALPRO", "CME"):
+        # Forex (IDEALPRO) ve vadeli islem/Globex (CME) neredeyse 23/6 islem
+        # gorur: Cuma ~22:00 UTC'den Pazar ~22:00 UTC'ye kadar kapalidir
+        # (gunluk kisa bakim molasi basitlik icin ihmal edilmistir).
+        if weekday == 4 and minute_of_day >= 22 * 60:      # Cuma 22:00 sonrasi
+            return True
+        if weekday == 5:                                    # Cumartesi tamamen kapali
+            return True
+        if weekday == 6 and minute_of_day < 22 * 60:        # Pazar 22:00 oncesi
+            return True
+        return False
     if ex == "LSE":
         start, end = 8 * 60, 16 * 60 + 30       # 08:00-16:30 UTC (Londra, GMT yaklasik)
     elif ex == "SEHK":
         start, end = 1 * 60 + 30, 8 * 60         # 01:30-08:00 UTC (Hong Kong, UTC+8 yaklasik)
+    elif ex in ("IBIS", "SBF"):
+        start, end = 7 * 60, 15 * 60 + 30        # 07:00-15:30 UTC (Frankfurt/Paris, CET yaklasik)
     else:
         start, end = 13 * 60 + 30, 20 * 60       # 13:30-20:00 UTC (ABD, ET yaklasik)
+    if weekday >= 5:
+        return True
     return not (start <= minute_of_day <= end)
 
 
@@ -2889,7 +2947,10 @@ def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
             if key in unique_contracts:
                 continue
             try:
-                contract = build_ibkr_contract(ibs, item["symbol"], item["asset_type"], item["exchange"], item["currency"])
+                contract = build_ibkr_contract(
+                    ibs, item["symbol"], item["asset_type"], item["exchange"], item["currency"],
+                    contract_month=item.get("contract_month", ""),
+                )
                 qualified = ib.qualifyContracts(contract)
                 if not qualified:
                     raise RuntimeError("IBKR contract doğrulanamadı.")
@@ -2954,12 +3015,12 @@ def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
             item["event"].set()
 
 
-def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: str) -> Dict[str, Any]:
+def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: str, contract_month: str = "") -> Dict[str, Any]:
     # Mobil uygulama ayni sembolu birden fazla ekrandan (Piyasalar, Islem, Ekonomi
     # Radari vb.) kisa arayla tekrar tekrar sorguluyor. Her istek ~2.5sn IBKR
     # bekleme + paylasilan IBKR_LOCK gerektirdigi icin, kisa bir TTL cache
     # gereksiz tekrar sorgulari (ve IBKR uzerindeki yuku) buyuk olcude azaltir.
-    cache_key = f"{normalize_symbol(symbol)}|{asset_type}|{exchange}|{currency}"
+    cache_key = f"{normalize_symbol(symbol)}|{asset_type}|{exchange}|{currency}|{contract_month}"
     cached = _IBKR_SNAPSHOT_CACHE.get(cache_key)
     if cached and (time.time() - cached[0]) < _IBKR_SNAPSHOT_CACHE_TTL_SEC:
         return cached[1]
@@ -2970,6 +3031,7 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
         "asset_type": asset_type,
         "exchange": exchange,
         "currency": currency,
+        "contract_month": contract_month,
         "event": threading.Event(),
         "result": None,
         "error": None,
@@ -3382,16 +3444,29 @@ def _ibkr_closed_exchange_message(exchange: str) -> str:
     bilgilendirilsin; SMART/US borsalari icin bos string doner (US hisseleri
     IBKR'de gercekten pre/post-market destekler, hicbir sey degismez)."""
     ex = str(exchange or "SMART").upper()
-    if ex not in ("LSE", "SEHK"):
+    if ex not in ("LSE", "SEHK", "IBIS", "SBF", "IDEALPRO", "CME"):
         return ""
     if not _is_outside_regular_trading_hours(ex):
         return ""
+    if ex in ("IDEALPRO", "CME"):
+        name = "Forex (IDEALPRO)" if ex == "IDEALPRO" else "Vadeli işlem (CME/Globex)"
+        return (
+            f"{name} piyasası hafta sonu kapalı (Cuma ~22:00 UTC - Pazar ~22:00 UTC arası), "
+            f"bu aralıkta gönderilen emir gerçekleşmez. Piyasa hafta içi normal seansa "
+            f"döndüğünde emirler otomatik olarak tekrar işlenmeye başlar."
+        )
     if ex == "LSE":
         start_utc, end_utc = 8 * 60, 16 * 60 + 30
         name = "Londra (LSE)"
-    else:
+    elif ex == "SEHK":
         start_utc, end_utc = 1 * 60 + 30, 8 * 60
         name = "Hong Kong (SEHK)"
+    elif ex == "IBIS":
+        start_utc, end_utc = 7 * 60, 15 * 60 + 30
+        name = "Frankfurt (Xetra/IBIS)"
+    else:
+        start_utc, end_utc = 7 * 60, 15 * 60 + 30
+        name = "Paris (Euronext/SBF)"
 
     def _utc_minutes_to_local_text(total_minutes: int) -> str:
         # Sunucu/kullanici saat dilimi TR (UTC+3) kabul edilir - mevcut
@@ -3415,6 +3490,7 @@ def ibkr_place_market_order(
     currency: str,
     request_id: Optional[str] = None,
     allow_fractional: bool = False,
+    contract_month: str = "",
 ) -> Dict[str, Any]:
     def _run(ib, ibs):
         if quantity <= 0:
@@ -3426,7 +3502,7 @@ def ibkr_place_market_order(
         if closed_msg:
             raise RuntimeError(closed_msg)
 
-        contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
+        contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency, contract_month=contract_month)
         qualified = ib.qualifyContracts(contract)
         if not qualified:
             raise RuntimeError("IBKR contract doğrulanamadı.")
@@ -3990,7 +4066,7 @@ def get_insider_sell_reversal_bias(symbol: str, action: str, asset_type: str, ex
         if days_since_sell < 0 or days_since_sell > 30:
             return {"bias": 0, "notes": []}
 
-        bars = get_ibkr_daily_bars(symbol, asset_type, exchange, currency, num_days=35)
+        bars = get_ibkr_daily_bars(symbol, asset_type, exchange, currency, num_days=35, contract_month=get_ibkr_symbol_market_info(symbol).get("contract_month", ""))
         closes = [b["close"] for b in bars if b.get("close", 0) > 0]
         if len(closes) < 3:
             return {"bias": 0, "notes": []}
@@ -4256,7 +4332,7 @@ def get_earnings_surprise_reaction_bias(symbol: str, action: str, asset_type: st
             return {"bias": 0, "notes": []}
         surprise_pct = safe_float(earnings.get("surprise_pct"))
 
-        bars = get_ibkr_daily_bars(symbol, asset_type, exchange, currency, num_days=10)
+        bars = get_ibkr_daily_bars(symbol, asset_type, exchange, currency, num_days=10, contract_month=get_ibkr_symbol_market_info(symbol).get("contract_month", ""))
         closes = [b["close"] for b in bars if b.get("close", 0) > 0]
         if len(closes) < 2:
             return {"bias": 0, "notes": []}
@@ -4397,14 +4473,14 @@ def compute_atr(highs: List[float], lows: List[float], closes: List[float], peri
     return atr
 
 
-def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60) -> List[Dict[str, float]]:
+def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60, contract_month: str = "") -> List[Dict[str, float]]:
     """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyati VE hacmini ceker
     (RSI/SMA ve hacim teyidi hesaplamalari icin gecmis veri gerekir). /history
     ucundaki ile ayni desen; burada dogrudan Python liste-of-dict (eskiden-yeniye
     sirali, {'close', 'volume', 'high', 'low'}) donuyor. high/low, ATR (volatilite)
     hesaplamasi icin de kullanilir (bkz. compute_atr)."""
     def _run(ib, ibs):
-        contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency)
+        contract = build_ibkr_contract(ibs, symbol, asset_type, exchange, currency, contract_month=contract_month)
         qualified = ib.qualifyContracts(contract)
         if not qualified:
             raise RuntimeError("IBKR contract doğrulanamadı.")
@@ -4440,7 +4516,7 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=60,
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=60, contract_month=market_info.get("contract_month", ""),
             )
             closes = [b["close"] for b in bars]
             volumes = [b["volume"] for b in bars]
@@ -4611,7 +4687,7 @@ def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=10,
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=10, contract_month=market_info.get("contract_month", ""),
             )
             closes = [b["close"] for b in bars]
             if len(closes) < 6:
@@ -5021,7 +5097,7 @@ def get_early_reversal_signal(symbol: str, market: str, broker: str) -> Dict[str
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=25,
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=25, contract_month=market_info.get("contract_month", ""),
             )
             closes = [b["close"] for b in bars]
             long_window = 5
@@ -5100,7 +5176,7 @@ def get_region_session_bias(region: str) -> Dict[str, Any]:
         for sym in region_symbols:
             try:
                 info = IBKR_SYMBOL_MARKET_INFO[sym]
-                snap = ibkr_market_snapshot(sym, info.get("asset_type", "STK"), info["exchange"], info["currency"])
+                snap = ibkr_market_snapshot(sym, info.get("asset_type", "STK"), info["exchange"], info["currency"], contract_month=info.get("contract_month", ""))
                 changes.append(safe_float(snap.get("change_24h")))
             except Exception:
                 continue
@@ -7237,6 +7313,9 @@ def _auto_trader_run_symbol(
             # ve emir/veri sorgusu basarisiz olur.
             asset_type = market_info.get("asset_type", asset_type)
         symbol_region = market_info.get("region", "US")
+        # Vadeli islem (FUT, ör. MES) kontrat ayi - her ceyrekte manuel
+        # guncellenmesi gereken kontrat bilgisi (bkz. IBKR_SYMBOL_MARKET_INFO).
+        contract_month = market_info.get("contract_month", "")
         # Guvenlik: her ihtimale karsi burada da Turkiye/TRY kontrolu (build_ibkr_contract
         # zaten en alt seviyede engelliyor, ama erken tespit daha net bir hata verir).
         assert_ibkr_market_allowed(exchange, currency, symbol)
@@ -7246,7 +7325,7 @@ def _auto_trader_run_symbol(
         # BUY/SELL derse islem acilir; biri WAIT/NEUTRAL ise digeri tek basina yeterlidir
         # (boylece tek sinyal her zaman zorunlu tutulmaz, "hic islem acmiyor" sorunu onlenir),
         # ama ikisi ZIT yon gosterirse (biri BUY biri SELL) islem acilmaz - celiskili sinyal.
-        snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency)
+        snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency, contract_month=contract_month)
         price = safe_float(snap.get("price"))
         change = safe_float(snap.get("change_24h"))
         order_flow = str(snap.get("order_flow_signal", "NEUTRAL")).upper()
@@ -7714,6 +7793,13 @@ def _auto_trader_run_symbol(
                     # tarafinda qty zaten elde tutulan pozisyon miktarindan
                     # (pre_close_position) gelir, burada degistirilmez.
                     qty = round(IBKR_CRYPTO_NOTIONAL_USD / price, 6)
+                if asset_type == "FOREX" and action == "BUY" and price > 0 and qty > 0:
+                    # Kripto ile ayni mantik: 1 birim (ör. 1 EUR) anlamsizca
+                    # kucuk oldugu icin sabit USD tutar (notional) bazli
+                    # kesirli miktar kullanilir. IBKR IDEALPRO kesirli forex
+                    # miktarini native olarak destekler.
+                    qty = round(IBKR_FOREX_NOTIONAL_USD / price, 2)
+
                 if do_live:
                     # Sabit miktarli (ör. 1 hisse) emir, hesaptaki diger pozisyonlarin
                     # kullandigi marj yuzunden 'Available Funds insufficient' hatasiyla
@@ -7735,9 +7821,9 @@ def _auto_trader_run_symbol(
                     # LSE/SEHK gibi yabanci borsalarda DEGIL, kullanicinin talebiyle - ve
                     # SADECE normal seans saatleri icindeyken, 1 tam hisseye yetecek kadar
                     # fon olmadiginda kesirli (ör. %20-%30 hisse) emir gonderilebilir.
-                    ibkr_fractional_order = (asset_type == "CRYPTO" and action == "SELL")
+                    ibkr_fractional_order = (asset_type in ("CRYPTO", "FOREX") and action == "SELL")
                     ibkr_allow_fractional_here = (
-                        (exchange == "SMART" or asset_type == "CRYPTO")
+                        (exchange == "SMART" or asset_type in ("CRYPTO", "FOREX"))
                         and not _is_outside_regular_trading_hours(exchange)
                     )
                     if action == "BUY" and price > 0:
@@ -7915,7 +8001,7 @@ def _auto_trader_run_symbol(
                                 # kapatilamaz (her zaman 0'a yuvarlanip SAT atlanir) hatasi
                                 # olusur.
                                 held_qty_raw = safe_float(pre_close_position.get("position") or pre_close_position.get("size"))
-                                held_qty = held_qty_raw if asset_type == "CRYPTO" else math.floor(held_qty_raw)
+                                held_qty = held_qty_raw if asset_type in ("CRYPTO", "FOREX") else math.floor(held_qty_raw)
                                 if held_qty < qty:
                                     qty = held_qty
                         else:
@@ -8011,6 +8097,7 @@ def _auto_trader_run_symbol(
                         execution = ibkr_place_market_order(
                             symbol, action, qty, asset_type, exchange, currency,
                             allow_fractional=ibkr_fractional_order,
+                            contract_month=contract_month,
                         )
                         # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
                         # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
@@ -8425,7 +8512,7 @@ def shadow_watchlist_cycle() -> None:
     for symbol in SHADOW_WATCHLIST_SYMBOLS:
         try:
             market_info = get_ibkr_symbol_market_info(symbol)
-            snap = ibkr_market_snapshot(symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"))
+            snap = ibkr_market_snapshot(symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), contract_month=market_info.get("contract_month", ""))
             price = safe_float(snap.get("price"))
             if price <= 0:
                 continue
@@ -9328,7 +9415,7 @@ def get_symbol_daily_change_and_rsi(symbol: str, broker: str) -> Optional[Dict[s
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=30,
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=30, contract_month=market_info.get("contract_month", ""),
             )
             closes = [b["close"] for b in bars]
         else:
@@ -11495,7 +11582,7 @@ def shadow_watchlist_status_endpoint():
             symbol = pos.get("symbol")
             try:
                 market_info = get_ibkr_symbol_market_info(symbol)
-                snap = ibkr_market_snapshot(symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"))
+                snap = ibkr_market_snapshot(symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), contract_month=market_info.get("contract_month", ""))
                 price = safe_float(snap.get("price"))
             except Exception:
                 price = 0.0
