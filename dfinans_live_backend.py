@@ -172,6 +172,10 @@ class EngineState:
 ENGINE = EngineState()
 TRADE_LOG: List[Dict[str, Any]] = []
 DB_LOCK = threading.Lock()
+# Binance futures TP/SL kontrolu hem arka plan dongusunden hem de /debug/force-tp-check
+# teshis endpoint'inden cagrilabildigi icin, ayni pozisyonun iki kez okunup iki kez
+# kapatilmasini (ve DB'ye duplicate PnL kaydini) engellemek amacli kilit.
+TP_ENFORCEMENT_LOCK = threading.Lock()
 
 
 @dataclass
@@ -7244,8 +7248,16 @@ def _auto_trader_run_symbol(
                             db_log_position_add("IBKR", symbol)
                         if pre_close_position and not execution.get("error") and safe_float(execution.get("filled")) > 0:
                             filled_qty = safe_float(execution.get("filled"))
-                            entry_price = safe_float(pre_close_position.get("avgCost") or pre_close_position.get("entry_price"))
-                            exit_price = safe_float(execution.get("avg_fill_price")) or price
+                            entry_price_native = safe_float(pre_close_position.get("avgCost") or pre_close_position.get("entry_price"))
+                            exit_price_native = safe_float(execution.get("avg_fill_price")) or price
+                            # KRITIK: LSE/SEHK gibi ABD-disi borsalarda entry/exit fiyati
+                            # native birimde (pence/HKD) geliyor - USD PnL'e cevirmeden
+                            # once get_ibkr_price_usd_equivalent ile USD karsiligina
+                            # cevrilmeli (aksi halde ULVR gibi hisselerde gerceklesen
+                            # kar/zarar ~100 kat yanlis kaydedilir; bkz. #93 fon kontrolu
+                            # duzeltmesiyle ayni hata sinifi).
+                            entry_price = get_ibkr_price_usd_equivalent(entry_price_native, exchange, currency)
+                            exit_price = get_ibkr_price_usd_equivalent(exit_price_native, exchange, currency)
                             pnl_amount = (exit_price - entry_price) * filled_qty
                             pnl_pct = ((exit_price - entry_price) / entry_price * 100.0) if entry_price else 0.0
                             db_record_position_closure(
@@ -7265,8 +7277,10 @@ def _auto_trader_run_symbol(
                             # Short pozisyonda kar, fiyat DUSTUGUNDE olusur - bu yuzden
                             # LONG'un tersine (entry - exit) * qty formulu kullanilir.
                             filled_qty = safe_float(execution.get("filled"))
-                            entry_price = safe_float(pre_close_short_position.get("avgCost") or pre_close_short_position.get("entry_price"))
-                            exit_price = safe_float(execution.get("avg_fill_price")) or price
+                            entry_price_native = safe_float(pre_close_short_position.get("avgCost") or pre_close_short_position.get("entry_price"))
+                            exit_price_native = safe_float(execution.get("avg_fill_price")) or price
+                            entry_price = get_ibkr_price_usd_equivalent(entry_price_native, exchange, currency)
+                            exit_price = get_ibkr_price_usd_equivalent(exit_price_native, exchange, currency)
                             pnl_amount = (entry_price - exit_price) * filled_qty
                             pnl_pct = ((entry_price - exit_price) / entry_price * 100.0) if entry_price else 0.0
                             db_record_position_closure(
@@ -7959,70 +7973,79 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
     zarar-kes (BINANCE_STOP_LOSS_PCT) esiklerini kontrol eder. Onceden sadece
     kar-al vardi; hesap zarar yonunde sinirsiz acik kalabiliyordu.
 
+    KRITIK: bu fonksiyon hem arka plan auto-trader dongusunden (_auto_trader_loop,
+    periyodik) hem de /debug/force-tp-check teshis endpoint'inden (Flask istek
+    thread'i) cagrilabilir. Ikisi ayni anda calisirsa, ayni pozisyonun TP/SL
+    tetiklenmesini iki kez okuyup iki kez kapatma emri + iki kez PnL kaydi
+    riski olusur (reduce_only ikinci emri exchange tarafinda no-op yapar ama
+    DB'de duplicate realized PnL kaydi olusabilir). TP_ENFORCEMENT_LOCK, tum
+    'oku -> tetikle -> kapat -> kaydet' dizisini atomik hale getirir.
+
     Her sembol icin once symbol_tp_sl_overrides tablosuna bakilir (kullanicinin
     talebi: 'her varligi ayri ayri izleyip ilerde her varlik icin farkli kar/
     zarar noktalari belirleyebiliriz') - override yoksa global BINANCE_*
     sabitlerine dusulur, boylece hicbir override tanimlanmadigi surece davranis
     tamamen ayni kalir."""
-    if BINANCE_TAKE_PROFIT_PCT <= 0 and BINANCE_STOP_LOSS_PCT <= 0:
-        return None
-    positions = [
-        p for p in get_futures_positions()
-        if p.get("id") != "error" and str(p.get("symbol", "")).upper() != "HATA"
-    ]
-    for position in positions:
-        symbol = str(position.get("symbol", "")).upper()
-        take_profit_pct, stop_loss_pct = resolve_symbol_tp_sl(
-            "BINANCE_FUTURES", symbol, BINANCE_TAKE_PROFIT_PCT, BINANCE_STOP_LOSS_PCT,
-        )
-        if take_profit_pct > 0 and db_position_ever_scaled("BINANCE_FUTURES", symbol):
-            take_profit_pct = min(take_profit_pct, BINANCE_SCALED_TAKE_PROFIT_PCT)
-        profit_pct = binance_position_profit_pct(position)
-        hit_take_profit = take_profit_pct > 0 and profit_pct >= take_profit_pct
-        hit_stop_loss = stop_loss_pct > 0 and profit_pct <= -stop_loss_pct
-        if not hit_take_profit and not hit_stop_loss:
-            continue
-        size = abs(safe_float(position.get("size")))
-        if not symbol or size <= 0:
-            continue
-        close_side = "SELL" if str(position.get("side", "")).upper() == "LONG" else "BUY"
-        trigger = "take_profit_roi_pct" if hit_take_profit else "stop_loss_roi_pct"
-        request_id = f"{'tp' if hit_take_profit else 'sl'}-{symbol}-{int(time.time())}"
-        result = place_futures_order(
-            symbol,
-            close_side,
-            size,
-            reduce_only=True,
-            request_id=request_id,
-            channel=channel,
-        )
-        result["symbol"] = symbol
-        result["trigger"] = trigger
-        result["trigger_pct"] = round(profit_pct, 4)
-        result["target_pct"] = take_profit_pct if hit_take_profit else -stop_loss_pct
-        result["pnl"] = safe_float(position.get("pnl"))
-        if not result.get("error"):
-            entry_price = safe_float(position.get("entry_price"))
-            exit_price = safe_float(position.get("mark_price"))
-            pnl_amount = safe_float(position.get("pnl"))
-            db_record_position_closure(
-                broker="BINANCE_FUTURES",
-                symbol=symbol,
-                side=str(position.get("side", "")).upper(),
-                qty=size,
-                entry_price=entry_price,
-                exit_price=exit_price,
-                realized_pnl=pnl_amount,
-                realized_pnl_pct=profit_pct,
-                close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
-                detail=(
-                    f"%{take_profit_pct:.1f} kâr hedefi tetiklendi." if hit_take_profit
-                    else f"%{stop_loss_pct:.1f} zarar-kes tetiklendi."
-                ),
+    with TP_ENFORCEMENT_LOCK:
+        if BINANCE_TAKE_PROFIT_PCT <= 0 and BINANCE_STOP_LOSS_PCT <= 0:
+            return None
+        positions = [
+            p for p in get_futures_positions()
+            if p.get("id") != "error" and str(p.get("symbol", "")).upper() != "HATA"
+        ]
+        for position in positions:
+            symbol = str(position.get("symbol", "")).upper()
+            take_profit_pct, stop_loss_pct = resolve_symbol_tp_sl(
+                "BINANCE_FUTURES", symbol, BINANCE_TAKE_PROFIT_PCT, BINANCE_STOP_LOSS_PCT,
             )
-            maybe_open_chain_order("BINANCE_FUTURES", symbol, size, exit_price)
-        return result
-    return None
+            if take_profit_pct > 0 and db_position_ever_scaled("BINANCE_FUTURES", symbol):
+                take_profit_pct = min(take_profit_pct, BINANCE_SCALED_TAKE_PROFIT_PCT)
+            profit_pct = binance_position_profit_pct(position)
+            hit_take_profit = take_profit_pct > 0 and profit_pct >= take_profit_pct
+            hit_stop_loss = stop_loss_pct > 0 and profit_pct <= -stop_loss_pct
+            if not hit_take_profit and not hit_stop_loss:
+                continue
+            size = abs(safe_float(position.get("size")))
+            if not symbol or size <= 0:
+                continue
+            close_side = "SELL" if str(position.get("side", "")).upper() == "LONG" else "BUY"
+            trigger = "take_profit_roi_pct" if hit_take_profit else "stop_loss_roi_pct"
+            request_id = f"{'tp' if hit_take_profit else 'sl'}-{symbol}-{int(time.time())}"
+            result = place_futures_order(
+                symbol,
+                close_side,
+                size,
+                reduce_only=True,
+                request_id=request_id,
+                channel=channel,
+            )
+            result["symbol"] = symbol
+            result["trigger"] = trigger
+            result["trigger_pct"] = round(profit_pct, 4)
+            result["target_pct"] = take_profit_pct if hit_take_profit else -stop_loss_pct
+            result["pnl"] = safe_float(position.get("pnl"))
+            if not result.get("error"):
+                entry_price = safe_float(position.get("entry_price"))
+                exit_price = safe_float(position.get("mark_price"))
+                pnl_amount = safe_float(position.get("pnl"))
+                db_record_position_closure(
+                    broker="BINANCE_FUTURES",
+                    symbol=symbol,
+                    side=str(position.get("side", "")).upper(),
+                    qty=size,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    realized_pnl=pnl_amount,
+                    realized_pnl_pct=profit_pct,
+                    close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
+                    detail=(
+                        f"%{take_profit_pct:.1f} kâr hedefi tetiklendi." if hit_take_profit
+                        else f"%{stop_loss_pct:.1f} zarar-kes tetiklendi."
+                    ),
+                )
+                maybe_open_chain_order("BINANCE_FUTURES", symbol, size, exit_price)
+            return result
+        return None
 
 
 def ibkr_position_profit_pct(position: Dict[str, Any]) -> float:
@@ -8118,8 +8141,15 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         result["symbol"] = symbol
         result["pnl"] = safe_float(position.get("pnl"))
         if not result.get("error"):
-            entry_price = safe_float(position.get("avgCost") or position.get("entry_price"))
-            exit_price = safe_float(position.get("mark_price"))
+            entry_price_native = safe_float(position.get("avgCost") or position.get("entry_price"))
+            exit_price_native = safe_float(position.get("mark_price"))
+            # KRITIK: LSE/SEHK gibi borsalarda avgCost/mark_price native birimde
+            # (pence/HKD) gelir - DB kaydinda ve maybe_open_chain_order'in USD
+            # fon karsilastirmasinda tutarlilik icin USD karsiligina cevrilir.
+            # pnl_amount IBKR'in kendi 'pnl' alanindan (zaten USD) geldigi icin
+            # ayrica cevrilmesine gerek yok.
+            entry_price = get_ibkr_price_usd_equivalent(entry_price_native, exchange, currency)
+            exit_price = get_ibkr_price_usd_equivalent(exit_price_native, exchange, currency)
             pnl_amount = safe_float(position.get("pnl"))
             db_record_position_closure(
                 broker="IBKR",
