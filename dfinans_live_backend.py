@@ -315,11 +315,14 @@ IBKR_SYMBOL_MARKET_INFO: Dict[str, Dict[str, str]] = {
     # olarak zaten mevcuttu ama dogrudan vadeli islem (futures) de istendigi
     # icin MES'teki gibi kucuk kontrat buyuklugune sahip MIKRO versiyonlar
     # secildi: MGC (Micro Gold, 10 troy ons - GC'nin 1/10'u) ve MCL (Micro WTI
-    # Ham Petrol, 100 varil - CL'nin 1/10'u). KRITIK: contract_month bu ikisi
-    # icin AYLIK sozlesmeler oldugundan MES'ten (ceyreklik) DAHA SIK
-    # guncellenmelidir - suresi gecen kontrat IBKR tarafindan reddedilir.
-    # Su an: Eylul 2026 (202609).
-    "MGC": {"exchange": "COMEX", "currency": "USD", "region": "US_FUTURES", "sector": "METALS_FUTURES", "asset_type": "FUT", "contract_month": "202609"},
+    # Ham Petrol, 100 varil - CL'nin 1/10'u). KRITIK: MCL (ham petrol) HER AY
+    # islem gorur, ama MGC (altin) SADECE standart teslimat aylarinda islem
+    # gorur (Subat/Nisan/Haziran/Agustos/Ekim/Aralik - 202609/Eylul GECERSIZ
+    # oldugu icin 'IBKR contract dogrulanamadi' hatasi verdi, Ekim'e (202610)
+    # duzeltildi). Bu ikisi MES'ten (ceyreklik) DAHA SIK guncellenmelidir -
+    # suresi gecen kontrat IBKR tarafindan reddedilir. Su an: MGC->Ekim 2026,
+    # MCL->Eylul 2026.
+    "MGC": {"exchange": "COMEX", "currency": "USD", "region": "US_FUTURES", "sector": "METALS_FUTURES", "asset_type": "FUT", "contract_month": "202610"},
     "MCL": {"exchange": "NYMEX", "currency": "USD", "region": "US_FUTURES", "sector": "ENERGY_FUTURES", "asset_type": "FUT", "contract_month": "202609"},
 }
 
