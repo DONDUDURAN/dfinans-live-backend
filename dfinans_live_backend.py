@@ -250,31 +250,40 @@ def assert_ibkr_market_allowed(exchange: str, currency: str, symbol: str = "") -
 # alinip-satilmamali (kullanici talebiyle havuzdan cikarildi).
 IBKR_SYMBOL_MARKET_INFO: Dict[str, Dict[str, str]] = {
     # --- ABD (SMART / USD) ---
-    "AAPL": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
-    "MSFT": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
-    "NVDA": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "SEMICONDUCTOR"},
-    "AMD": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "SEMICONDUCTOR"},
-    "TSLA": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "AUTO_EV"},
-    "F": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "AUTO_EV"},
-    "T": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TELECOM"},
-    "GOOGL": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
-    "AMZN": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
-    "META": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP"},
+    "AAPL": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP", "asset_type": "STK"},
+    "MSFT": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP", "asset_type": "STK"},
+    "NVDA": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "SEMICONDUCTOR", "asset_type": "STK"},
+    "AMD": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "SEMICONDUCTOR", "asset_type": "STK"},
+    "TSLA": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "AUTO_EV", "asset_type": "STK"},
+    "F": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "AUTO_EV", "asset_type": "STK"},
+    "T": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TELECOM", "asset_type": "STK"},
+    "GOOGL": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP", "asset_type": "STK"},
+    "AMZN": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP", "asset_type": "STK"},
+    "META": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "TECH_MEGACAP", "asset_type": "STK"},
     # --- Emtia ETF'leri (SMART / USD) - fiziksel kontrat degil, ETF uzerinden ---
-    "GLD": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "GOLD"},   # SPDR Gold Shares (altin)
-    "USO": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "ENERGY"},   # United States Oil Fund (petrol)
+    "GLD": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "GOLD", "asset_type": "STK"},   # SPDR Gold Shares (altin)
+    "USO": {"exchange": "SMART", "currency": "USD", "region": "US", "sector": "ENERGY", "asset_type": "STK"},   # United States Oil Fund (petrol)
     # --- Ingiltere (LSE / GBP) ---
-    "SHEL": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "ENERGY"},
-    "AZN": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "HEALTHCARE"},
-    "HSBA": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "FINANCIALS"},
-    "ULVR": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "CONSUMER_STAPLES"},
-    "RIO": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "MINING_MATERIALS"},
+    "SHEL": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "ENERGY", "asset_type": "STK"},
+    "AZN": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "HEALTHCARE", "asset_type": "STK"},
+    "HSBA": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "FINANCIALS", "asset_type": "STK"},
+    "ULVR": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "CONSUMER_STAPLES", "asset_type": "STK"},
+    "RIO": {"exchange": "LSE", "currency": "GBP", "region": "UK", "sector": "MINING_MATERIALS", "asset_type": "STK"},
     # --- Hong Kong (SEHK / HKD) ---
-    "700": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH"},   # Tencent
-    "9988": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH"},  # Alibaba
-    "5": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "FINANCIALS"},     # HSBC (HK listesi)
-    "1299": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "FINANCIALS"},  # AIA (sigorta)
-    "3690": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH"},  # Meituan
+    "700": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH", "asset_type": "STK"},   # Tencent
+    "9988": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH", "asset_type": "STK"},  # Alibaba
+    "5": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "FINANCIALS", "asset_type": "STK"},     # HSBC (HK listesi)
+    "1299": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "FINANCIALS", "asset_type": "STK"},  # AIA (sigorta)
+    "3690": {"exchange": "SEHK", "currency": "HKD", "region": "ASIA", "sector": "CHINA_TECH", "asset_type": "STK"},  # Meituan
+    # --- Kripto (PAXOS / USD) - kullanicinin talebi: 'hafta sonlari borsa
+    # kapaliyken nakit bosta beklemesin' - hisse borsalari (SMART/LSE/SEHK)
+    # hafta sonu ve gece kapaliyken IBKR'nin PAXOS uzerinden sundugu kripto
+    # islemleri 7/24 acik kalir, boylece sermaye hic bosta kalmadan
+    # degerlendirilebilir. region="CRYPTO" oldugu icin get_region_session_bias
+    # (ASIA/UK/US) gibi borsa-seansi bazli fonksiyonlara dahil olmaz, ayri bir
+    # kategori olarak islem gorur.
+    "BTCUSD": {"exchange": "PAXOS", "currency": "USD", "region": "CRYPTO", "sector": "CRYPTO_MAJOR", "asset_type": "CRYPTO"},
+    "ETHUSD": {"exchange": "PAXOS", "currency": "USD", "region": "CRYPTO", "sector": "CRYPTO_MAJOR", "asset_type": "CRYPTO"},
 }
 
 # Kullanicinin talebi: 'sektör rotasyonu ekle' - kripto icin sabit/varsayimsal
@@ -306,7 +315,7 @@ def get_ibkr_symbol_market_info(symbol: str) -> Dict[str, str]:
     info = IBKR_SYMBOL_MARKET_INFO.get(sym)
     if info:
         return info
-    return {"exchange": "SMART", "currency": "USD", "region": "US"}
+    return {"exchange": "SMART", "currency": "USD", "region": "US", "asset_type": "STK"}
 
 
 def to_yfinance_symbol(symbol: str) -> str:
@@ -353,6 +362,14 @@ IBKR_AUTO_TRADER.mode = AUTO_TRADER.mode
 IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower() == "true"
 IBKR_AUTO_LOCK = threading.Lock()
 IBKR_AUTO_HISTORY: List[Dict[str, Any]] = []
+
+# Kullanicinin talebi: 'hafta sonlari borsa kapali ama parayi nakitte tutmak
+# mantiksiz, ibkr de kripto islemleri de yapilabiliyor, para iki gun bosta
+# beklemesin'. Hisse fiyatlari icin sabit hisse adedi (IBKR_AUTO_QUANTITY,
+# ör. 1) mantikli ama kripto icin (BTC ~90.000 USD) 1 birim asiri buyuk olur
+# - bunun yerine sabit bir USD tutar (notional) hedeflenir ve fiyata bolunerek
+# kesirli miktar hesaplanir (IBKR PAXOS kesirli kripto miktarini destekler).
+IBKR_CRYPTO_NOTIONAL_USD = float(os.getenv("IBKR_CRYPTO_NOTIONAL_USD", "50"))
 
 # Binance SPOT icin de Futures'tan tamamen bagimsiz ucuncu bir auto-trader ornegi.
 # Futures kaldiracli/short calisirken, spot sadece "elde tutulan varligi al/sat"
@@ -2748,6 +2765,10 @@ def _is_outside_regular_trading_hours(exchange: str) -> bool:
     'bu fiyat off-market/mesai-disi olusmus olabilir' notu eklemek icindir
     (kullanicinin talebi: 'off market işlemlerinin de referans alınması')."""
     ex = str(exchange or "SMART").upper()
+    # Kripto (PAXOS) 7/24 islem gorur - hafta sonu/gece dahil hicbir "seans disi"
+    # kisitlamasi yok (kullanicinin talebi: 'hafta sonlari nakit bosta kalmasin').
+    if ex == "PAXOS":
+        return False
     now_utc = datetime.now(timezone.utc)
     minute_of_day = now_utc.hour * 60 + now_utc.minute
     if ex == "LSE":
@@ -4419,7 +4440,7 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=60,
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=60,
             )
             closes = [b["close"] for b in bars]
             volumes = [b["volume"] for b in bars]
@@ -4590,7 +4611,7 @@ def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=10,
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=10,
             )
             closes = [b["close"] for b in bars]
             if len(closes) < 6:
@@ -5000,7 +5021,7 @@ def get_early_reversal_signal(symbol: str, market: str, broker: str) -> Dict[str
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=25,
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=25,
             )
             closes = [b["close"] for b in bars]
             long_window = 5
@@ -5079,7 +5100,7 @@ def get_region_session_bias(region: str) -> Dict[str, Any]:
         for sym in region_symbols:
             try:
                 info = IBKR_SYMBOL_MARKET_INFO[sym]
-                snap = ibkr_market_snapshot(sym, "STK", info["exchange"], info["currency"])
+                snap = ibkr_market_snapshot(sym, info.get("asset_type", "STK"), info["exchange"], info["currency"])
                 changes.append(safe_float(snap.get("change_24h")))
             except Exception:
                 continue
@@ -7210,6 +7231,11 @@ def _auto_trader_run_symbol(
         if normalize_symbol(symbol) in IBKR_SYMBOL_MARKET_INFO:
             exchange = market_info["exchange"]
             currency = market_info["currency"]
+            # Kripto (BTCUSD/ETHUSD gibi) semboller icin asset_type de sembole
+            # ozel cozumlenmeli (global IBKR_AUTO_TRADER.asset_type her zaman
+            # "STK") - aksi halde kripto icin STK kontrati kurulmaya calisilir
+            # ve emir/veri sorgusu basarisiz olur.
+            asset_type = market_info.get("asset_type", asset_type)
         symbol_region = market_info.get("region", "US")
         # Guvenlik: her ihtimale karsi burada da Turkiye/TRY kontrolu (build_ibkr_contract
         # zaten en alt seviyede engelliyor, ama erken tespit daha net bir hata verir).
@@ -7681,6 +7707,13 @@ def _auto_trader_run_symbol(
                             "time": now_text(),
                         }
             elif broker == "IBKR":
+                if asset_type == "CRYPTO" and action == "BUY" and price > 0 and qty > 0:
+                    # 1 tam birim (ör. 1 BTC ~90.000 USD) yerine sabit USD
+                    # tutar (notional) bazli kesirli miktar - IBKR PAXOS
+                    # kesirli kripto miktarini native olarak destekler. SELL
+                    # tarafinda qty zaten elde tutulan pozisyon miktarindan
+                    # (pre_close_position) gelir, burada degistirilmez.
+                    qty = round(IBKR_CRYPTO_NOTIONAL_USD / price, 6)
                 if do_live:
                     # Sabit miktarli (ör. 1 hisse) emir, hesaptaki diger pozisyonlarin
                     # kullandigi marj yuzunden 'Available Funds insufficient' hatasiyla
@@ -7702,9 +7735,10 @@ def _auto_trader_run_symbol(
                     # LSE/SEHK gibi yabanci borsalarda DEGIL, kullanicinin talebiyle - ve
                     # SADECE normal seans saatleri icindeyken, 1 tam hisseye yetecek kadar
                     # fon olmadiginda kesirli (ör. %20-%30 hisse) emir gonderilebilir.
-                    ibkr_fractional_order = False
+                    ibkr_fractional_order = (asset_type == "CRYPTO" and action == "SELL")
                     ibkr_allow_fractional_here = (
-                        exchange == "SMART" and not _is_outside_regular_trading_hours(exchange)
+                        (exchange == "SMART" or asset_type == "CRYPTO")
+                        and not _is_outside_regular_trading_hours(exchange)
                     )
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
@@ -7751,16 +7785,34 @@ def _auto_trader_run_symbol(
                                     ).strip()
                                     qty = affordable_qty
                         else:
-                            qty = math.floor(qty)
-                            if qty < 1:
-                                if ibkr_allow_fractional_here:
-                                    # Zaten hedeflenen miktar 1 hisseden kucuk (ör. AI
-                                    # 0.3 hisselik bir tutar hesaplamis) - fon yeterliyse
-                                    # dogrudan kesirli emir gonder, hatayla iptal etme.
-                                    fractional_qty = math.floor((base_qty if base_qty > 0 else qty) * 10000) / 10000.0
-                                    if fractional_qty > 0 and fractional_qty * price_usd <= safe_budget + 1e-9:
-                                        qty = fractional_qty
-                                        ibkr_fractional_order = True
+                            if asset_type == "CRYPTO":
+                                # Kripto miktari zaten notional (sabit USD tutar) bazli
+                                # kesirli olarak hesaplandi (bkz. yukarida qty override) -
+                                # hisse gibi tam sayiya yuvarlamaya GEREK YOK, IBKR PAXOS
+                                # kesirli kripto miktarini native destekler.
+                                if qty > 0:
+                                    ibkr_fractional_order = True
+                            else:
+                                qty = math.floor(qty)
+                                if qty < 1:
+                                    if ibkr_allow_fractional_here:
+                                        # Zaten hedeflenen miktar 1 hisseden kucuk (ör. AI
+                                        # 0.3 hisselik bir tutar hesaplamis) - fon yeterliyse
+                                        # dogrudan kesirli emir gonder, hatayla iptal etme.
+                                        fractional_qty = math.floor((base_qty if base_qty > 0 else qty) * 10000) / 10000.0
+                                        if fractional_qty > 0 and fractional_qty * price_usd <= safe_budget + 1e-9:
+                                            qty = fractional_qty
+                                            ibkr_fractional_order = True
+                                        else:
+                                            execution = {
+                                                "simulated": False,
+                                                "broker": "IBKR",
+                                                "symbol": symbol,
+                                                "side": action,
+                                                "quantity": 0,
+                                                "error": "IBKR API kesirli hisse emrini desteklemiyor (mesai-dışı ya da fon yetersiz), miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
+                                                "time": now_text(),
+                                            }
                                     else:
                                         execution = {
                                             "simulated": False,
@@ -7768,19 +7820,9 @@ def _auto_trader_run_symbol(
                                             "symbol": symbol,
                                             "side": action,
                                             "quantity": 0,
-                                            "error": "IBKR API kesirli hisse emrini desteklemiyor (mesai-dışı ya da fon yetersiz), miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
+                                            "error": "IBKR API kesirli hisse emrini desteklemiyor, miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
                                             "time": now_text(),
                                         }
-                                else:
-                                    execution = {
-                                        "simulated": False,
-                                        "broker": "IBKR",
-                                        "symbol": symbol,
-                                        "side": action,
-                                        "quantity": 0,
-                                        "error": "IBKR API kesirli hisse emrini desteklemiyor, miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
-                                        "time": now_text(),
-                                    }
                     # Ayni yonde (LONG) mevcut acik pozisyon uzerine ekleme (piramitleme)
                     # yapiliyor mu kontrol et - kullanicinin talebi: ayni yonde ekleme
                     # sembol basina gunde en fazla 1 kez yapilabilir.
@@ -7866,9 +7908,14 @@ def _auto_trader_run_symbol(
                             else:
                                 # Elde tutulan miktar istenen qty'den azsa (ör. daha once
                                 # kismen kapatilmis bir pozisyon), qty'yi elde olanla
-                                # sinirla - IBKR API kesirli emri kabul etmiyor, tam sayiya
-                                # yuvarla.
-                                held_qty = math.floor(safe_float(pre_close_position.get("position") or pre_close_position.get("size")))
+                                # sinirla. Hisse (STK) icin IBKR API kesirli emri kabul
+                                # etmedigi icin tam sayiya yuvarlanir; kripto (CRYPTO) icin
+                                # ise kesirli miktar (ör. 0.0005 BTC) native destekleniyor,
+                                # yuvarlarsak elde tutulan kucuk kripto pozisyonlari HIC
+                                # kapatilamaz (her zaman 0'a yuvarlanip SAT atlanir) hatasi
+                                # olusur.
+                                held_qty_raw = safe_float(pre_close_position.get("position") or pre_close_position.get("size"))
+                                held_qty = held_qty_raw if asset_type == "CRYPTO" else math.floor(held_qty_raw)
                                 if held_qty < qty:
                                     qty = held_qty
                         else:
@@ -8378,7 +8425,7 @@ def shadow_watchlist_cycle() -> None:
     for symbol in SHADOW_WATCHLIST_SYMBOLS:
         try:
             market_info = get_ibkr_symbol_market_info(symbol)
-            snap = ibkr_market_snapshot(symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"))
+            snap = ibkr_market_snapshot(symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"))
             price = safe_float(snap.get("price"))
             if price <= 0:
                 continue
@@ -9281,7 +9328,7 @@ def get_symbol_daily_change_and_rsi(symbol: str, broker: str) -> Optional[Dict[s
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=30,
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=30,
             )
             closes = [b["close"] for b in bars]
         else:
@@ -11448,7 +11495,7 @@ def shadow_watchlist_status_endpoint():
             symbol = pos.get("symbol")
             try:
                 market_info = get_ibkr_symbol_market_info(symbol)
-                snap = ibkr_market_snapshot(symbol, "STK", market_info.get("exchange", "SMART"), market_info.get("currency", "USD"))
+                snap = ibkr_market_snapshot(symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"))
                 price = safe_float(snap.get("price"))
             except Exception:
                 price = 0.0
