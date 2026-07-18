@@ -544,10 +544,24 @@ IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.
 # yoksayilip pozisyon acik tutulur (yalnizca STOP_LOSS_PCT'e ulasilirsa
 # veya pozisyon karda ise satis yapilir).
 IBKR_AI_SELL_MIN_LOSS_PCT = float(os.getenv("IBKR_AI_SELL_MIN_LOSS_PCT", "10.0"))
-# Kullanicinin talebi: IBKR'de asgari teyit sayisi. 5 bagimsiz sinyalden
-# (momentum, emir akisi, korelasyon, teknik trend, coklu zaman dilimi) en az
-# bu kadari action ile ayni yonde olmadan GERCEK IBKR emri gonderilmez.
+# Kullanicinin talebi: IBKR'de asgari teyit sayisi. Once "ayni anda 6 bagimsiz
+# sinyalden en az bu kadari" seklinde calisiyordu, ama canli veriler (bkz.
+# /auto-trader/ibkr/history) neredeyse HICBIR taramada 4/6'nin ayni anda
+# hizalanmadigini gosterdi (cogu STK sinyali fiyat-turevli oldugu icin dogal
+# olarak birbiriyle yuksek korele - gercek "bagimsiz" boyut sayisi 6'dan az).
+# GUNCELLEME (kullanicinin talebi: 'gün içinde farklı zamanlarda X teyit'):
+# artik AYNI ANDA degil, IBKR_CONFIRMATION_WINDOW_HOURS'luk KAYAN bir pencerede
+# BIRIKIMLI net teyit araniyor (bkz. _log_ibkr_confirmation_event /
+# _get_ibkr_confirmation_net_score) - her tarama dongusu bu sembol/yon icin bir
+# "oy" biriktirir (agirlik = o dongude kac bagimsiz sinyalin hizalandigi), zit
+# yonde bir tarama gelirse net sayaç dogal olarak azalir (BUY agirligi - SELL
+# agirligi), sifirlanmaz. Anlik "X/10" alani hala Teyit gosteriminde bilgi
+# amacli tutulur ama artik GATE (emir acma kilidi) degildir.
 IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "4"))
+# Birikimli teyit sayacinin ne kadar geriye baktigi (saat). Kullanicinin talebi:
+# '2,3 saat olsun' - eski (window disina cikan) sinyaller otomatik olarak
+# sayaçtan dusuyor (pruning), boylece 'bugunun teyidi' guncel kaliyor.
+IBKR_CONFIRMATION_WINDOW_HOURS = float(os.getenv("IBKR_CONFIRMATION_WINDOW_HOURS", "3"))
 
 # ATR (Average True Range) bazli volatilite-adaptif pozisyon boyutlandirma esikleri
 # (kullanicinin talebi: 'ATR ekle'). atr_pct = ATR(14) / son kapanis * 100.
@@ -822,9 +836,97 @@ def init_runtime_db() -> None:
                 )
                 """
             )
+            # Kullanicinin talebi: IBKR emir kilidi artik AYNI ANDA tum sinyallerin
+            # hizalanmasini degil, GUN ICINDE (son birkac saatlik kayan pencerede)
+            # tutarli sekilde tekrar eden yon teyidini arar. Her tarama dongusunde
+            # bu sembol icin o dongunun yonu (BUY/SELL) ve o dongude kac bagimsiz
+            # sinyalin hizalandigi (agirlik) burada loglanir; zit yon gelirse net
+            # sayaç dogal olarak azalir (BUY agirligi - SELL agirligi gibi).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ibkr_confirmation_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    weight INTEGER NOT NULL,
+                    ts REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ibkr_confirmation_events_symbol_ts
+                ON ibkr_confirmation_events(symbol, ts)
+                """
+            )
             conn.commit()
         finally:
             conn.close()
+
+
+def _log_ibkr_confirmation_event(symbol: str, direction: str, weight: int) -> None:
+    """Bu tarama dongusunun (symbol, yon) icin bir 'oy' kaydeder - birikimli
+    (gun ici, kayan pencereli) teyit sisteminin veri kaynagi budur. weight,
+    bu dongude kac bagimsiz sinyalin (X/10 havuzundan) ayni yonde oldugunu
+    yansitir - boylece guclu hizalanmis bir dongu, zayif (tek sinyalli) bir
+    dongudense pencereye daha fazla katki yapar."""
+    direction = str(direction or "").upper()
+    if direction not in ("BUY", "SELL") or weight <= 0:
+        return
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                conn.execute(
+                    "INSERT INTO ibkr_confirmation_events(symbol, direction, weight, ts) VALUES (?, ?, ?, ?)",
+                    (normalize_symbol(symbol), direction, int(weight), time.time()),
+                )
+                # Firsat bulmusken pencere disina cikmis (cok eski) kayitlari
+                # temizle - tablo sinirsiz buyumesin (kullanicinin talebi:
+                # '2,3 saat olsun' - o penceden eski veri zaten anlamsiz).
+                cutoff = time.time() - max(IBKR_CONFIRMATION_WINDOW_HOURS, 0.1) * 3600.0 * 4
+                conn.execute("DELETE FROM ibkr_confirmation_events WHERE ts < ?", (cutoff,))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+def _get_ibkr_confirmation_net_score(symbol: str, direction: str) -> Dict[str, Any]:
+    """Son IBKR_CONFIRMATION_WINDOW_HOURS saatteki (kayan pencere) bu sembole
+    ait BUY/SELL agirliklarini toplar ve istenen yon icin NET skoru dondurur
+    (ayni yonun toplam agirligi - zit yonun toplam agirligi). Boylece zit yonde
+    bir sinyal gelirse sayaç sifirlanmaz, sadece net deger azalir (kullanicinin
+    talebi: 'sadece o yönün sayacı azalsın')."""
+    direction = str(direction or "").upper()
+    if direction not in ("BUY", "SELL"):
+        return {"net": 0, "buy_weight": 0, "sell_weight": 0}
+    cutoff = time.time() - max(IBKR_CONFIRMATION_WINDOW_HOURS, 0.1) * 3600.0
+    buy_weight = 0
+    sell_weight = 0
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                rows = conn.execute(
+                    "SELECT direction, SUM(weight) AS w FROM ibkr_confirmation_events "
+                    "WHERE symbol = ? AND ts >= ? GROUP BY direction",
+                    (normalize_symbol(symbol), cutoff),
+                ).fetchall()
+                for row in rows:
+                    d = str(row[0] or "").upper()
+                    w = int(row[1] or 0)
+                    if d == "BUY":
+                        buy_weight = w
+                    elif d == "SELL":
+                        sell_weight = w
+            finally:
+                conn.close()
+    except Exception:
+        return {"net": 0, "buy_weight": 0, "sell_weight": 0}
+    net = (buy_weight - sell_weight) if direction == "BUY" else (sell_weight - buy_weight)
+    return {"net": net, "buy_weight": buy_weight, "sell_weight": sell_weight}
 
 
 def db_insert_trade_journal(
@@ -7431,6 +7533,7 @@ def _auto_trader_run_symbol(
     # artik IBKR icin GERCEK bir emir acmaya yetmez.
     signal_technical_dir = "WAIT"
     signal_mtf_dir = "WAIT"
+    signal_volume_dir = "WAIT"
     if broker == "IBKR":
         try:
             tech_snap = get_technical_indicator_snapshot(symbol, market, broker)
@@ -7447,6 +7550,15 @@ def _auto_trader_run_symbol(
                     signal_technical_dir = "BUY"
                 elif last_close_val < sma20_val < sma50_val:
                     signal_technical_dir = "SELL"
+            # Yeni bagimsiz sinyal: hacim teyidi. Fiyat yonunden BAGIMSIZ bir
+            # veri boyutudur (katilim seviyesi) - mevcut kisa vadeli momentum
+            # yonunu, o hareketin ortalamanin belirgin uzerinde hacimle
+            # desteklenip desteklenmedigine gore teyit eder/etmez. Dusuk
+            # hacimde (teyitsiz hareket) oy VERILMEZ (WAIT), aksi yone oy
+            # verilmez - sadece "destekliyor mu" sorusuna cevap.
+            vol_ratio_val = tech_snap.get("volume_ratio")
+            if vol_ratio_val is not None and vol_ratio_val >= 1.5 and signal_momentum_dir in ("BUY", "SELL"):
+                signal_volume_dir = signal_momentum_dir
         except Exception:
             signal_technical_dir = "WAIT"
         try:
@@ -7470,6 +7582,52 @@ def _auto_trader_run_symbol(
             signal_market_cycle_dir = "SELL"
     except Exception:
         signal_market_cycle_dir = "WAIT"
+
+    # Yeni bagimsiz sinyal: seanslar-arasi (cross-session) yanlilik - ASIA->UK
+    # ->EU->US zincirinde bir onceki kapanan bolgenin risk yonu. Fiyat/teknik
+    # sinyallerden tamamen farkli (cografi/zamansal) bir veri kaynagidir.
+    signal_cross_session_dir = "WAIT"
+    if broker == "IBKR":
+        try:
+            cross = get_cross_session_bias(symbol_region)
+            cross_bias = safe_float(cross.get("bias"))
+            if cross_bias > 0:
+                signal_cross_session_dir = "BUY"
+            elif cross_bias < 0:
+                signal_cross_session_dir = "SELL"
+        except Exception:
+            signal_cross_session_dir = "WAIT"
+
+    # Yeni bagimsiz sinyal: erken donus (henuz kesin teyit degil, sadece
+    # dususun tukendigine dair oncu belirti - RSI asiri satim + dususun
+    # yavaslamasi). Sadece BUY yonunde tetiklenebilir (dogasi geregi
+    # asimetrik - bir dususten donus arar).
+    signal_early_reversal_dir = "WAIT"
+    try:
+        early_sig = get_early_reversal_signal(symbol, market, broker)
+        if early_sig.get("is_early_signal"):
+            signal_early_reversal_dir = "BUY"
+    except Exception:
+        signal_early_reversal_dir = "WAIT"
+
+    # Yeni bagimsiz sinyal: dis sinyaller BIRLESIK (SEC/8-K dosyalama +
+    # hisseye-ozel SEC/haber + genel haber sentiment'i + Fear&Greed + makro
+    # rejim + whale/funding + jeopolitik risk + Google Trends - hepsi zaten
+    # var olan get_external_signal_bias/get_stock_specific_signal_bias
+    # icinde hesaplaniyor). Kullanicinin talebi: 'benzer sinyalleri tek
+    # kabul edebiliriz' - bu 8+ ayri gostergeyi TEK bir oy olarak birlestirir
+    # (ayri ayri sayilirsa teyit havuzunu anlamsizca sisirirdi).
+    signal_external_dir = "WAIT"
+    if action in ("BUY", "SELL"):
+        try:
+            ext_combined_bias = get_external_signal_bias(symbol, action).get("bias", 0)
+            ext_combined_bias += get_stock_specific_signal_bias(symbol, action).get("bias", 0)
+            if ext_combined_bias > 0:
+                signal_external_dir = action
+            elif ext_combined_bias < 0:
+                signal_external_dir = "SELL" if action == "BUY" else "BUY"
+        except Exception:
+            signal_external_dir = "WAIT"
 
     if action in ["BUY", "SELL"]:
         confidence = max(0, min(95, confidence + learning_bias(action)))
@@ -8056,22 +8214,31 @@ def _auto_trader_run_symbol(
                                 action = "WAIT"
                                 qty = 0
                     if qty > 0 and action in ("BUY", "SELL"):
-                        # Kullanicinin talebi: IBKR'de asgari teyit sarti. Momentum, emir
-                        # akisi, korelasyon, teknik trend ve coklu zaman dilimi olmak uzere
-                        # 5 bagimsiz sinyalden en az IBKR_MIN_CONFIRMATIONS kadari action ile
-                        # AYNI yonde degilse, confidence yeterli olsa bile GERCEK emir
-                        # gonderilmez (sadece WAIT'e dusurulur, islem atlanir).
+                        # Kullanicinin talebi: teyit sistemi artik AYNI ANDA degil,
+                        # GUN ICINDE (son IBKR_CONFIRMATION_WINDOW_HOURS saatlik kayan
+                        # pencerede) BIRIKIMLI calisir. Once anlik "X/10" havuzu (bilgi
+                        # amacli - Teyit alaninda gosterilir) hesaplanir, o dongunun
+                        # agirligi olarak kaydedilir; zit yonde gelen taramalar net
+                        # sayaci DOGAL OLARAK azaltir (sifirlamaz - kullanicinin talebi:
+                        # 'sadece o yönün sayacı azalsın').
                         ibkr_agree_count = sum(
                             1 for d in (
                                 signal_momentum_dir, signal_order_flow_dir, signal_corr_dir,
                                 signal_technical_dir, signal_mtf_dir, signal_market_cycle_dir,
+                                signal_external_dir, signal_volume_dir, signal_cross_session_dir,
+                                signal_early_reversal_dir,
                             ) if d == action
                         )
-                        if ibkr_agree_count < IBKR_MIN_CONFIRMATIONS:
+                        _log_ibkr_confirmation_event(symbol, action, max(ibkr_agree_count, 1))
+                        cum_confirm = _get_ibkr_confirmation_net_score(symbol, action)
+                        if cum_confirm["net"] < IBKR_MIN_CONFIRMATIONS:
                             reason = (
                                 reason
-                                + f" (IBKR emri atlandı: sadece {ibkr_agree_count}/6 bağımsız sinyal {action} yönünde "
-                                f"hizalandı, minimum {IBKR_MIN_CONFIRMATIONS} teyit gerekiyor.)"
+                                + f" (IBKR emri atlandı: son {IBKR_CONFIRMATION_WINDOW_HOURS:.0f} saatte net "
+                                f"{cum_confirm['net']}/{IBKR_MIN_CONFIRMATIONS} {action} teyidi birikti "
+                                f"(bu taramada {ibkr_agree_count}/10 anlık sinyal hizalı; BUY toplam "
+                                f"{cum_confirm['buy_weight']}, SELL toplam {cum_confirm['sell_weight']}), "
+                                f"henüz yeterli değil.)"
                             ).strip()
                             qty = 0
                     if qty > 0 and "error" not in execution:
@@ -8344,7 +8511,10 @@ def _auto_trader_run_symbol(
         if action in ("BUY", "SELL"):
             confirmation_pool = (signal_momentum_dir, signal_order_flow_dir, signal_corr_dir, signal_market_cycle_dir)
             if broker == "IBKR":
-                confirmation_pool = confirmation_pool + (signal_technical_dir, signal_mtf_dir)
+                confirmation_pool = confirmation_pool + (
+                    signal_technical_dir, signal_mtf_dir, signal_external_dir,
+                    signal_volume_dir, signal_cross_session_dir, signal_early_reversal_dir,
+                )
             agree_count = sum(1 for d in confirmation_pool if d == action)
             signal_confirmations = f"{agree_count}/{len(confirmation_pool)}"
 
