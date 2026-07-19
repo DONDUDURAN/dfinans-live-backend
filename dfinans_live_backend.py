@@ -3021,7 +3021,15 @@ def _fallback_snapshot_from_history(ib, contract, symbol: str, asset_type: str, 
     tutarli)."""
     if contract is None:
         return None
-    what_to_show = "MIDPOINT" if str(asset_type or "").upper() in ("FOREX", "FX", "CASH") else "TRADES"
+    _asset_type_upper = str(asset_type or "").upper()
+    if _asset_type_upper in ("FOREX", "FX", "CASH"):
+        what_to_show = "MIDPOINT"
+    elif _asset_type_upper == "CRYPTO":
+        # IBKR kripto kontratlarinda (PAXOS borsasi) "TRADES" degil "AGGTRADES"
+        # istenmesi gerekiyor, aksi halde Error 10299 ile bos veri doner.
+        what_to_show = "AGGTRADES"
+    else:
+        what_to_show = "TRADES"
     bars = ib.reqHistoricalData(
         contract,
         endDateTime="",
@@ -4613,13 +4621,24 @@ def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: s
         qualified = ib.qualifyContracts(contract)
         if not qualified:
             raise RuntimeError("IBKR contract doğrulanamadı.")
+        _asset_type_upper = str(asset_type or "").upper()
+        if _asset_type_upper in ("FOREX", "FX", "CASH"):
+            _what_to_show, _use_rth = "MIDPOINT", False
+        elif _asset_type_upper == "CRYPTO":
+            # IBKR kripto (PAXOS) kontratlarinda "TRADES" yerine "AGGTRADES"
+            # istenmeli, aksi halde Error 10299 ile bos veri doner; kripto 7/24
+            # islem gordugu icin RTH (regular trading hours) kisitlamasi da
+            # kaldiriliyor (aksi halde bar'lar bos/eksik gelebiliyor).
+            _what_to_show, _use_rth = "AGGTRADES", False
+        else:
+            _what_to_show, _use_rth = "TRADES", True
         bars = ib.reqHistoricalData(
             qualified[0],
             endDateTime="",
             durationStr=f"{max(num_days, 30)} D",
             barSizeSetting="1 day",
-            whatToShow="TRADES",
-            useRTH=True,
+            whatToShow=_what_to_show,
+            useRTH=_use_rth,
             formatDate=1,
         )
         return [
@@ -13257,13 +13276,20 @@ def ibkr_history_alias():
             qualified = ib.qualifyContracts(contract)
             if not qualified:
                 raise RuntimeError("IBKR contract doğrulanamadı.")
+            _asset_type_upper = str(asset_type or "").upper()
+            if _asset_type_upper in ("FOREX", "FX", "CASH"):
+                _what_to_show, _use_rth = "MIDPOINT", False
+            elif _asset_type_upper == "CRYPTO":
+                _what_to_show, _use_rth = "AGGTRADES", False
+            else:
+                _what_to_show, _use_rth = "TRADES", True
             bars = ib.reqHistoricalData(
                 qualified[0],
                 endDateTime="",
                 durationStr=duration,
                 barSizeSetting=bar_size,
-                whatToShow="TRADES",
-                useRTH=True,
+                whatToShow=_what_to_show,
+                useRTH=_use_rth,
                 formatDate=1,
             )
             return [
