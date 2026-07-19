@@ -400,6 +400,12 @@ IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "60"
 IBKR_AUTO_TRADER.interval_sec = int(os.getenv("IBKR_AUTO_INTERVAL_SEC", "30"))
 IBKR_AUTO_TRADER.mode = AUTO_TRADER.mode
 IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower() == "true"
+# Kullanicinin talebi: 'günlük işlem 15 e çıkar' - sembol havuzu 34'e cikinca
+# (ABD/Ingiltere/HK/Avrupa hisseleri + forex + futures + emtia + kripto)
+# eski varsayilan (5) tum semboller arasinda paylasilan gunluk emir hakkini
+# cok hizli tuketiyor, ozellikle kriptoyu (BTCUSD/ETHUSD) sıraya hic
+# giremeden disarida birakiyordu.
+IBKR_AUTO_TRADER.max_daily_trades = int(os.getenv("IBKR_AUTO_MAX_DAILY_TRADES", "15"))
 IBKR_AUTO_LOCK = threading.Lock()
 IBKR_AUTO_HISTORY: List[Dict[str, Any]] = []
 
@@ -7365,7 +7371,23 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
     # IBKR_SYMBOL_MARKET_INFO), bu sessizce "Ingiltere/Hong Kong hic
     # taranmiyor" sonucuna yol aciyordu - kullanicinin sordugu sorunun
     # kok nedeni buydu.
+    # Kullanicinin talebi: 'hafta sonu pay alip satamiyorum zaten onlari
+    # tarama, paylari sadece hafta ici tara' - STK (hisse) sembolleri hafta
+    # sonu (Cmt/Paz UTC) zaten kapali borsalarda islem goremiyor, taramaya
+    # devam etmek hem bosuna IBKR API cagrisi/zaman harciyor hem de (daha
+    # onemlisi) gunluk paylasimli emir hakkini (max_daily_trades) STK
+    # taramalarindan gelen atlanmis sinyallerle dolduruyor ve hafta sonu tek
+    # aktif varlik sinifi olan kripto (BTCUSD/ETHUSD) sıraya hic giremeden
+    # gunluk hakkin tukenmesine yol aciyordu. Forex/futures (IDEALPRO/CME/
+    # COMEX/NYMEX) haric tutuldu - onlar zaten kendi seans-kapali mesajini
+    # (_ibkr_closed_exchange_message) donduruyor ve Pazar aksami erken
+    # acilabiliyor, STK gibi tamamen Cmt/Paz kapali degil.
+    _is_weekend_scan = broker == "IBKR" and datetime.utcnow().weekday() >= 5
     for symbol in symbols:
+        if _is_weekend_scan:
+            _sym_asset_type = get_ibkr_symbol_market_info(symbol).get("asset_type", asset_type)
+            if _sym_asset_type == "STK":
+                continue
         try:
             _auto_trader_run_symbol(
                 state, lock, history, broker, symbol, market, base_qty, min_conf,
