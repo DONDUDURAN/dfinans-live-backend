@@ -8538,9 +8538,26 @@ def _auto_trader_run_symbol(
                 # GERCEK islem firsatlari da 'Emir yok' ile engelleniyordu (kullanici
                 # bunu 'IBKR/Spot hep paper modda kaliyor, islem acmiyor' olarak
                 # gozlemledi).
-                state.last_error = ""
-                state.daily_trade_count += 1
-                queue_signal_for_learning(symbol, action, price, eval_window)
+                # GUNCELLEME (kullanicinin talebi: 'iletilen emirler değil,
+                # gerçekleşen işlemler kotayı doldursun, bazı emirler işlem
+                # dönüşmüyor çünkü'): GERCEK (simule olmayan) emirlerde artik
+                # sadece GERCEKTEN DOLMUS (filled > 0) emirler kota tuketir -
+                # IBKR'de outsideRth/DAY emri Submitted/PreSubmitted/Cancelled
+                # durumunda kalip hic dolmadan gunun geri kalaninda kotayi
+                # bosuna tuketebiliyordu. Paper/simule modda (canli emir
+                # gonderilmiyor, dolum kavrami yok) eski davranis korunur -
+                # her denenen sinyal test amacli kota tuketir.
+                filled_qty = safe_float(execution.get("filled", execution.get("executedQty", 0)))
+                is_simulated = bool(execution.get("simulated"))
+                if is_simulated or filled_qty > 0:
+                    state.last_error = ""
+                    state.daily_trade_count += 1
+                    queue_signal_for_learning(symbol, action, price, eval_window)
+                else:
+                    # Gercek emir iletildi ama henuz/hic dolmadi (ör. Submitted,
+                    # PreSubmitted, Cancelled) - kota tuketilmez, bir sonraki
+                    # taramada tekrar denenebilir.
+                    state.last_error = ""
             else:
                 state.last_error = ""
         else:
