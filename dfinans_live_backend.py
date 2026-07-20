@@ -2148,11 +2148,34 @@ def build_ai_performance_stats_payload() -> Dict[str, Any]:
     semasina uygun ozet uretir: karar sayilari auto_history'den, gercek
     kar/zarar oranlari ise position_closures'dan (compute_performance_stats)
     alinir - boylece 'kac karar acildi/bloklandi' ile 'gercekte ne kadar
-    kazandirdi' ayni ekranda tutarli sekilde gorunur."""
+    kazandirdi' ayni ekranda tutarli sekilde gorunur.
+
+    ONEMLI: 'openedTrades' SADECE gercekten borsada/IBKR'de DOLMUS (FILLED)
+    emirleri sayar. Onceden action alani BUY/SELL oldugu surece (emir
+    sadece iletilip henuz gerceklesmemis/Submitted-Pending durumda olsa
+    bile) 'acildi' sayiliyordu - kullanicinin 'açıldı 3 işlem diyor ama
+    baktığımda hiç işlem yok, emir iletildi' sikayeti buradan
+    kaynaklaniyordu. Simdi 3 ayri sayac var: openedTrades (FILLED),
+    submittedTrades (iletildi ama henuz dolmadi), blockedTrades (geri
+    kalan her sey: pas gecildi/simule/hatali/reddedildi)."""
     decisions = db_recent_auto_history(200)
     total_decisions = len(decisions)
-    opened = sum(1 for d in decisions if str(d.get("action", "WAIT")).upper() in ("BUY", "SELL"))
-    blocked = total_decisions - opened
+    opened = 0
+    submitted = 0
+    for d in decisions:
+        action = str(d.get("action", "WAIT")).upper()
+        if action not in ("BUY", "SELL"):
+            continue
+        execution = d.get("execution") or {}
+        if not isinstance(execution, dict):
+            execution = {}
+        exec_simulated = bool(execution.get("simulated", True))
+        fill_state = _execution_fill_state(execution)
+        if not exec_simulated and fill_state == "FILLED":
+            opened += 1
+        elif not exec_simulated and fill_state == "PENDING":
+            submitted += 1
+    blocked = total_decisions - opened - submitted
 
     closures = db_all_position_closures(days=30, include_mandatory_holdings=False)
     perf = compute_performance_stats(closures)
@@ -2168,6 +2191,7 @@ def build_ai_performance_stats_payload() -> Dict[str, Any]:
     return {
         "totalDecisions": total_decisions,
         "openedTrades": opened,
+        "submittedTrades": submitted,
         "blockedTrades": blocked,
         "successRate": success_rate,
         "avgProfit": avg_profit,
