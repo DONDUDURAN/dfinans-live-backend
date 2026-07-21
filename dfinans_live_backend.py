@@ -550,6 +550,12 @@ BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "2.0"))
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "2.0"))
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
+# Kullanicinin talebi: 'sadece ıbkr de hisselerde yüzde 2 kar arayalım diğer
+# varlıklarda yüzde 1 de kapatalım, altın ve petrolde de yüzde 1 olsun' -
+# hisseler (STK) IBKR_TAKE_PROFIT_PCT (%2) ile kalir, forex/futures (MGC/MCL
+# dahil)/kripto gibi hisse-disi tum IBKR varliklari icin daha dusuk bir kar
+# hedefi kullanilir (bkz. _resolve_ibkr_take_profit_pct_for_asset_type).
+IBKR_TAKE_PROFIT_PCT_NON_STOCK = float(os.getenv("IBKR_TAKE_PROFIT_PCT_NON_STOCK", "1.0"))
 # Kullanicinin talebi: bir pozisyon buyutulmus (piramitlenmis) ise, normal
 # (buyutulmemis) pozisyondan DAHA DUSUK bir kar yuzdesinde kapatilsin - boyut
 # arttigi icin risk de arttigindan kari daha erken realize etmek mantikli.
@@ -9247,7 +9253,13 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             # tutuluyor).
             continue
         profit_pct = ibkr_position_profit_pct(position)
-        ibkr_take_profit_pct = IBKR_TAKE_PROFIT_PCT
+        position_asset_type = str(position.get("asset_type") or position.get("secType") or "STK").upper()
+        # Kullanicinin talebi: sadece hisselerde (STK) %2 kar hedefi ara,
+        # diger tum IBKR varliklarinda (forex, futures - MGC/MCL altin/petrol
+        # dahil -, kripto) %1'de kapat.
+        ibkr_take_profit_pct = (
+            IBKR_TAKE_PROFIT_PCT if position_asset_type == "STK" else IBKR_TAKE_PROFIT_PCT_NON_STOCK
+        )
         if ibkr_take_profit_pct > 0 and db_position_ever_scaled("IBKR", symbol_check):
             ibkr_take_profit_pct = min(ibkr_take_profit_pct, IBKR_SCALED_TAKE_PROFIT_PCT)
         hit_take_profit = ibkr_take_profit_pct > 0 and profit_pct >= ibkr_take_profit_pct
