@@ -11812,67 +11812,6 @@ def debug_force_tp_check():
     })
 
 
-@app.route("/debug/hk-contract-probe", methods=["GET"])
-def debug_hk_contract_probe():
-    """GECICI teşhis endpoint'i: HK hisselerinin (700/9988/5/1299/3690) neden
-    canli/tarihsel fiyat alamadigini bulmak icin reqContractDetails ve
-    reqHistoricalData'yi hem SMART+primaryExchange hem de DOGRUDAN SEHK
-    exchange ile deneyip sonuclarini raporlar. Islem bitince kaldirilacak."""
-    symbol = request.args.get("symbol", "9988")
-    market_info = get_ibkr_symbol_market_info(symbol)
-    currency = market_info.get("currency", "HKD")
-    out: Dict[str, Any] = {"symbol": symbol, "currency": currency}
-
-    def _run(ib, ibs):
-        result: Dict[str, Any] = {}
-        for label, exch in (("smart_primary_sehk", "SMART"), ("direct_sehk", "SEHK")):
-            try:
-                if exch == "SMART":
-                    c = ibs.Stock(symbol, "SMART", currency, primaryExchange="SEHK")
-                else:
-                    c = ibs.Stock(symbol, "SEHK", currency)
-                details = ib.reqContractDetails(c)
-                if not details:
-                    result[label] = {"contract_details_count": 0, "error": "reqContractDetails bos liste dondurdu."}
-                    continue
-                qualified_contract = details[0].contract
-                entry: Dict[str, Any] = {
-                    "contract_details_count": len(details),
-                    "conId": qualified_contract.conId,
-                    "primaryExchange": getattr(qualified_contract, "primaryExchange", ""),
-                    "exchange": getattr(qualified_contract, "exchange", ""),
-                    "tradingHours": getattr(details[0], "tradingHours", "")[:100],
-                    "timeZoneId": getattr(details[0], "timeZoneId", ""),
-                }
-                try:
-                    ticker = ib.reqMktData(qualified_contract, "", True, False)
-                    ib.sleep(2.5)
-                    entry["ticker"] = {
-                        "last": ticker.last, "close": ticker.close, "marketPrice": ticker.marketPrice() if hasattr(ticker, "marketPrice") else None,
-                        "bid": ticker.bid, "ask": ticker.ask,
-                    }
-                except Exception as te:
-                    entry["ticker_error"] = str(te)
-                try:
-                    bars = ib.reqHistoricalData(qualified_contract, endDateTime="", durationStr="5 D", barSizeSetting="1 day", whatToShow="TRADES", useRTH=True)
-                    entry["historical_bars_count"] = len(bars)
-                    if bars:
-                        entry["last_bar_close"] = bars[-1].close
-                except Exception as he:
-                    entry["historical_error"] = str(he)
-                result[label] = entry
-            except Exception as e:
-                result[label] = {"error": str(e)}
-        return result
-
-    try:
-        out["result"] = ibkr_execute(_run, timeout=40.0)
-    except Exception as e:
-        out["error"] = str(e)
-    out["time"] = now_text()
-    return jsonify(out)
-
-
 @app.route("/profit-summary", methods=["GET"])
 def profit_summary_endpoint():
     """Mobil uygulamanin 'uygulamanin ilk gununden beri ne kadar kazandim'
@@ -12274,19 +12213,29 @@ def market_summary():
 @app.route("/ibkr/market-summary", methods=["GET"])
 def ibkr_market_summary():
     symbol = request.args.get("symbol", "AAPL")
-    asset_type = request.args.get("asset_type", "STK")
-    exchange = request.args.get("exchange", "SMART")
-    currency = request.args.get("currency", "USD")
+    asset_type = request.args.get("asset_type", "")
+    exchange = request.args.get("exchange", "")
+    currency = request.args.get("currency", "")
     # KRITIK DUZELTME: contract_month query parametresi hic okunmuyordu - bu
     # yuzden FUT sembolleri (MES/MGC/MCL) bu endpoint'ten HER ZAMAN 'contract_month
     # tanimli degil' hatasi aliyordu (manuel islem ekraninda bu varliklarin fiyati
     # hic gorunmuyordu). Query'de verilmemisse, sembol havuzundaki (IBKR_SYMBOL_
     # MARKET_INFO) kayitli contract_month'a otomatik dusulur.
     contract_month = request.args.get("contract_month", "")
-    if not contract_month:
-        pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
-        if pool_info:
-            contract_month = str(pool_info.get("contract_month", "") or "")
+    pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+    if not contract_month and pool_info:
+        contract_month = str(pool_info.get("contract_month", "") or "")
+    # KRITIK DUZELTME: exchange/currency query'de verilmezse HER ZAMAN SMART/USD
+    # varsayiliyordu - bu yuzden LSE (GBP) ve SEHK (HKD) gibi ABD-disi hisseler
+    # (700/9988/5/1299/3690 gibi) manuel islem ekraninda fiyat gosteremiyordu,
+    # cunku mobil uygulama bu parametreleri göndermeden sembolu cagiriyor. Simdi
+    # query'de verilmemisse sembol havuzundaki kayitli exchange/currency kullanilir.
+    if not exchange:
+        exchange = str((pool_info or {}).get("exchange") or "SMART")
+    if not currency:
+        currency = str((pool_info or {}).get("currency") or "USD")
+    if not asset_type:
+        asset_type = str((pool_info or {}).get("asset_type") or "STK")
     try:
         return jsonify(ibkr_market_snapshot(symbol, asset_type, exchange, currency, contract_month=contract_month))
     except Exception as e:
@@ -12302,9 +12251,18 @@ def ibkr_market_summary():
 @app.route("/ibkr/ai-signal", methods=["GET"])
 def ibkr_ai_signal():
     symbol = request.args.get("symbol", "AAPL")
-    asset_type = request.args.get("asset_type", "STK")
-    exchange = request.args.get("exchange", "SMART")
-    currency = request.args.get("currency", "USD")
+    asset_type = request.args.get("asset_type", "")
+    exchange = request.args.get("exchange", "")
+    currency = request.args.get("currency", "")
+    # AYNI DUZELTME (bkz. /ibkr/market-summary): exchange/currency/asset_type
+    # query'de verilmezse HER ZAMAN STK/SMART/USD varsayiliyordu.
+    _pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+    if not asset_type:
+        asset_type = str((_pool_info or {}).get("asset_type") or "STK")
+    if not exchange:
+        exchange = str((_pool_info or {}).get("exchange") or "SMART")
+    if not currency:
+        currency = str((_pool_info or {}).get("currency") or "USD")
     try:
         snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency)
         change = safe_float(snap.get("change_24h"))
@@ -13072,18 +13030,27 @@ def ibkr_manual_order():
     symbol = body.get("symbol", "AAPL")
     side = body.get("side", "BUY")
     quantity = safe_float(body.get("quantity"), 0)
-    asset_type = str(body.get("asset_type", "STK"))
-    exchange = str(body.get("exchange", "SMART"))
-    currency = str(body.get("currency", "USD"))
+    asset_type = str(body.get("asset_type", ""))
+    exchange = str(body.get("exchange", ""))
+    currency = str(body.get("currency", ""))
+    # AYNI DUZELTME (bkz. /order): exchange/currency/asset_type body'de
+    # verilmezse HER ZAMAN STK/SMART/USD varsayiliyordu - LSE/SEHK gibi
+    # ABD-disi hisselerde manuel emir bu yuzden yanlis kontrat uzerinden
+    # deneniyordu. Sembol havuzundaki kayitli degerlere dusuluyor.
+    _pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+    if not asset_type:
+        asset_type = str((_pool_info or {}).get("asset_type") or "STK")
+    if not exchange:
+        exchange = str((_pool_info or {}).get("exchange") or "SMART")
+    if not currency:
+        currency = str((_pool_info or {}).get("currency") or "USD")
     # AYNI DUZELTME: contract_month gonderilmiyordu - FUT sembolleri (MES/MGC/
     # MCL) manuel emirde de her zaman 'contract_month tanimli degil' hatasi
     # aliyordu (kullanicinin 'istediğim varlıkta işlem yapamıyorum manuel'
     # sikayeti). Body'de verilmemisse sembol havuzundan otomatik cekilir.
     contract_month = str(body.get("contract_month", "") or "")
-    if not contract_month:
-        pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
-        if pool_info:
-            contract_month = str(pool_info.get("contract_month", "") or "")
+    if not contract_month and _pool_info:
+        contract_month = str(_pool_info.get("contract_month", "") or "")
     try:
         request_id = str(uuid.uuid4())
         return jsonify(ibkr_place_market_order(
@@ -13314,9 +13281,21 @@ def ibkr_status_alias():
 @app.route("/ibkr-price", methods=["GET"])
 def ibkr_price_alias():
     symbol = request.args.get("symbol", "AAPL")
-    asset_type = request.args.get("asset_type", "STK")
-    exchange = request.args.get("exchange", "SMART")
-    currency = request.args.get("currency", "USD")
+    asset_type = request.args.get("asset_type", "")
+    exchange = request.args.get("exchange", "")
+    currency = request.args.get("currency", "")
+    # AYNI DUZELTME (bkz. /ibkr/market-summary): exchange/currency/asset_type
+    # query'de verilmezse HER ZAMAN STK/SMART/USD varsayiliyordu - bu yuzden
+    # manuel islem ekraninda LSE/SEHK gibi ABD-disi hisselerin (700/9988/...)
+    # fiyati hic gorunmuyordu. Simdi sembol havuzundaki kayitli degerlere
+    # dusuluyor.
+    _pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+    if not asset_type:
+        asset_type = str((_pool_info or {}).get("asset_type") or "STK")
+    if not exchange:
+        exchange = str((_pool_info or {}).get("exchange") or "SMART")
+    if not currency:
+        currency = str((_pool_info or {}).get("currency") or "USD")
     try:
         snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency)
         price = safe_float(snap.get("price"))
@@ -13354,17 +13333,28 @@ def ibkr_order_alias():
     elif side in ("SAT", "SELL", "SHORT"):
         side = "SELL"
     quantity = safe_float(body.get("quantity"), 0)
-    asset_type = str(body.get("assetType", body.get("asset_type", "STK")))
-    exchange = str(body.get("exchange", "SMART"))
-    currency = str(body.get("currency", "USD"))
+    asset_type = str(body.get("assetType", body.get("asset_type", "")))
+    exchange = str(body.get("exchange", ""))
+    currency = str(body.get("currency", ""))
+    # AYNI DUZELTME (bkz. /ibkr/market-summary): exchange/currency/asset_type
+    # body'de verilmezse HER ZAMAN STK/SMART/USD varsayiliyordu - bu yuzden
+    # LSE/SEHK gibi ABD-disi hisselerde (700/9988/...) mobil uygulamadan
+    # gonderilen GERCEK emirler yanlis (US/SMART) kontrat uzerinden
+    # denenip basarisiz oluyordu. Simdi sembol havuzundaki kayitli
+    # degerlere dusuluyor.
+    _pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+    if not asset_type:
+        asset_type = str((_pool_info or {}).get("asset_type") or "STK")
+    if not exchange:
+        exchange = str((_pool_info or {}).get("exchange") or "SMART")
+    if not currency:
+        currency = str((_pool_info or {}).get("currency") or "USD")
     # AYNI DUZELTME (bkz. /ibkr/manual-order): contract_month gonderilmiyordu,
     # FUT sembolleri (MES/MGC/MCL) bu ana mobil-emir endpoint'inde de her
     # zaman 'contract_month tanimli degil' hatasi aliyordu.
     contract_month = str(body.get("contract_month", "") or body.get("contractMonth", "") or "")
-    if not contract_month:
-        pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
-        if pool_info:
-            contract_month = str(pool_info.get("contract_month", "") or "")
+    if not contract_month and _pool_info:
+        contract_month = str(_pool_info.get("contract_month", "") or "")
     if quantity <= 0:
         return jsonify({"success": False, "message": "Miktar 0'dan büyük olmalı."}), 400
     try:
@@ -13404,9 +13394,18 @@ def ibkr_cancel_order_alias():
 @app.route("/history", methods=["GET"])
 def ibkr_history_alias():
     symbol = request.args.get("symbol", "AAPL")
-    asset_type = request.args.get("asset_type", "STK")
-    exchange = request.args.get("exchange", "SMART")
-    currency = request.args.get("currency", "USD")
+    asset_type = request.args.get("asset_type", "")
+    exchange = request.args.get("exchange", "")
+    currency = request.args.get("currency", "")
+    # AYNI DUZELTME (bkz. /ibkr/market-summary): exchange/currency/asset_type
+    # query'de verilmezse HER ZAMAN STK/SMART/USD varsayiliyordu.
+    _pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+    if not asset_type:
+        asset_type = str((_pool_info or {}).get("asset_type") or "STK")
+    if not exchange:
+        exchange = str((_pool_info or {}).get("exchange") or "SMART")
+    if not currency:
+        currency = str((_pool_info or {}).get("currency") or "USD")
     duration = request.args.get("duration", "1 M")
     bar_size = request.args.get("bar_size", "1 day")
     try:
