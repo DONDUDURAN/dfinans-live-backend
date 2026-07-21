@@ -9821,6 +9821,29 @@ def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_pri
         # kisitlamalari).
         if direction == "SELL" and broker != "BINANCE_FUTURES":
             return None
+        # Kullanicinin bildirdigi gercek zarar ornegi: BTCUSDT/ETHUSDT'de
+        # RSI asiri alim teyidiyle zincir SHORT acildi ("dipte" degil, zaten
+        # yukselmis yerde) ama piyasa BULL/TRANSITION rejiminde toparlanma
+        # rallisi surdugu icin fiyat SHORT'un aleyhine yukselmeye devam etti
+        # ve zarar-kes tetiklendi. Guclu/toparlanan bir piyasada 'asiri alim'
+        # cogu zaman DONUS degil MOMENTUM DEVAMI anlamina gelir (short-covering
+        # + dip-buying baskisi). Bu yuzden zincir SHORT sadece piyasa rejimi
+        # NET BEAR iken acilir; BULL veya TRANSITION rejiminde trend'e karsi
+        # (fade) SHORT riskli kabul edilip atlanir. Zincir LONG icin boyle bir
+        # kisitlama yok (LONG zaten trend yonunde/toparlanma beklentisiyle
+        # aciliyor, BULL/TRANSITION'da desteklenir).
+        if direction == "SELL":
+            market_label = "CRYPTO" if broker in ("BINANCE_FUTURES", "BINANCE_SPOT") else "STOCK"
+            regime_info = get_bull_bear_market_regime(market_label)
+            regime = regime_info.get("regime", "TRANSITION")
+            if regime != "BEAR":
+                return None
+            pattern_note += (
+                f" [Piyasa rejimi teyidi] {market_label} piyasasi net BEAR "
+                f"({regime_info.get('reference_symbol')} fiyat SMA200'un %"
+                f"{abs(regime_info.get('pct_vs_sma200', 0)):.1f} altinda): "
+                f"SHORT trend yonunde, fade riski dusuk."
+            )
 
         chain_qty = max(0.0, closed_qty * CHAIN_ORDER_SIZE_PCT)
         if chain_qty <= 0:
