@@ -1721,6 +1721,80 @@ def db_all_position_closures(
     return [dict(r) for r in rows]
 
 
+def db_delete_position_closures(
+    symbol: str,
+    broker: Optional[str] = None,
+    close_reason: Optional[str] = None,
+    entry_price: Optional[float] = None,
+    entry_price_tolerance: float = 0.02,
+    qty: Optional[float] = None,
+    qty_tolerance: float = 0.001,
+    created_after: Optional[str] = None,
+    created_before: Optional[str] = None,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """GECICI temizlik yardimcisi: bir hatali kod yolunun (bkz.
+    _is_order_actually_filled) tekrar tekrar yanlislikla kaydettigi 'gercekte
+    hic dolmamis' position_closures satirlarini hedefli kriterlerle
+    silmek/onizlemek icin kullanilir. Kullanicinin bildirdigi 'USO hissesi
+    kapanmadi ama ai islem gunlugunde cok fazla kar gozukuyor' sorununu
+    kalici olarak temizlemek icin eklendi. dry_run=True iken sadece
+    eslesen satirlari sayar/onizler, silme yapmaz."""
+    where_clauses = ["UPPER(symbol) = ?"]
+    params: List[Any] = [symbol.upper()]
+    if broker:
+        where_clauses.append("UPPER(broker) = ?")
+        params.append(broker.upper())
+    if close_reason:
+        where_clauses.append("UPPER(close_reason) = ?")
+        params.append(close_reason.upper())
+    if entry_price is not None:
+        where_clauses.append("entry_price BETWEEN ? AND ?")
+        params.append(entry_price - entry_price_tolerance)
+        params.append(entry_price + entry_price_tolerance)
+    if qty is not None:
+        where_clauses.append("qty BETWEEN ? AND ?")
+        params.append(qty - qty_tolerance)
+        params.append(qty + qty_tolerance)
+    if created_after:
+        where_clauses.append("created_at >= ?")
+        params.append(created_after)
+    if created_before:
+        where_clauses.append("created_at <= ?")
+        params.append(created_before)
+    where_sql = " AND ".join(where_clauses)
+
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            matched = conn.execute(
+                f"""
+                SELECT id, created_at, broker, symbol, side, qty, entry_price, exit_price,
+                       realized_pnl, realized_pnl_pct, close_reason
+                FROM position_closures
+                WHERE {where_sql}
+                ORDER BY created_at ASC
+                """,
+                params,
+            ).fetchall()
+            matched_rows = [dict(r) for r in matched]
+            deleted = 0
+            if not dry_run and matched_rows:
+                conn.execute(f"DELETE FROM position_closures WHERE {where_sql}", params)
+                conn.commit()
+                deleted = len(matched_rows)
+        finally:
+            conn.close()
+    return {
+        "matched_count": len(matched_rows),
+        "deleted_count": deleted,
+        "dry_run": dry_run,
+        "sample": matched_rows[:5],
+        "total_fake_pnl": round(sum(safe_float(r.get("realized_pnl")) for r in matched_rows), 2),
+    }
+
+
 def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Kapanmis pozisyon kayitlarindan (position_closures) win rate, profit
     factor, ortalama kazanc/kayip, en iyi/en kotu islem, kapanis nedeni
@@ -2026,6 +2100,28 @@ def _execution_fill_state(execution: Dict[str, Any]) -> str:
         # acikca hata da yoksa, geriye donuk uyumluluk icin dolmus varsay.
         return "FILLED"
     return "UNKNOWN"
+
+
+def _is_order_actually_filled(result: Dict[str, Any]) -> bool:
+    """Bir emir sonucunun (execution/result sozlugu) borsada/IBKR'de GERCEKTEN
+    dolup dolmadigini soyler. db_record_position_closure() cagirmadan once
+    HER YERDE bu kontrol yapilmali - aksi halde 'error' alani bos oldugu icin
+    (emir iletildi ama Submitted/PreSubmitted durumunda takili kaldi, ya da
+    LIVE_TRADING=false iken simulated=True donduruldu) pozisyon hic
+    kapanmamisken 'kapandi' diye kaydedilir. Kullanicinin bildirdigi 'USO
+    hissesi bir turlu kapanmadi ama ai islem gunlugunde cok fazla kar
+    gozukuyor, portfoyde o kadar kar yok' sorunu tam olarak buydu: IBKR
+    TP/SL kapatma yolu sadece 'error yok mu' diye bakiyordu, emrin gercekten
+    dolup dolmadigina (filled>0) hic bakmiyordu - bu yuzden ayni pozisyon
+    her kontrol turunde (dakikada bir) yeniden 'KAR AL ile kapandi' diye
+    kaydediliyordu, hicbir gercek satis olmadan."""
+    if not isinstance(result, dict) or not result:
+        return False
+    if result.get("error"):
+        return False
+    if result.get("simulated"):
+        return False
+    return _execution_fill_state(result) == "FILLED"
 
 
 def build_ai_decision_center_entries(limit: int = 40) -> List[Dict[str, Any]]:
@@ -7994,7 +8090,11 @@ def _auto_trader_run_symbol(
                 elif qty > 0:
                     if do_live:
                         execution = place_spot_order(symbol, action, qty)
-                        if not execution.get("error"):
+                        # KRITIK DUZELTME: sadece 'error yok mu' kontrolu yetersizdi -
+                        # LIVE_TRADING=false ise 'simulated=True, error yok' donuyordu
+                        # ve emir hic gerceklesmedigi halde pozisyon acilmis/kapanmis
+                        # sayiliyordu. bkz. _is_order_actually_filled dokumani.
+                        if _is_order_actually_filled(execution):
                             if action == "BUY":
                                 if spot_is_position_add and existing_position:
                                     old_qty = safe_float(existing_position.get("quantity"))
@@ -8549,9 +8649,12 @@ def _auto_trader_run_symbol(
                     ensure_binance_leverage(symbol, leverage)
                     if qty > 0:
                         execution = place_futures_order(symbol, action, qty, reduce_only=False, leverage=leverage)
-                        if futures_is_position_add and not execution.get("error"):
+                        # KRITIK DUZELTME: bkz. _is_order_actually_filled dokumani -
+                        # sadece 'error yok mu' yetersizdi.
+                        order_filled = _is_order_actually_filled(execution)
+                        if futures_is_position_add and order_filled:
                             db_log_position_add("BINANCE_FUTURES", symbol)
-                        if pre_close_futures_position and not execution.get("error"):
+                        if pre_close_futures_position and order_filled:
                             existing_size = abs(safe_float(pre_close_futures_position.get("size")))
                             closed_qty = min(qty, existing_size) if existing_size > 0 else qty
                             entry_price = safe_float(pre_close_futures_position.get("entry_price"))
@@ -9196,7 +9299,10 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
             result["trigger_pct"] = round(profit_pct, 4)
             result["target_pct"] = take_profit_pct if hit_take_profit else -stop_loss_pct
             result["pnl"] = safe_float(position.get("pnl"))
-            if not result.get("error"):
+            # KRITIK DUZELTME: bkz. _is_order_actually_filled dokumani -
+            # sadece 'error yok mu' yetersizdi, emrin gercekten dolup
+            # dolmadigina (filled/status) da bakilmali.
+            if _is_order_actually_filled(result):
                 entry_price = safe_float(position.get("entry_price"))
                 exit_price = safe_float(position.get("mark_price"))
                 pnl_amount = safe_float(position.get("pnl"))
@@ -9318,7 +9424,16 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         result["target_pct"] = ibkr_take_profit_pct if hit_take_profit else -IBKR_STOP_LOSS_PCT
         result["symbol"] = symbol
         result["pnl"] = safe_float(position.get("pnl"))
-        if not result.get("error"):
+        # KRITIK DUZELTME (bkz. _is_order_actually_filled dokumani): sadece
+        # 'error yok mu' kontrolu yetersizdi - IBKR emri Submitted/PreSubmitted
+        # durumunda (mesai-disi, kesirli miktar reddi vb.) hicbir hata
+        # donmeden takili kalabiliyordu, ama bu blok yine de pozisyonu
+        # 'kapandi' diye kaydediyordu (filled=0 olsa bile). Kullanicinin
+        # bildirdigi 'USO hissesi bir turlu kapanmadi ama ai islem gunlugunde
+        # cok fazla kar gozukuyor' sorununun tam kaynagi buydu: ayni pozisyon
+        # her kontrol turunde (dakikada bir) tekrar tekrar 'KAR AL ile
+        # kapandi' diye kaydediliyordu.
+        if _is_order_actually_filled(result):
             entry_price_native = safe_float(position.get("avgCost") or position.get("entry_price"))
             exit_price_native = safe_float(position.get("mark_price"))
             # KRITIK: LSE/SEHK gibi borsalarda avgCost/mark_price native birimde
@@ -9978,7 +10093,8 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         result["trigger_pct"] = round(profit_pct, 4)
         result["target_pct"] = spot_take_profit_pct if hit_take_profit else -BINANCE_STOP_LOSS_PCT
         result["symbol"] = symbol
-        if not result.get("error"):
+        # KRITIK DUZELTME: bkz. _is_order_actually_filled dokumani.
+        if _is_order_actually_filled(result):
             avg_cost = safe_float(pos.get("avg_cost"))
             pnl_amount = (price - avg_cost) * sell_qty
             result["pnl"] = pnl_amount
@@ -11812,6 +11928,39 @@ def debug_force_tp_check():
     })
 
 
+@app.route("/debug/cleanup-fake-closures", methods=["GET", "POST"])
+def debug_cleanup_fake_closures():
+    """GECICI temizlik endpoint'i: _is_order_actually_filled duzeltmesinden
+    ONCE, IBKR TP/SL kapatma yolu emrin gercekten dolup dolmadigina
+    bakmadan (sadece 'error yok mu' diye) her kontrol turunde ayni
+    pozisyonu tekrar tekrar 'kapandi' diye kaydediyordu (bkz. USO: 68 adet
+    sahte TAKE_PROFIT kaydi, ayni entry_price=124.83, hicbir gercek satis
+    olmadan). GET ile onizleme (dry_run), POST ile gercek silme yapilir.
+    Islem bitince kaldirilacak."""
+    symbol = request.args.get("symbol", "")
+    if not symbol:
+        return jsonify({"error": "symbol query parametresi gerekli."}), 400
+    broker = request.args.get("broker") or None
+    close_reason = request.args.get("close_reason") or None
+    entry_price = request.args.get("entry_price")
+    entry_price = safe_float(entry_price) if entry_price else None
+    qty = request.args.get("qty")
+    qty = safe_float(qty) if qty else None
+    created_after = request.args.get("created_after") or None
+    created_before = request.args.get("created_before") or None
+    dry_run = request.method == "GET"
+    try:
+        result = db_delete_position_closures(
+            symbol=symbol, broker=broker, close_reason=close_reason,
+            entry_price=entry_price, qty=qty,
+            created_after=created_after, created_before=created_before,
+            dry_run=dry_run,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/profit-summary", methods=["GET"])
 def profit_summary_endpoint():
     """Mobil uygulamanin 'uygulamanin ilk gununden beri ne kadar kazandim'
@@ -13093,6 +13242,10 @@ def close_position():
         )
         if result.get("error"):
             return jsonify(result), 400
+        # KRITIK DUZELTME: bkz. _is_order_actually_filled dokumani - error
+        # olmasa da emir gercekten dolmamis olabilir (ornegin simulated).
+        if not _is_order_actually_filled(result):
+            return jsonify(result)
         db_record_position_closure(
             broker="BINANCE_FUTURES",
             symbol=symbol,
