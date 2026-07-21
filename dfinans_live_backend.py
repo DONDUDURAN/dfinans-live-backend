@@ -8072,10 +8072,16 @@ def _auto_trader_run_symbol(
                     # SADECE normal seans saatleri icindeyken, 1 tam hisseye yetecek kadar
                     # fon olmadiginda kesirli (ör. %20-%30 hisse) emir gonderilebilir.
                     ibkr_fractional_order = (asset_type in ("CRYPTO", "FOREX") and action == "SELL")
-                    ibkr_allow_fractional_here = (
-                        (exchange == "SMART" or asset_type in ("CRYPTO", "FOREX"))
-                        and not _is_outside_regular_trading_hours(exchange)
-                    )
+                    # GUNCELLEME (canli kanit): 'RTH icindeyken SMART hisselerde kesirli
+                    # emir calisir' teorisi YANLIS cikti - USO'da normal seans saatleri
+                    # icinde bile saatlerce tekrar tekrar Error 10243 (Fractional-sized
+                    # order cannot be placed via API) alindi, hicbir zaman gercek pozisyon
+                    # acilmadi (kullanicinin 'USO kapanmıyor sanki, günlükte kâr gözüküyor
+                    # ama portföyde yok' sikayeti buradan kaynaklaniyordu - aslinda hic
+                    # ACILMAMISTI). Bu hesap/API konfigurasyonu STK icin kesirli emri HICBIR
+                    # kosulda desteklemiyor; sadece CRYPTO/FOREX'te (IBKR PAXOS/IDEALPRO)
+                    # native kesirli destegi kanitlandigi icin onlar korunuyor.
+                    ibkr_allow_fractional_here = asset_type in ("CRYPTO", "FOREX")
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
                         # KRITIK DUZELTME: price, LSE hisselerinde (ULVR/SHEL/RIO/AZN/
@@ -8087,7 +8093,13 @@ def _auto_trader_run_symbol(
                         # (bkz. get_ibkr_price_usd_equivalent doc'u).
                         price_usd = get_ibkr_price_usd_equivalent(price, exchange, currency)
                         needed = qty * price_usd
-                        safe_budget = available_funds * 0.8
+                        # Kullanicinin talebi: NVDA gibi pahali hisselerde en az 1 TAM hisse
+                        # alinabilsin diye guvenli butce orani %80 -> %95'e cikarildi. STK
+                        # icin kesirli emir zaten API tarafindan reddediliyor (Error 10243),
+                        # bu yuzden hedef her zaman 1 tam hisse - dar %80 tamponu bircok
+                        # pahali hissede (NVDA/TSLA/AMZN) gereksiz yere 'yetersiz fon' ile
+                        # emri hic gondermeden atlamaya yol aciyordu.
+                        safe_budget = available_funds * 0.95
                         if available_funds > 0 and needed > safe_budget:
                             if ibkr_allow_fractional_here and safe_budget >= 1.0:
                                 fractional_qty = math.floor((safe_budget / price_usd) * 10000) / 10000.0
@@ -9808,8 +9820,10 @@ def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_pri
                 chain_qty = 1
             available_funds = get_ibkr_available_funds()
             needed = chain_qty * exit_price
-            if available_funds > 0 and needed > available_funds * 0.8:
-                chain_qty = math.floor((available_funds * 0.8) / exit_price)
+            # Ana STK butce oranina paralel: %80 -> %95 (bkz. yukarida ayni
+            # aciklama, NVDA gibi pahali hisselerde 1 tam hisse hedefi).
+            if available_funds > 0 and needed > available_funds * 0.95:
+                chain_qty = math.floor((available_funds * 0.95) / exit_price)
             if chain_qty < 1:
                 return None
             execution = ibkr_place_market_order(symbol, "BUY", chain_qty, asset_type, exchange, currency)
@@ -12207,8 +12221,18 @@ def ibkr_market_summary():
     asset_type = request.args.get("asset_type", "STK")
     exchange = request.args.get("exchange", "SMART")
     currency = request.args.get("currency", "USD")
+    # KRITIK DUZELTME: contract_month query parametresi hic okunmuyordu - bu
+    # yuzden FUT sembolleri (MES/MGC/MCL) bu endpoint'ten HER ZAMAN 'contract_month
+    # tanimli degil' hatasi aliyordu (manuel islem ekraninda bu varliklarin fiyati
+    # hic gorunmuyordu). Query'de verilmemisse, sembol havuzundaki (IBKR_SYMBOL_
+    # MARKET_INFO) kayitli contract_month'a otomatik dusulur.
+    contract_month = request.args.get("contract_month", "")
+    if not contract_month:
+        pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+        if pool_info:
+            contract_month = str(pool_info.get("contract_month", "") or "")
     try:
-        return jsonify(ibkr_market_snapshot(symbol, asset_type, exchange, currency))
+        return jsonify(ibkr_market_snapshot(symbol, asset_type, exchange, currency, contract_month=contract_month))
     except Exception as e:
         return jsonify({
             "broker": "IBKR",
@@ -12995,9 +13019,21 @@ def ibkr_manual_order():
     asset_type = str(body.get("asset_type", "STK"))
     exchange = str(body.get("exchange", "SMART"))
     currency = str(body.get("currency", "USD"))
+    # AYNI DUZELTME: contract_month gonderilmiyordu - FUT sembolleri (MES/MGC/
+    # MCL) manuel emirde de her zaman 'contract_month tanimli degil' hatasi
+    # aliyordu (kullanicinin 'istediğim varlıkta işlem yapamıyorum manuel'
+    # sikayeti). Body'de verilmemisse sembol havuzundan otomatik cekilir.
+    contract_month = str(body.get("contract_month", "") or "")
+    if not contract_month:
+        pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+        if pool_info:
+            contract_month = str(pool_info.get("contract_month", "") or "")
     try:
         request_id = str(uuid.uuid4())
-        return jsonify(ibkr_place_market_order(symbol, side, quantity, asset_type, exchange, currency, request_id=request_id))
+        return jsonify(ibkr_place_market_order(
+            symbol, side, quantity, asset_type, exchange, currency,
+            request_id=request_id, contract_month=contract_month,
+        ))
     except Exception as e:
         return jsonify({
             "broker": "IBKR",
@@ -13265,11 +13301,22 @@ def ibkr_order_alias():
     asset_type = str(body.get("assetType", body.get("asset_type", "STK")))
     exchange = str(body.get("exchange", "SMART"))
     currency = str(body.get("currency", "USD"))
+    # AYNI DUZELTME (bkz. /ibkr/manual-order): contract_month gonderilmiyordu,
+    # FUT sembolleri (MES/MGC/MCL) bu ana mobil-emir endpoint'inde de her
+    # zaman 'contract_month tanimli degil' hatasi aliyordu.
+    contract_month = str(body.get("contract_month", "") or body.get("contractMonth", "") or "")
+    if not contract_month:
+        pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+        if pool_info:
+            contract_month = str(pool_info.get("contract_month", "") or "")
     if quantity <= 0:
         return jsonify({"success": False, "message": "Miktar 0'dan büyük olmalı."}), 400
     try:
         request_id = str(body.get("request_id") or uuid.uuid4())
-        result = ibkr_place_market_order(symbol, side, quantity, asset_type, exchange, currency, request_id=request_id)
+        result = ibkr_place_market_order(
+            symbol, side, quantity, asset_type, exchange, currency,
+            request_id=request_id, contract_month=contract_month,
+        )
         return jsonify({
             "success": not bool(result.get("error")),
             "message": f"IBKR emri gönderildi. Durum: {result.get('status', '-')}, Ortalama fiyat: {result.get('avg_fill_price', 0)}",
