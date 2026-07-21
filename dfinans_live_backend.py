@@ -1721,80 +1721,6 @@ def db_all_position_closures(
     return [dict(r) for r in rows]
 
 
-def db_delete_position_closures(
-    symbol: str,
-    broker: Optional[str] = None,
-    close_reason: Optional[str] = None,
-    entry_price: Optional[float] = None,
-    entry_price_tolerance: float = 0.02,
-    qty: Optional[float] = None,
-    qty_tolerance: float = 0.001,
-    created_after: Optional[str] = None,
-    created_before: Optional[str] = None,
-    dry_run: bool = True,
-) -> Dict[str, Any]:
-    """GECICI temizlik yardimcisi: bir hatali kod yolunun (bkz.
-    _is_order_actually_filled) tekrar tekrar yanlislikla kaydettigi 'gercekte
-    hic dolmamis' position_closures satirlarini hedefli kriterlerle
-    silmek/onizlemek icin kullanilir. Kullanicinin bildirdigi 'USO hissesi
-    kapanmadi ama ai islem gunlugunde cok fazla kar gozukuyor' sorununu
-    kalici olarak temizlemek icin eklendi. dry_run=True iken sadece
-    eslesen satirlari sayar/onizler, silme yapmaz."""
-    where_clauses = ["UPPER(symbol) = ?"]
-    params: List[Any] = [symbol.upper()]
-    if broker:
-        where_clauses.append("UPPER(broker) = ?")
-        params.append(broker.upper())
-    if close_reason:
-        where_clauses.append("UPPER(close_reason) = ?")
-        params.append(close_reason.upper())
-    if entry_price is not None:
-        where_clauses.append("entry_price BETWEEN ? AND ?")
-        params.append(entry_price - entry_price_tolerance)
-        params.append(entry_price + entry_price_tolerance)
-    if qty is not None:
-        where_clauses.append("qty BETWEEN ? AND ?")
-        params.append(qty - qty_tolerance)
-        params.append(qty + qty_tolerance)
-    if created_after:
-        where_clauses.append("created_at >= ?")
-        params.append(created_after)
-    if created_before:
-        where_clauses.append("created_at <= ?")
-        params.append(created_before)
-    where_sql = " AND ".join(where_clauses)
-
-    with DB_LOCK:
-        conn = sqlite3.connect(RUNTIME_DB_PATH)
-        conn.row_factory = sqlite3.Row
-        try:
-            matched = conn.execute(
-                f"""
-                SELECT id, created_at, broker, symbol, side, qty, entry_price, exit_price,
-                       realized_pnl, realized_pnl_pct, close_reason
-                FROM position_closures
-                WHERE {where_sql}
-                ORDER BY created_at ASC
-                """,
-                params,
-            ).fetchall()
-            matched_rows = [dict(r) for r in matched]
-            deleted = 0
-            if not dry_run and matched_rows:
-                conn.execute(f"DELETE FROM position_closures WHERE {where_sql}", params)
-                conn.commit()
-                deleted = len(matched_rows)
-        finally:
-            conn.close()
-    return {
-        "matched_count": len(matched_rows),
-        "deleted_count": deleted,
-        "dry_run": dry_run,
-        "sample": matched_rows[:5],
-        "total_fake_pnl": round(sum(safe_float(r.get("realized_pnl")) for r in matched_rows), 2),
-    }
-
-
 def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Kapanmis pozisyon kayitlarindan (position_closures) win rate, profit
     factor, ortalama kazanc/kayip, en iyi/en kotu islem, kapanis nedeni
@@ -11926,39 +11852,6 @@ def debug_force_tp_check():
         "binance_scaled_take_profit_pct": BINANCE_SCALED_TAKE_PROFIT_PCT,
         "ok": True,
     })
-
-
-@app.route("/debug/cleanup-fake-closures", methods=["GET", "POST"])
-def debug_cleanup_fake_closures():
-    """GECICI temizlik endpoint'i: _is_order_actually_filled duzeltmesinden
-    ONCE, IBKR TP/SL kapatma yolu emrin gercekten dolup dolmadigina
-    bakmadan (sadece 'error yok mu' diye) her kontrol turunde ayni
-    pozisyonu tekrar tekrar 'kapandi' diye kaydediyordu (bkz. USO: 68 adet
-    sahte TAKE_PROFIT kaydi, ayni entry_price=124.83, hicbir gercek satis
-    olmadan). GET ile onizleme (dry_run), POST ile gercek silme yapilir.
-    Islem bitince kaldirilacak."""
-    symbol = request.args.get("symbol", "")
-    if not symbol:
-        return jsonify({"error": "symbol query parametresi gerekli."}), 400
-    broker = request.args.get("broker") or None
-    close_reason = request.args.get("close_reason") or None
-    entry_price = request.args.get("entry_price")
-    entry_price = safe_float(entry_price) if entry_price else None
-    qty = request.args.get("qty")
-    qty = safe_float(qty) if qty else None
-    created_after = request.args.get("created_after") or None
-    created_before = request.args.get("created_before") or None
-    dry_run = request.method == "GET"
-    try:
-        result = db_delete_position_closures(
-            symbol=symbol, broker=broker, close_reason=close_reason,
-            entry_price=entry_price, qty=qty,
-            created_after=created_after, created_before=created_before,
-            dry_run=dry_run,
-        )
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/profit-summary", methods=["GET"])
