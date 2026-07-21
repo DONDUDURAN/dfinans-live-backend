@@ -9706,7 +9706,7 @@ def estimate_spot_avg_cost_from_trades(symbol: str, target_qty: float) -> float:
 
 
 CHAIN_ORDER_ENABLED = os.getenv("CHAIN_ORDER_ENABLED", "true").lower() == "true"
-CHAIN_ORDER_MOVE_THRESHOLD_PCT = float(os.getenv("CHAIN_ORDER_MOVE_THRESHOLD_PCT", "5.0"))
+CHAIN_ORDER_MOVE_THRESHOLD_PCT = float(os.getenv("CHAIN_ORDER_MOVE_THRESHOLD_PCT", "3.0"))
 CHAIN_ORDER_SIZE_PCT = float(os.getenv("CHAIN_ORDER_SIZE_PCT", "0.5"))
 CHAIN_ORDER_RSI_OVERBOUGHT = float(os.getenv("CHAIN_ORDER_RSI_OVERBOUGHT", "65"))
 CHAIN_ORDER_RSI_OVERSOLD = float(os.getenv("CHAIN_ORDER_RSI_OVERSOLD", "35"))
@@ -11812,51 +11812,65 @@ def debug_force_tp_check():
     })
 
 
-@app.route("/debug/leverage-probe", methods=["GET"])
-def debug_leverage_probe():
-    """GECICI teşhis endpoint'i: Binance kaldirac ayarlamasinin neden hep 1x'te
-    kaldigini bulmak icin VPS proxy'sindeki olasi rota isimlerini dogru token ile
-    dener ve her birinin sonucunu/hatasini raporlar. Gercek emir gondermez,
-    sadece POST /fapi/v1/leverage benzeri bir ayar cagrisi yapar (Binance'te
-    zarasiz, sadece kaldirac degistirir). Islem bitince bu endpoint kaldirilacak."""
-    symbol = request.args.get("symbol", "ETHUSDT").upper()
-    candidates = [
-        "/binance/private/leverage",
-        "/binance/private/set-leverage",
-        "/binance/private/change-leverage",
-        "/binance/leverage",
-        "/leverage",
-        "/binance/private/futures/leverage",
-        "/binance/private/futures-leverage",
-    ]
-    results = {}
-    for path in candidates:
-        try:
-            data = _binance_proxy_request(
-                "POST", path,
-                json_body={"symbol": symbol, "leverage": 2},
-                base_url=BINANCE_ORDER_PROXY_BASE_URL,
-            )
-            results[path] = {"ok": True, "data": data}
-        except Exception as e:
-            results[path] = {"ok": False, "error": str(e)}
+@app.route("/debug/hk-contract-probe", methods=["GET"])
+def debug_hk_contract_probe():
+    """GECICI teşhis endpoint'i: HK hisselerinin (700/9988/5/1299/3690) neden
+    canli/tarihsel fiyat alamadigini bulmak icin reqContractDetails ve
+    reqHistoricalData'yi hem SMART+primaryExchange hem de DOGRUDAN SEHK
+    exchange ile deneyip sonuclarini raporlar. Islem bitince kaldirilacak."""
+    symbol = request.args.get("symbol", "9988")
+    market_info = get_ibkr_symbol_market_info(symbol)
+    currency = market_info.get("currency", "HKD")
+    out: Dict[str, Any] = {"symbol": symbol, "currency": currency}
 
-    direct_error = None
+    def _run(ib, ibs):
+        result: Dict[str, Any] = {}
+        for label, exch in (("smart_primary_sehk", "SMART"), ("direct_sehk", "SEHK")):
+            try:
+                if exch == "SMART":
+                    c = ibs.Stock(symbol, "SMART", currency, primaryExchange="SEHK")
+                else:
+                    c = ibs.Stock(symbol, "SEHK", currency)
+                details = ib.reqContractDetails(c)
+                if not details:
+                    result[label] = {"contract_details_count": 0, "error": "reqContractDetails bos liste dondurdu."}
+                    continue
+                qualified_contract = details[0].contract
+                entry: Dict[str, Any] = {
+                    "contract_details_count": len(details),
+                    "conId": qualified_contract.conId,
+                    "primaryExchange": getattr(qualified_contract, "primaryExchange", ""),
+                    "exchange": getattr(qualified_contract, "exchange", ""),
+                    "tradingHours": getattr(details[0], "tradingHours", "")[:100],
+                    "timeZoneId": getattr(details[0], "timeZoneId", ""),
+                }
+                try:
+                    ticker = ib.reqMktData(qualified_contract, "", True, False)
+                    ib.sleep(2.5)
+                    entry["ticker"] = {
+                        "last": ticker.last, "close": ticker.close, "marketPrice": ticker.marketPrice() if hasattr(ticker, "marketPrice") else None,
+                        "bid": ticker.bid, "ask": ticker.ask,
+                    }
+                except Exception as te:
+                    entry["ticker_error"] = str(te)
+                try:
+                    bars = ib.reqHistoricalData(qualified_contract, endDateTime="", durationStr="5 D", barSizeSetting="1 day", whatToShow="TRADES", useRTH=True)
+                    entry["historical_bars_count"] = len(bars)
+                    if bars:
+                        entry["last_bar_close"] = bars[-1].close
+                except Exception as he:
+                    entry["historical_error"] = str(he)
+                result[label] = entry
+            except Exception as e:
+                result[label] = {"error": str(e)}
+        return result
+
     try:
-        signed_request("POST", FUTURES_BASE, "/fapi/v1/leverage", {"symbol": symbol, "leverage": 2})
-        direct_ok = True
+        out["result"] = ibkr_execute(_run, timeout=40.0)
     except Exception as e:
-        direct_ok = False
-        direct_error = str(e)
-
-    return jsonify({
-        "ok": True,
-        "symbol": symbol,
-        "proxy_base_url": BINANCE_ORDER_PROXY_BASE_URL,
-        "proxy_candidates": results,
-        "direct_signed_request": {"ok": direct_ok, "error": direct_error},
-        "time": now_text(),
-    })
+        out["error"] = str(e)
+    out["time"] = now_text()
+    return jsonify(out)
 
 
 @app.route("/profit-summary", methods=["GET"])
