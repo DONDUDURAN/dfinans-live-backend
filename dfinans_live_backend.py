@@ -11445,6 +11445,13 @@ def place_futures_order(
                 )
                 raise RuntimeError(f"Proxy order başarısız: {e1} | legacy: {e2}") from e2
 
+    # Dogrudan (proxy'siz) yol - bu kod bu VPS ornegi (whitelist'li IP) uzerinde
+    # calisirken gecerlidir. Kaldirac daha once burada HIC set edilmiyordu -
+    # emir dogrudan Binance'e gonderiliyor ama hesabin varsayilan (1x)
+    # kaldiraciyla aciliyordu. Emirden ONCE kaldiraci gercekten uygula.
+    if leverage and leverage > 1 and not reduce_only:
+        ensure_binance_leverage(symbol, max(1, min(int(leverage), 3)))
+
     params = {
         "symbol": symbol,
         "side": side.upper(),
@@ -12045,14 +12052,49 @@ def binance_private_futures_positions():
         return jsonify({"ok": False, "positions": [{"id": "error", "broker": "Binance", "market": "Futures", "symbol": "HATA", "side": "-", "size": 0, "entry_price": 0, "mark_price": 0, "pnl": 0, "pnl_pct": 0, "error": str(e)}], "error": str(e), "last_update": now_text()}), 500
 
 
+@app.route("/binance/private/leverage", methods=["POST"])
+def binance_private_leverage():
+    # KOK NEDEN DUZELTMESI (kullanicinin 'hala 1x pozisyon açıyor' sikayeti):
+    # ensure_binance_leverage() bu path'e HEP istek atiyordu ama bu route hic
+    # tanimli degildi (404) - Railway'in kendisi Binance'e dogrudan istek
+    # atamiyor (IP whitelist'te degil, Error -2015), sadece bu VPS proxy
+    # ornegi (whitelist'li IP) atabiliyor. Route eksik oldugu icin kaldirac
+    # HICBIR ZAMAN gercekten Binance'e iletilmiyordu, tum pozisyonlar hesabin
+    # varsayilan (1x) kaldiraciyla aciliyordu. Bu route artik VPS'teki bu
+    # ornekte calisip signed_request ile /fapi/v1/leverage'i dogrudan cagirir.
+    if BINANCE_PROXY_TOKEN and request.headers.get("X-Binance-Proxy-Token", "") != BINANCE_PROXY_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    body = request.get_json(force=True) or {}
+    symbol = str(body.get("symbol", "")).upper().replace("/", "")
+    # Kullanicinin talebi: kaldirac en fazla 3x'e kadar acilabilsin (signal_leverage
+    # zaten guven skoruna gore 2x/3x uretiyor, burada sadece ust sinir korunuyor).
+    leverage = max(1, min(int(safe_float(body.get("leverage"), 1)), 3))
+    if not symbol or leverage <= 1:
+        return jsonify({"ok": True, "skipped": True, "symbol": symbol, "leverage": leverage, "last_update": now_text()})
+    try:
+        result = signed_request("POST", FUTURES_BASE, "/fapi/v1/leverage", {"symbol": symbol, "leverage": leverage})
+        return jsonify({"ok": True, "result": result, "symbol": symbol, "leverage": leverage, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "symbol": symbol, "leverage": leverage, "last_update": now_text()}), 500
+
+
 @app.route("/binance/private/order", methods=["POST"])
 def binance_private_order():
     if BINANCE_PROXY_TOKEN and request.headers.get("X-Binance-Proxy-Token", "") != BINANCE_PROXY_TOKEN:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
     body = request.get_json(force=True) or {}
+    # Kullanicinin talebi: emir payload'inda 'leverage' varsa (bkz.
+    # place_futures_order proxy-gonderim yolu), emri gondermeden ONCE bu VPS
+    # ornegi (whitelist'li IP) kaldiraci gercekten Binance'e uygulasin -
+    # /binance/private/leverage route'u eklenmeden once bu alan sessizce
+    # yok sayiliyordu.
+    req_leverage = int(safe_float(body.get("leverage"), 0) or 0)
+    req_symbol = str(body.get("symbol", "ETHUSDT")).upper().replace("/", "")
+    if req_leverage > 1:
+        ensure_binance_leverage(req_symbol, max(1, min(req_leverage, 3)))
     try:
         result = place_futures_order(
-            str(body.get("symbol", "ETHUSDT")).upper().replace("/", ""),
+            req_symbol,
             str(body.get("side", "BUY")).upper(),
             safe_float(body.get("quantity"), 0),
             reduce_only=safe_bool(body.get("reduce_only", False)),
