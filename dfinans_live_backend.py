@@ -1721,73 +1721,6 @@ def db_all_position_closures(
     return [dict(r) for r in rows]
 
 
-def db_fix_lse_gbp_unit_bug_closures(dry_run: bool = True) -> Dict[str, Any]:
-    """GECICI duzeltme yardimcisi: ibkr_positions_snapshot'taki avgCost/GBX
-    birim uyumsuzlugu bugu (bkz. is_lse_gbp normalizasyonu) yuzunden LSE
-    (SHEL/ULVR/HSBA/RIO/AZN) hisselerinde entry_price 100 kat KUCUK kaydedilmis
-    ve bu da sacma (~9000%) sahte KAR olarak gorunmustu - gercekte kucuk
-    ZARARLAR (yaklasik -4 USD, %2 kar hedefi yerine %4 zarar-kesin altinda).
-    Bu fonksiyon etkilenen kayitlari SILMEZ (gercek IBKR emirleri gercekten
-    doldu) - entry_price'i x100 duzelterek DOGRU realized_pnl/pct ve
-    close_reason (STOP_LOSS) ile GUNCELLER. dry_run=True iken sadece
-    onizler."""
-    with DB_LOCK:
-        conn = sqlite3.connect(RUNTIME_DB_PATH)
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                """
-                SELECT * FROM position_closures
-                WHERE broker = 'IBKR' AND UPPER(symbol) IN ('SHEL','ULVR','HSBA','RIO','AZN')
-                  AND realized_pnl_pct > 500
-                ORDER BY created_at ASC
-                """
-            ).fetchall()
-            preview = []
-            for r in rows:
-                row = dict(r)
-                qty = safe_float(row["qty"])
-                new_entry_price = safe_float(row["entry_price"]) * 100.0
-                exit_price = safe_float(row["exit_price"])
-                new_pnl = (exit_price - new_entry_price) * qty if row["side"] == "LONG" else (new_entry_price - exit_price) * qty
-                new_pnl_pct = (new_pnl / (new_entry_price * qty)) * 100.0 if new_entry_price > 0 and qty > 0 else 0.0
-                new_close_reason = "STOP_LOSS" if new_pnl < 0 else "TAKE_PROFIT"
-                new_detail = (
-                    f"[Duzeltildi] IBKR LSE/GBP avgCost birim bugu nedeniyle entry_price x100 "
-                    f"duzeltildi. Onceki (yanlis): entry={row['entry_price']:.4f}, "
-                    f"pnl={row['realized_pnl']:.2f} ({row['realized_pnl_pct']:.1f}%)."
-                )
-                preview.append({
-                    "id": row["id"], "created_at": row["created_at"], "symbol": row["symbol"],
-                    "old_entry_price": row["entry_price"], "new_entry_price": round(new_entry_price, 4),
-                    "old_realized_pnl": row["realized_pnl"], "new_realized_pnl": round(new_pnl, 2),
-                    "old_realized_pnl_pct": round(row["realized_pnl_pct"], 1), "new_realized_pnl_pct": round(new_pnl_pct, 2),
-                    "old_close_reason": row["close_reason"], "new_close_reason": new_close_reason,
-                })
-                if not dry_run:
-                    conn.execute(
-                        """
-                        UPDATE position_closures
-                        SET entry_price = ?, realized_pnl = ?, realized_pnl_pct = ?,
-                            close_reason = ?, detail = ?
-                        WHERE id = ?
-                        """,
-                        (new_entry_price, round(new_pnl, 4), new_pnl_pct, new_close_reason, new_detail, row["id"]),
-                    )
-            if not dry_run and preview:
-                conn.commit()
-        finally:
-            conn.close()
-    return {
-        "dry_run": dry_run,
-        "matched_count": len(preview),
-        "updated_count": 0 if dry_run else len(preview),
-        "rows": preview,
-        "total_old_fake_pnl": round(sum(safe_float(p["old_realized_pnl"]) for p in preview), 2),
-        "total_new_real_pnl": round(sum(safe_float(p["new_realized_pnl"]) for p in preview), 2),
-    }
-
-
 def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Kapanmis pozisyon kayitlarindan (position_closures) win rate, profit
     factor, ortalama kazanc/kayip, en iyi/en kotu islem, kapanis nedeni
@@ -11974,20 +11907,6 @@ def debug_force_tp_check():
         "binance_scaled_take_profit_pct": BINANCE_SCALED_TAKE_PROFIT_PCT,
         "ok": True,
     })
-
-
-@app.route("/debug/fix-lse-gbp-unit-bug", methods=["GET", "POST"])
-def debug_fix_lse_gbp_unit_bug():
-    """GECICI duzeltme endpoint'i: ibkr_positions_snapshot'taki LSE/GBP
-    avgCost birim bugu yuzunden yanlislikla ~9000% sahte kar kaydedilmis
-    SHEL/ULVR/HSBA/RIO/AZN kapanislarini gercek (kucuk zarar) degerleriyle
-    duzeltir. GET ile onizleme, POST ile gercek guncelleme. Islem bitince
-    kaldirilacak."""
-    try:
-        result = db_fix_lse_gbp_unit_bug_closures(dry_run=request.method == "GET")
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/profit-summary", methods=["GET"])
