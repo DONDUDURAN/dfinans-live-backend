@@ -613,6 +613,21 @@ IBKR_CONFIRMATION_WINDOW_HOURS = float(os.getenv("IBKR_CONFIRMATION_WINDOW_HOURS
 IBKR_MIN_CONFIRMATIONS_CRYPTO_WEEKEND = int(
     os.getenv("IBKR_MIN_CONFIRMATIONS_CRYPTO_WEEKEND", "3")
 )
+# Kullanicinin talebi: gecmis islemleri analiz edip AYNI HATALARI TEKRARLAMAYACAK
+# onlemler al. Analiz: 21 Temmuz'da BTCUSDT (-11.34$) ve ETHUSDT (-3.63$) AYNI
+# GUN art arda zararla kapandi ('dipte short actin' - bir yerel dip/donuste
+# yanlis yonde islem acildi). Kok neden: Binance (BINANCE_SPOT/BINANCE_FUTURES)
+# icin sadece 2 (buyuk olcude birbiriyle KORELE) sinyalden (24s momentum +
+# emir defteri baskisi - ikincisi cogu zaman ilkinden sentetik turetiliyor)
+# olusan zayif bir teyit sistemi vardi; IBKR'nin sahip oldugu RSI/SMA teknik
+# trend + coklu-zaman-dilimi teyidi gibi bagimsiz dogrulamalar Binance
+# tarafinda HIC kullanilmiyordu. Simdi ayni bagimsiz sinyal havuzu (teknik,
+# MTF, piyasa dongusu, hacim, dis sinyaller, erken donus) Binance icin de
+# hesaplanip asagida (emirden hemen once) IBKR'dekiyle AYNI birikimli/kayan-
+# pencere teyit mekanizmasi (bkz. _log_ibkr_confirmation_event /
+# _get_ibkr_confirmation_net_score - broker'a ozel degil, sembol+yon bazli
+# calisir) uzerinden bir GATE olarak uygulanir.
+BINANCE_MIN_CONFIRMATIONS = int(os.getenv("BINANCE_MIN_CONFIRMATIONS", "4"))
 
 # ATR (Average True Range) bazli volatilite-adaptif pozisyon boyutlandirma esikleri
 # (kullanicinin talebi: 'ATR ekle'). atr_pct = ATR(14) / son kapanis * 100.
@@ -7740,7 +7755,7 @@ def _auto_trader_run_symbol(
     signal_technical_dir = "WAIT"
     signal_mtf_dir = "WAIT"
     signal_volume_dir = "WAIT"
-    if broker == "IBKR":
+    if broker in ("IBKR", "BINANCE_SPOT", "BINANCE_FUTURES"):
         try:
             tech_snap = get_technical_indicator_snapshot(symbol, market, broker)
             rsi_val = tech_snap.get("rsi_14")
@@ -8095,6 +8110,28 @@ def _auto_trader_run_symbol(
                         else:
                             spot_skip_reason = "Spot USDT bakiyesi alınamadı, alım yapılmadı."
                             qty = 0
+                if not spot_skip_reason and qty > 0 and action in ("BUY", "SELL"):
+                    # Kullanicinin talebi: Binance'ta da IBKR'deki gibi coklu-
+                    # sinyal birikimli teyit gate'i uygulanir (bkz. yukaridaki
+                    # BINANCE_MIN_CONFIRMATIONS tanimindaki analiz notu).
+                    binance_agree_count = sum(
+                        1 for d in (
+                            signal_momentum_dir, signal_order_flow_dir, signal_corr_dir,
+                            signal_technical_dir, signal_mtf_dir, signal_market_cycle_dir,
+                            signal_external_dir, signal_volume_dir, signal_early_reversal_dir,
+                        ) if d == action
+                    )
+                    _log_ibkr_confirmation_event(symbol, action, max(binance_agree_count, 1))
+                    cum_confirm = _get_ibkr_confirmation_net_score(symbol, action)
+                    if cum_confirm["net"] < BINANCE_MIN_CONFIRMATIONS:
+                        spot_skip_reason = (
+                            f"Binance emri atlandı: son {IBKR_CONFIRMATION_WINDOW_HOURS:.0f} saatte net "
+                            f"{cum_confirm['net']}/{BINANCE_MIN_CONFIRMATIONS} {action} teyidi birikti "
+                            f"(bu taramada {binance_agree_count}/9 anlık sinyal hizalı; BUY toplam "
+                            f"{cum_confirm['buy_weight']}, SELL toplam {cum_confirm['sell_weight']}), "
+                            f"henüz yeterli değil."
+                        )
+                        qty = 0
                 if spot_skip_reason:
                     execution = {
                         "simulated": True,
@@ -8641,6 +8678,30 @@ def _auto_trader_run_symbol(
                         reason = (
                             reason
                             + f" (İşlem atlandı: kullanılabilir bakiye {available_usdt:.2f} USDT, taban pozisyon tutarı {min_pos_usd:.0f}$ için x{leverage} kaldıraçla bile gereken ~{required_margin:.2f} USDT teminatın altında kaldı.)"
+                        ).strip()
+                        qty = 0
+                if qty > 0 and action in ("BUY", "SELL"):
+                    # Kullanicinin talebi: Binance Futures'ta da IBKR'deki gibi
+                    # coklu-sinyal birikimli teyit gate'i uygulanir (bkz.
+                    # yukaridaki BINANCE_MIN_CONFIRMATIONS tanimindaki analiz
+                    # notu - 21 Temmuz BTCUSDT/ETHUSDT art arda zarar olayi).
+                    binance_agree_count = sum(
+                        1 for d in (
+                            signal_momentum_dir, signal_order_flow_dir, signal_corr_dir,
+                            signal_technical_dir, signal_mtf_dir, signal_market_cycle_dir,
+                            signal_external_dir, signal_volume_dir, signal_early_reversal_dir,
+                        ) if d == action
+                    )
+                    _log_ibkr_confirmation_event(symbol, action, max(binance_agree_count, 1))
+                    cum_confirm = _get_ibkr_confirmation_net_score(symbol, action)
+                    if cum_confirm["net"] < BINANCE_MIN_CONFIRMATIONS:
+                        reason = (
+                            reason
+                            + f" (Binance emri atlandı: son {IBKR_CONFIRMATION_WINDOW_HOURS:.0f} saatte net "
+                            f"{cum_confirm['net']}/{BINANCE_MIN_CONFIRMATIONS} {action} teyidi birikti "
+                            f"(bu taramada {binance_agree_count}/9 anlık sinyal hizalı; BUY toplam "
+                            f"{cum_confirm['buy_weight']}, SELL toplam {cum_confirm['sell_weight']}), "
+                            f"henüz yeterli değil.)"
                         ).strip()
                         qty = 0
                 # AI'nin bu SELL/BUY karari mevcut acik bir futures pozisyonunu
