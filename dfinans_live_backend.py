@@ -363,14 +363,32 @@ def to_yfinance_symbol(symbol: str) -> str:
     degismeden kalir; Ingiltere (LSE) hisselerine '.L', Hong Kong (SEHK)
     hisselerine ise 4 haneli sifir-doldurma + '.HK' eklenir (ör. '700' ->
     '0700.HK', 'SHEL' -> 'SHEL.L'). Bu olmadan yfinance.info cagrisi bu
-    uluslararasi hisseler icin veri donmuyor/hata veriyordu."""
+    uluslararasi hisseler icin veri donmuyor/hata veriyordu.
+    DUZELTME: FOREX (EURUSD/GBPUSD/AUDUSD/NZDUSD) ve CRYPTO (BTCUSD/ETHUSD)
+    ile Avrupa (SAP/SIE/BMW -> Xetra, MC/OR -> Euronext Paris) hisseleri
+    daha once yanlis (donusturulmemis) sembolle yfinance'e gonderiliyordu,
+    bu da her cagrida sessizce 404 ('Quote not found') hatasina yol aciyor,
+    gereksiz yere ag/IBKR worker thread suresini tuketiyordu. Yahoo Finance
+    formatlari: forex 'EURUSD=X', kripto 'BTC-USD', Almanya '.DE', Fransa '.PA'."""
     sym = str(symbol or "").upper().strip()
     info = get_ibkr_symbol_market_info(sym)
     region = info.get("region", "US")
+    exchange = str(info.get("exchange", "")).upper()
     if region == "UK":
         return f"{sym}.L"
     if region == "ASIA":
         return f"{sym.zfill(4)}.HK"
+    if region == "FOREX":
+        return f"{sym}=X"
+    if region == "CRYPTO":
+        if sym.endswith("USD") and len(sym) > 3:
+            return f"{sym[:-3]}-USD"
+        return sym
+    if region == "EU":
+        if exchange == "IBIS":
+            return f"{sym}.DE"
+        if exchange == "SBF":
+            return f"{sym}.PA"
     return sym
 
 
@@ -2960,6 +2978,15 @@ def build_ibkr_contract(ibs, symbol: str, asset_type: str, exchange: str, curren
 
 _IBKR_SNAPSHOT_CACHE: Dict[str, Any] = {}
 _IBKR_SNAPSHOT_CACHE_TTL_SEC = 2.0
+# Kullanicinin bildirdigi 'IBKR şu anda meşgul' sikayetinin bir kaynagi: bazi
+# semboller (ör. SAVA - IBKR hesabinda kontrat cozumlenemiyor, 'No security
+# definition has been found') HER shadow-watchlist dongusunde (60sn'de bir)
+# basarisiz contract qualification denemesiyle tek IBKR worker thread'ini/
+# kuyrugunu gereksiz yere mesgul ediyordu. Basarisiz sonuclar da (kisa bir
+# sure) negatif-cache'lenir, boylece ayni bozuk sembol art arda her dongude
+# tekrar denenmez.
+_IBKR_SNAPSHOT_FAIL_CACHE: Dict[str, Any] = {}
+_IBKR_SNAPSHOT_FAIL_CACHE_TTL_SEC = 300.0
 
 # --- Toplu (batched) fiyat sorgulama ---
 # Mobil uygulama ayni anda (Piyasalar ekrani, Islem merkezi, Ekonomi Radari vb.)
@@ -3147,6 +3174,13 @@ def _process_ibkr_price_batch(batch_items: List[Dict[str, Any]]) -> None:
                 tickers[key] = ib.reqMktData(qualified[0], "", True, False)
             except Exception as e:
                 item["error"] = str(e)
+                # Kontrat cozumlemesi (qualifyContracts) basarisiz oldugunda -
+                # ornegin sembol IBKR hesabinda hic taninmiyorsa (SAVA gibi) -
+                # bu KALICI bir durumdur, bir sonraki denemede de degismez.
+                # Negatif-cache'e yazip her 60sn'lik shadow-watchlist dongusunde
+                # ayni basarisiz sorguyu tekrarlamayi (ve worker thread'i
+                # gereksiz mesgul etmeyi) onle.
+                _IBKR_SNAPSHOT_FAIL_CACHE[key] = (time.time(), item["error"])
         if tickers:
             # Onceden 1.2sn bekleniyordu; ozellikle o oturumda ilk kez
             # sorgulanan (sogutulmus) semboller icin ya da piyasa kapaliyken
@@ -3213,6 +3247,9 @@ def ibkr_market_snapshot(symbol: str, asset_type: str, exchange: str, currency: 
     cached = _IBKR_SNAPSHOT_CACHE.get(cache_key)
     if cached and (time.time() - cached[0]) < _IBKR_SNAPSHOT_CACHE_TTL_SEC:
         return cached[1]
+    failed = _IBKR_SNAPSHOT_FAIL_CACHE.get(cache_key)
+    if failed and (time.time() - failed[0]) < _IBKR_SNAPSHOT_FAIL_CACHE_TTL_SEC:
+        raise RuntimeError(failed[1])
 
     item = {
         "cache_key": cache_key,
