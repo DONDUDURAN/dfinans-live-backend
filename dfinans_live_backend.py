@@ -3712,9 +3712,23 @@ def ibkr_place_market_order(
     request_id: Optional[str] = None,
     allow_fractional: bool = False,
     contract_month: str = "",
+    cash_qty: Optional[float] = None,
 ) -> Dict[str, Any]:
     def _run(ib, ibs):
-        if quantity <= 0:
+        # KULLANICININ TALEBI: NVDA gibi pahali hisselerde 1 tam hisseye
+        # yetecek fon olmadiginda (ör. bugun NVDA %3 yukselirken kacirildi -
+        # "Yetersiz alim gucu" hatasi), IBKR API'sinin GERCEK "Notional Value/
+        # Cash Quantity" emir mekanizmasi kullanilir: totalQuantity=0,
+        # cashQty=<dolar tutari> gonderilir. Bu, daha once denenip Error 10243
+        # ile reddedilen MIKTAR-bazli (totalQuantity kesirli) kesirli emirden
+        # TAMAMEN FARKLI bir IBKR ozelligidir - IBKR'in kendi dokumantasyonuna
+        # gore ABD'de fractional trading'e uygun NMS hisselerinde (cogu buyuk
+        # ABD hissesi dahil) API uzerinden desteklenir, sadece normal seans
+        # (RTH) icinde ve MKT/LMT emir tipinde calisir.
+        if cash_qty is not None and cash_qty > 0:
+            if quantity != 0:
+                raise RuntimeError("cash_qty kullanılırken quantity 0 olmalı.")
+        elif quantity <= 0:
             raise RuntimeError("Miktar 0'dan büyük olmalı.")
         order_side = str(side or "").upper()
         if order_side not in ["BUY", "SELL"]:
@@ -3727,17 +3741,25 @@ def ibkr_place_market_order(
         qualified = ib.qualifyContracts(contract)
         if not qualified:
             raise RuntimeError("IBKR contract doğrulanamadı.")
-        order = ibs.MarketOrder(order_side, quantity)
-        order.tif = "DAY"
-        # IBKR kesirli hisse (fractional share) emirleri SADECE normal seans
-        # saatlerinde (RTH) kabul edilir - outsideRth=True ile birlikte
-        # gonderilirse "Error 10243: Fractional-sized order cannot be placed
-        # via API" hatasi alinir. Bu yuzden kesirli miktar gonderiliyorsa
-        # (allow_fractional=True, sadece ABD/SMART hisseleri icin kullanilir)
-        # outsideRth KAPATILIR; tam sayi miktarlarda eski davranis (mesai-disi
-        # da islem yapabilme) korunur.
-        is_fractional_qty = abs(quantity - round(quantity)) > 1e-9
-        order.outsideRth = not (allow_fractional and is_fractional_qty)
+        if cash_qty is not None and cash_qty > 0:
+            order = ibs.MarketOrder(order_side, 0)
+            order.cashQty = round(cash_qty, 2)
+            order.tif = "DAY"
+            # Cash-quantity (notional) emirleri IBKR tarafindan SADECE normal
+            # seans saatlerinde kabul edilir.
+            order.outsideRth = False
+        else:
+            order = ibs.MarketOrder(order_side, quantity)
+            order.tif = "DAY"
+            # IBKR kesirli hisse (fractional share) emirleri SADECE normal seans
+            # saatlerinde (RTH) kabul edilir - outsideRth=True ile birlikte
+            # gonderilirse "Error 10243: Fractional-sized order cannot be placed
+            # via API" hatasi alinir. Bu yuzden kesirli miktar gonderiliyorsa
+            # (allow_fractional=True, sadece ABD/SMART hisseleri icin kullanilir)
+            # outsideRth KAPATILIR; tam sayi miktarlarda eski davranis (mesai-disi
+            # da islem yapabilme) korunur.
+            is_fractional_qty = abs(quantity - round(quantity)) > 1e-9
+            order.outsideRth = not (allow_fractional and is_fractional_qty)
         if IBKR_ACCOUNT:
             order.account = IBKR_ACCOUNT
         trade = ib.placeOrder(qualified[0], order)
@@ -3762,7 +3784,8 @@ def ibkr_place_market_order(
             "symbol": normalize_symbol(symbol),
             "asset_type": str(asset_type or "STK").upper(),
             "side": order_side,
-            "quantity": quantity,
+            "quantity": safe_float(getattr(trade.orderStatus, "filled", 0)) if (cash_qty is not None and cash_qty > 0) else quantity,
+            "cash_qty": round(cash_qty, 2) if (cash_qty is not None and cash_qty > 0) else None,
             "order_id": getattr(trade.order, "orderId", 0),
             "status": getattr(trade.orderStatus, "status", ""),
             "filled": safe_float(getattr(trade.orderStatus, "filled", 0)),
@@ -3777,7 +3800,7 @@ def ibkr_place_market_order(
             channel="manual",
             symbol=normalize_symbol(symbol),
             side=order_side,
-            quantity=quantity,
+            quantity=result["quantity"],
             status=str(result.get("status") or "SENT"),
             simulated=False,
             payload=result,
@@ -7588,7 +7611,7 @@ def _auto_trader_run_symbol(
             action = "WAIT"
             confidence = 50
             reason = (
-                f"IBKR sinyalleri çelişiyor: momentum {momentum_signal} (24s değişim %{change:.2f}), "
+                f"IBKR sinyalleri çelişiyor: momentum {momentum_signal} (piyasa 24s değişimi %{change:.2f}, pozisyon kârıyla KARIŞTIRILMAMALI), "
                 f"emir akışı {order_flow} -> işlem açılmadı."
             )
         else:
@@ -8140,6 +8163,14 @@ def _auto_trader_run_symbol(
                     # kosulda desteklemiyor; sadece CRYPTO/FOREX'te (IBKR PAXOS/IDEALPRO)
                     # native kesirli destegi kanitlandigi icin onlar korunuyor.
                     ibkr_allow_fractional_here = asset_type in ("CRYPTO", "FOREX")
+                    # KULLANICININ TALEBI (bugun NVDA %3 yukselirken kacirildi -
+                    # 'yetersiz alim gucu' hatasi): STK'de 1 tam hisseye yetecek
+                    # fon olmadiginda, miktar-bazli kesirli emir yerine (Error
+                    # 10243 ile reddediliyor) IBKR'in GERCEK Cash Quantity
+                    # (notional) emir mekanizmasi denenir - bkz. ibkr_place_market_order
+                    # cash_qty parametresi. Bu None kalirsa eski davranis (asagida
+                    # error ile atlama) korunur.
+                    ibkr_cash_qty_amount: Optional[float] = None
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
                         # KRITIK DUZELTME: price, LSE hisselerinde (ULVR/SHEL/RIO/AZN/
@@ -8171,19 +8202,32 @@ def _auto_trader_run_symbol(
                             else:
                                 affordable_qty = math.floor(safe_budget / price_usd)
                                 if affordable_qty < 1:
-                                    execution = {
-                                        "simulated": False,
-                                        "broker": "IBKR",
-                                        "symbol": symbol,
-                                        "side": action,
-                                        "quantity": 0,
-                                        "error": (
-                                            f"Yetersiz alım gücü: kullanılabilir fon {available_funds:.2f} USD, "
-                                            f"1 hisse dahi karşılamıyor. Emir gönderilmedi."
-                                        ),
-                                        "time": now_text(),
-                                    }
-                                    qty = 0
+                                    if asset_type == "STK" and currency.upper() == "USD" and safe_budget >= 1.0:
+                                        # NVDA/TSLA gibi pahali hisselerde 1 tam
+                                        # hisseye fon yetmiyor - miktar-bazli kesirli
+                                        # yerine IBKR Cash Quantity (notional) emri
+                                        # denenir (bkz. ibkr_place_market_order).
+                                        ibkr_cash_qty_amount = round(safe_budget, 2)
+                                        reason = (
+                                            reason
+                                            + f" (1 tam hisseye fon yetmiyor - {ibkr_cash_qty_amount:.2f} USD "
+                                            f"tutarında kesirli (cash quantity) emir denenecek.)"
+                                        ).strip()
+                                        qty = 0
+                                    else:
+                                        execution = {
+                                            "simulated": False,
+                                            "broker": "IBKR",
+                                            "symbol": symbol,
+                                            "side": action,
+                                            "quantity": 0,
+                                            "error": (
+                                                f"Yetersiz alım gücü: kullanılabilir fon {available_funds:.2f} USD, "
+                                                f"1 hisse dahi karşılamıyor. Emir gönderilmedi."
+                                            ),
+                                            "time": now_text(),
+                                        }
+                                        qty = 0
                                 else:
                                     reason = (
                                         reason
@@ -8220,15 +8264,27 @@ def _auto_trader_run_symbol(
                                                 "time": now_text(),
                                             }
                                     else:
-                                        execution = {
-                                            "simulated": False,
-                                            "broker": "IBKR",
-                                            "symbol": symbol,
-                                            "side": action,
-                                            "quantity": 0,
-                                            "error": "IBKR API kesirli hisse emrini desteklemiyor, miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
-                                            "time": now_text(),
-                                        }
+                                        if asset_type == "STK" and currency.upper() == "USD" and (base_qty if base_qty > 0 else qty) * price_usd >= 1.0:
+                                            # Ayni Cash Quantity mekanizmasi burada da
+                                            # denenir: hedeflenen pozisyon zaten 1
+                                            # hisseden kucuk (ör. AI 0.3 hisselik tutar
+                                            # hesaplamis) - hatayla iptal etmek yerine
+                                            # notional tutarla emir denenir.
+                                            ibkr_cash_qty_amount = round((base_qty if base_qty > 0 else qty) * price_usd, 2)
+                                            reason = (
+                                                reason
+                                                + f" ({ibkr_cash_qty_amount:.2f} USD tutarında kesirli (cash quantity) emir denenecek.)"
+                                            ).strip()
+                                        else:
+                                            execution = {
+                                                "simulated": False,
+                                                "broker": "IBKR",
+                                                "symbol": symbol,
+                                                "side": action,
+                                                "quantity": 0,
+                                                "error": "IBKR API kesirli hisse emrini desteklemiyor, miktar 1'in altına yuvarlandı. Emir gönderilmedi.",
+                                                "time": now_text(),
+                                            }
                     # Ayni yonde (LONG) mevcut acik pozisyon uzerine ekleme (piramitleme)
                     # yapiliyor mu kontrol et - kullanicinin talebi: ayni yonde ekleme
                     # sembol basina gunde en fazla 1 kez yapilabilir.
@@ -8375,7 +8431,7 @@ def _auto_trader_run_symbol(
                                 ).strip()
                                 action = "WAIT"
                                 qty = 0
-                    if qty > 0 and action in ("BUY", "SELL"):
+                    if (qty > 0 or ibkr_cash_qty_amount) and action in ("BUY", "SELL"):
                         # Kullanicinin talebi: teyit sistemi artik AYNI ANDA degil,
                         # GUN ICINDE (son IBKR_CONFIRMATION_WINDOW_HOURS saatlik kayan
                         # pencerede) BIRIKIMLI calisir. Once anlik "X/10" havuzu (bilgi
@@ -8412,13 +8468,14 @@ def _auto_trader_run_symbol(
                                 f"henüz yeterli değil.)"
                             ).strip()
                             qty = 0
-                    if qty > 0 and "error" not in execution:
+                            ibkr_cash_qty_amount = None
+                    if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
                         # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
                         # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
                         # USD nakitten otomatik IDEALPRO FX cevrimi yap. Kullanicinin talebi:
                         # 'nakit parayi gerektiginde farkli para birimine donusturup islem
                         # yapabilecek sekilde ayarla'.
-                        if action == "BUY" and currency.upper() != "USD" and price > 0:
+                        if action == "BUY" and currency.upper() != "USD" and price > 0 and not ibkr_cash_qty_amount:
                             # LSE hisselerinde price pence/GBX biriminde donuyor (GBP degil) -
                             # ensure_ibkr_currency_funds hedef para biriminin (GBP) kendisinde
                             # bir tutar bekliyor, bu yuzden pence->GBP cevrimi burada da
@@ -8433,9 +8490,10 @@ def _auto_trader_run_symbol(
                             elif fx_result.get("error"):
                                 reason = (reason + f" (FX cevrim uyarisi: {fx_result['error']})").strip()
                         execution = ibkr_place_market_order(
-                            symbol, action, qty, asset_type, exchange, currency,
+                            symbol, action, (0 if ibkr_cash_qty_amount else qty), asset_type, exchange, currency,
                             allow_fractional=ibkr_fractional_order,
                             contract_month=contract_month,
+                            cash_qty=ibkr_cash_qty_amount,
                         )
                         # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
                         # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
