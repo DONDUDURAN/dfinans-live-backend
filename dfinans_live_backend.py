@@ -3396,6 +3396,26 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
             if qty == 0:
                 continue
             avg_cost = safe_float(pos.avgCost)
+            is_lse_gbp = (
+                str(pos.contract.exchange or "").upper() == "LSE"
+                and str(pos.contract.currency or "").upper() == "GBP"
+            )
+            if is_lse_gbp:
+                # KRITIK BUG DUZELTMESI: kullanicinin bildirdigi 'ai gunlugune
+                # sacma karlar yazilmis, gercek olmasina imkan yok' sorununun
+                # kok nedeni. IBKR API'si LSE (Londra) hisselerinde avgCost'u
+                # ANA para biriminde (GBP) dondururken, ayni pozisyonun canli
+                # piyasa fiyatini (marketPrice, hem portfolio() hem reqMktData
+                # uzerinden) ALT birimde (GBX/pence, 1 GBP=100 GBX) dondurur -
+                # AYNI pozisyon icin IKI FARKLI OLCEK. Bu yuzden mark_price
+                # her zaman avgCost'tan ~100 KAT BUYUK gorunuyor ve
+                # ibkr_position_profit_pct((mark-avg)/avg) bunu gercek bir
+                # ~9000% kar sanip aninda '%2 kar hedefi' tetikleyip pozisyonu
+                # kapatiyordu (SHEL/ULVR/HSBA/RIO'da gorulen sahte kayitlar).
+                # avgCost'u da pence'e cevirerek mark_price ile AYNI birime
+                # getiriyoruz - boylece pnl_pct hesabi gercek fiyat hareketini
+                # yansitir.
+                avg_cost = avg_cost * 100.0
             item = portfolio_by_key.get((pos.contract.secType, pos.contract.symbol, pos.account))
             mark_price = safe_float(getattr(item, "marketPrice", 0.0)) if item else 0.0
             pnl = safe_float(getattr(item, "unrealizedPNL", 0.0)) if item else 0.0
@@ -3428,7 +3448,19 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                                 mp = (bid + ask) / 2.0
                     if mp == mp and mp > 0:
                         mark_price = mp
-                        pnl = (mark_price - avg_cost) * qty
+                        # avg_cost (LSE icin yukarida pence'e cevrildi) ile
+                        # ayni birimde mark_price farkini hesapla, sonra GBP'ye
+                        # (LSE icin /100) ve USD'ye (FX kuruyla) cevir - onceki
+                        # kod (mark_price - avg_cost) * qty dogrudan pence/GBP
+                        # karisimini USD sanip kaydediyordu (sacma buyuk pnl).
+                        pnl_native = (mark_price - avg_cost) * qty
+                        cur = str(pos.contract.currency or "USD").upper()
+                        if is_lse_gbp:
+                            pnl = (pnl_native / 100.0) * get_fx_rate_to_usd("GBP")
+                        elif cur != "USD":
+                            pnl = pnl_native * get_fx_rate_to_usd(cur)
+                        else:
+                            pnl = pnl_native
                 except Exception:
                     pass
             row = {
