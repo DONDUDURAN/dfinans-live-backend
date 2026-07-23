@@ -601,7 +601,7 @@ IBKR_AI_SELL_MIN_LOSS_PCT = float(os.getenv("IBKR_AI_SELL_MIN_LOSS_PCT", "10.0")
 # yonde bir tarama gelirse net sayaç dogal olarak azalir (BUY agirligi - SELL
 # agirligi), sifirlanmaz. Anlik "X/10" alani hala Teyit gosteriminde bilgi
 # amacli tutulur ama artik GATE (emir acma kilidi) degildir.
-IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "7"))
+IBKR_MIN_CONFIRMATIONS = int(os.getenv("IBKR_MIN_CONFIRMATIONS", "8"))
 # Birikimli teyit sayacinin ne kadar geriye baktigi (saat). Kullanicinin talebi:
 # '2,3 saat olsun' - eski (window disina cikan) sinyaller otomatik olarak
 # sayaçtan dusuyor (pruning), boylece 'bugunun teyidi' guncel kaliyor.
@@ -8597,6 +8597,31 @@ def _auto_trader_run_symbol(
                             ).strip()
                             qty = 0
                             ibkr_cash_qty_amount = None
+                        elif action == "BUY":
+                            # KRITIK EK ONLEM: kullanicinin bildirdigi 'bugun acilan TUM IBKR
+                            # pozisyonlari zararda, piyasayi okuyamiyoruz' sorunu incelenince
+                            # gorulan asil kok neden - her bir gercek alim, sistemin KENDI
+                            # 'Makro rejim RISK-OFF: yeni alim riskli olabilir' uyarisina
+                            # RAGMEN acilmisti (bu uyari onceden sadece puanı -5 dusuruyordu,
+                            # digger sinyaller yeterince guclu oldugunda kolayca asilabiliyordu).
+                            # Simdi RISK_OFF rejiminde yeni BUY icin normal esigin COK
+                            # UZERINDE (ekstra +6) bir net teyit sarti getiriliyor - pratikte
+                            # RISK-OFF sirasinda yeni alimi neredeyse tamamen durdurur, ama
+                            # gercekten ezici coklukta (cok nadir) BUY teyidi varsa yine de
+                            # gecebilir (tam kilit degil, ekstra guvenlik katmani).
+                            _macro_regime_gate = get_macro_regime()
+                            if not _macro_regime_gate.get("error") and _macro_regime_gate.get("regime") == "RISK_OFF":
+                                _risk_off_min_confirmations = _effective_min_confirmations + 6
+                                if cum_confirm["net"] < _risk_off_min_confirmations:
+                                    reason = (
+                                        reason
+                                        + f" (IBKR emri atlandı: Makro rejim RISK-OFF - yeni ALIM için "
+                                        f"normalin çok üzerinde teyit gerekiyor (net {cum_confirm['net']}/"
+                                        f"{_risk_off_min_confirmations}), piyasa geneli baskı altındayken "
+                                        f"riskli alım engellendi.)"
+                                    ).strip()
+                                    qty = 0
+                                    ibkr_cash_qty_amount = None
                     if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
                         # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
                         # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
