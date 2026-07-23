@@ -7415,14 +7415,27 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
         if tp_execution:
             with lock:
                 fallback_symbol = symbols[0] if symbols else normalize_symbol(state.symbol)
-                trigger_label = "STOP_LOSS" if tp_execution.get("trigger") == "stop_loss_roi_pct" else "TAKE_PROFIT"
+                is_stop = tp_execution.get("trigger") == "stop_loss_roi_pct"
+                target_pct = tp_execution.get("target_pct", BINANCE_TAKE_PROFIT_PCT)
+                # bkz. IBKR/BINANCE_SPOT bloklarindaki ayni KRITIK DUZELTME yorumu.
+                really_filled = _is_order_actually_filled(tp_execution)
+                if really_filled:
+                    trigger_label = "STOP_LOSS" if is_stop else "TAKE_PROFIT"
+                    reason_text = (
+                        f"{tp_execution.get('symbol', fallback_symbol)} için %"
+                        f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if is_stop else 'kâr hedefi'} tetiklendi."
+                    )
+                else:
+                    trigger_label = "WAIT"
+                    order_status = str(tp_execution.get("status", "") or "bilinmiyor")
+                    reason_text = (
+                        f"{tp_execution.get('symbol', fallback_symbol)} için %"
+                        f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if is_stop else 'kâr hedefi'} emri "
+                        f"gönderildi ama DOLMADI (durum: {order_status}) - pozisyon hâlâ açık, tekrar denenecek."
+                    )
                 state.last_action = trigger_label
                 state.last_confidence = 100
-                target_pct = tp_execution.get("target_pct", BINANCE_TAKE_PROFIT_PCT)
-                state.last_reason = (
-                    f"{tp_execution.get('symbol', fallback_symbol)} için %"
-                    f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if trigger_label == 'STOP_LOSS' else 'kâr hedefi'} tetiklendi."
-                )
+                state.last_reason = reason_text
                 state.last_price = 0.0
                 state.last_update = now_text()
                 state.last_error = str(tp_execution.get("error", "") or "")
@@ -7457,14 +7470,40 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
         if ibkr_tp_execution:
             with lock:
                 fallback_symbol = symbols[0] if symbols else normalize_symbol(state.symbol)
-                trigger_label = "STOP_LOSS" if ibkr_tp_execution.get("trigger") == "stop_loss_roi_pct" else "TAKE_PROFIT"
+                is_stop = ibkr_tp_execution.get("trigger") == "stop_loss_roi_pct"
+                target_pct = ibkr_tp_execution.get("target_pct", IBKR_TAKE_PROFIT_PCT)
+                really_filled = _is_order_actually_filled(ibkr_tp_execution)
+                # KRITIK DUZELTME: kullanicinin bildirdigi 'USO yuzde ucu gecti
+                # ama kapatmadi, gunlukte sacma karlar var' sorunu - emir IBKR'e
+                # gonderilip 'Inactive'/0 dolum ile geri donse bile (ornegin PDT
+                # veya baska bir IBKR-tarafi kisitlama nedeniyle) buradaki kod
+                # HER ZAMAN "TAKE_PROFIT"/"STOP_LOSS tetiklendi" yaziyordu - bu,
+                # iOS tarafinda status="closedProfit/closedLoss" olarak
+                # gosteriliyor (bkz. build_ai_decision_center_entries), yani
+                # pozisyon hic kapanmamisken kullaniciya 'kapandi' diye
+                # gosteriliyordu. _is_order_actually_filled() ile GERCEK dolum
+                # durumu kontrol edilip, dolmadiysa action='WAIT' ile (sacma
+                # 'kapandi' etiketi olmadan) durum acikca bildiriliyor; boylece
+                # pozisyon gercekten acik kaldigi surece kullanici yanlis
+                # bilgilendirilmez ve her denemede tekrar denenmeye devam eder.
+                if really_filled:
+                    trigger_label = "STOP_LOSS" if is_stop else "TAKE_PROFIT"
+                    reason_text = (
+                        f"{ibkr_tp_execution.get('symbol', fallback_symbol)} için %"
+                        f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if is_stop else 'kâr hedefi'} tetiklendi."
+                    )
+                else:
+                    trigger_label = "WAIT"
+                    order_status = str(ibkr_tp_execution.get("status", "") or "bilinmiyor")
+                    reason_text = (
+                        f"{ibkr_tp_execution.get('symbol', fallback_symbol)} için %"
+                        f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if is_stop else 'kâr hedefi'} emri "
+                        f"IBKR'e gönderildi ama DOLMADI (durum: {order_status}) - pozisyon hâlâ açık, "
+                        f"tekrar denenecek."
+                    )
                 state.last_action = trigger_label
                 state.last_confidence = 100
-                target_pct = ibkr_tp_execution.get("target_pct", IBKR_TAKE_PROFIT_PCT)
-                state.last_reason = (
-                    f"{ibkr_tp_execution.get('symbol', fallback_symbol)} için %"
-                    f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if trigger_label == 'STOP_LOSS' else 'kâr hedefi'} tetiklendi."
-                )
+                state.last_reason = reason_text
                 state.last_price = 0.0
                 state.last_update = now_text()
                 state.last_error = str(ibkr_tp_execution.get("error", "") or "")
@@ -7499,14 +7538,29 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
         if spot_tp_execution:
             with lock:
                 fallback_symbol = symbols[0] if symbols else normalize_symbol(state.symbol)
-                trigger_label = "STOP_LOSS" if spot_tp_execution.get("trigger") == "stop_loss_roi_pct" else "TAKE_PROFIT"
+                is_stop = spot_tp_execution.get("trigger") == "stop_loss_roi_pct"
+                target_pct = spot_tp_execution.get("target_pct", BINANCE_TAKE_PROFIT_PCT)
+                # bkz. IBKR blogundaki ayni isimli KRITIK DUZELTME yorumu - emir
+                # gonderilip gercekten dolmadiysa "tetiklendi" denilmemeli.
+                really_filled = _is_order_actually_filled(spot_tp_execution)
+                if really_filled:
+                    trigger_label = "STOP_LOSS" if is_stop else "TAKE_PROFIT"
+                    reason_text = (
+                        f"{spot_tp_execution.get('symbol', fallback_symbol)} için %"
+                        f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if is_stop else 'kâr hedefi'} tetiklendi (Spot)."
+                    )
+                else:
+                    trigger_label = "WAIT"
+                    order_status = str(spot_tp_execution.get("status", "") or "bilinmiyor")
+                    reason_text = (
+                        f"{spot_tp_execution.get('symbol', fallback_symbol)} için %"
+                        f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if is_stop else 'kâr hedefi'} emri "
+                        f"(Spot) gönderildi ama DOLMADI (durum: {order_status}) - pozisyon hâlâ açık, "
+                        f"tekrar denenecek."
+                    )
                 state.last_action = trigger_label
                 state.last_confidence = 100
-                target_pct = spot_tp_execution.get("target_pct", BINANCE_TAKE_PROFIT_PCT)
-                state.last_reason = (
-                    f"{spot_tp_execution.get('symbol', fallback_symbol)} için %"
-                    f"{abs(safe_float(target_pct)):.2f} {'zarar-kes' if trigger_label == 'STOP_LOSS' else 'kâr hedefi'} tetiklendi (Spot)."
-                )
+                state.last_reason = reason_text
                 state.last_price = 0.0
                 state.last_update = now_text()
                 state.last_error = str(spot_tp_execution.get("error", "") or "")
