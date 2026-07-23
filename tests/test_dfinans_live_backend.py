@@ -52,6 +52,11 @@ def test_binance_position_profit_pct_handles_long_short_and_invalid_input(backen
         ({"avgCost": 100, "mark_price": 90, "size": 0, "side": "SHORT"}, 10.0),
         ({"avgCost": 100, "mark_price": 90, "size": 0, "side": "LONG"}, -10.0),
         ({"avgCost": 0, "mark_price": 90, "size": 1, "side": "LONG"}, 0.0),
+        # market_value/pnl IBKR'in kendi portfolio() kaydindan geldigi icin
+        # avgCost yanlis/tutarsiz olsa bile (ornegin HSBA'da gorulen eski/
+        # harmanlanmis maliyet bazi) dogru sonucu verir - bu yuzden artik
+        # oncelikli yol: cost_basis = market_value - pnl.
+        ({"avgCost": 1849.308, "mark_price": 1527.0, "pnl": -0.9, "market_value": 89.1, "position": 1, "side": "LONG"}, -1.0),
     ],
 )
 def test_ibkr_position_profit_pct_handles_cost_basis_and_fallback(backend_module, position, expected):
