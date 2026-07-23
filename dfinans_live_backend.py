@@ -3481,22 +3481,6 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                 str(pos.contract.exchange or "").upper() == "LSE"
                 and str(pos.contract.currency or "").upper() == "GBP"
             )
-            if is_lse_gbp:
-                # KRITIK BUG DUZELTMESI: kullanicinin bildirdigi 'ai gunlugune
-                # sacma karlar yazilmis, gercek olmasina imkan yok' sorununun
-                # kok nedeni. IBKR API'si LSE (Londra) hisselerinde avgCost'u
-                # ANA para biriminde (GBP) dondururken, ayni pozisyonun canli
-                # piyasa fiyatini (marketPrice, hem portfolio() hem reqMktData
-                # uzerinden) ALT birimde (GBX/pence, 1 GBP=100 GBX) dondurur -
-                # AYNI pozisyon icin IKI FARKLI OLCEK. Bu yuzden mark_price
-                # her zaman avgCost'tan ~100 KAT BUYUK gorunuyor ve
-                # ibkr_position_profit_pct((mark-avg)/avg) bunu gercek bir
-                # ~9000% kar sanip aninda '%2 kar hedefi' tetikleyip pozisyonu
-                # kapatiyordu (SHEL/ULVR/HSBA/RIO'da gorulen sahte kayitlar).
-                # avgCost'u da pence'e cevirerek mark_price ile AYNI birime
-                # getiriyoruz - boylece pnl_pct hesabi gercek fiyat hareketini
-                # yansitir.
-                avg_cost = avg_cost * 100.0
             mark_price = safe_float(getattr(item, "marketPrice", 0.0)) if item else 0.0
             pnl = safe_float(getattr(item, "unrealizedPNL", 0.0)) if item else 0.0
             # market_value ve unrealizedPNL AYNI ib.portfolio() cagrisindan/AYNI
@@ -3508,6 +3492,19 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
             # pnl_pct hesabinda artik oncelik market_value/unrealizedPNL ikilisine
             # veriliyor (avgCost'a hic dokunmadan, birim karismasi riski sifir).
             market_value = safe_float(getattr(item, "marketValue", 0.0)) if item else 0.0
+            # KRITIK DUZELTME: reqAccountUpdates artik dogru abone oldugu icin
+            # (bkz. ib.connect(..., account=...) fix'i) item.marketPrice/
+            # item.averageCost genelde DOLU geliyor - ve canlida goruldu ki
+            # ib.portfolio() uzerinden gelen bu ikisi LSE hisselerinde AYNI
+            # olcekte (GBP ana birim, HSBA ornegi: avgCost ~18.49, marketPrice
+            # ~15.28 - HER IKISI DE GBP, pence DEGIL). Onceki varsayim ('avgCost
+            # GBP, marketPrice pence') aslinda SADECE asagidaki reqMktData
+            # yedek yolundan (ticker.marketPrice(), gercekten pence doner)
+            # gozlemlenmisti - item bos oldugu icin item.marketPrice hic test
+            # edilmemisti. Bu yuzden ×100 donusumu artik SADECE reqMktData
+            # yedek yolunda (pence donen ticker fiyati icin) uygulaniyor;
+            # item.marketPrice/avgCost cifti (ikisi de portfolio()'dan) hicbir
+            # ek donusum olmadan dogrudan kullaniliyor.
             if mark_price <= 0:
                 # Onceden bu fallback SADECE portfolio() pozisyonu hic
                 # icermiyorsa (item is None) calisiyordu. Ancak canlida
@@ -3536,17 +3533,19 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                             if bid > 0 and ask > 0:
                                 mp = (bid + ask) / 2.0
                     if mp == mp and mp > 0:
-                        mark_price = mp
-                        # avg_cost (LSE icin yukarida pence'e cevrildi) ile
-                        # ayni birimde mark_price farkini hesapla, sonra GBP'ye
-                        # (LSE icin /100) ve USD'ye (FX kuruyla) cevir - onceki
-                        # kod (mark_price - avg_cost) * qty dogrudan pence/GBP
-                        # karisimini USD sanip kaydediyordu (sacma buyuk pnl).
+                        # KRITIK: reqMktData ticker'i LSE hisselerinde pence
+                        # (GBX, 1 GBP=100 GBX) doner - ama avg_cost (yukarida
+                        # artik ×100 DONUSTURULMEDEN) GBP ana biriminde. Bu
+                        # yuzden ticker fiyatini avg_cost ile AYNI (GBP)
+                        # birime getirmek icin burada /100 uyguluyoruz (eskiden
+                        # tam tersi yapilip avg_cost sisiriliyordu - item.
+                        # marketPrice/averageCost ciftinin ikisinin de GBP
+                        # oldugu canlida dogrulandiktan sonra bu yaklasim
+                        # terk edildi).
+                        mark_price = (mp / 100.0) if is_lse_gbp else mp
                         pnl_native = (mark_price - avg_cost) * qty
                         cur = str(pos.contract.currency or "USD").upper()
-                        if is_lse_gbp:
-                            pnl = (pnl_native / 100.0) * get_fx_rate_to_usd("GBP")
-                        elif cur != "USD":
+                        if cur != "USD":
                             pnl = pnl_native * get_fx_rate_to_usd(cur)
                         else:
                             pnl = pnl_native
