@@ -3447,7 +3447,19 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
             qty = safe_float(pos.position)
             if qty == 0:
                 continue
-            avg_cost = safe_float(pos.avgCost)
+            item = portfolio_by_key.get((pos.contract.secType, pos.contract.symbol, pos.account))
+            # KRITIK BUG: kullanicinin bildirdigi 'HSBA maliyeti gercek dolum
+            # fiyatina hic cikmamis' sorunu incelenince goruldu ki ib.positions()
+            # (reqPositions, tek seferlik anlik cagri) bazen pos.avgCost'u ESKI/
+            # BAYAT deger ile donduruyor - HSBA'da trade_journal'daki TUM
+            # gercek dolumlar (bugun 1541.6p dahil) 1535-1542p araliginda
+            # olmasina ragmen pos.avgCost 1849.308p cikiyordu (%20 fazla).
+            # ib.portfolio() (reqAccountUpdates, surekli abonelik) uzerinden
+            # gelen item.averageCost genelde daha GUNCEL - bu yuzden mevcutsa
+            # ONCELIKLE o kullaniliyor, pos.avgCost sadece item/averageCost
+            # yoksa yedek olarak devrede.
+            item_avg_cost = safe_float(getattr(item, "averageCost", 0.0)) if item else 0.0
+            avg_cost = item_avg_cost if item_avg_cost > 0 else safe_float(pos.avgCost)
             is_lse_gbp = (
                 str(pos.contract.exchange or "").upper() == "LSE"
                 and str(pos.contract.currency or "").upper() == "GBP"
@@ -3468,7 +3480,6 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                 # getiriyoruz - boylece pnl_pct hesabi gercek fiyat hareketini
                 # yansitir.
                 avg_cost = avg_cost * 100.0
-            item = portfolio_by_key.get((pos.contract.secType, pos.contract.symbol, pos.account))
             mark_price = safe_float(getattr(item, "marketPrice", 0.0)) if item else 0.0
             pnl = safe_float(getattr(item, "unrealizedPNL", 0.0)) if item else 0.0
             # market_value ve unrealizedPNL AYNI ib.portfolio() cagrisindan/AYNI
