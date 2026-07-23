@@ -2805,7 +2805,24 @@ def ensure_ibkr_connection(force_reconnect: bool = False):
         
         try:
             ib = ibs.IB()
-            ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=8)
+            # KRITIK BUG: 'account' parametresi verilmezse ib_insync sadece
+            # HESAP SAYISI TAM 1 ise reqAccountUpdates'i otomatik tetikler
+            # (connectAsync icindeki 'if not account and len(accounts)==1'
+            # kontrolu). Birden fazla yonetilen hesap varsa (veya bu kontrol
+            # herhangi bir sebeple calismazsa) ib.portfolio() SUREKLI BOS
+            # kalir - averageCost/marketValue/unrealizedPNL hic gelmez, ve
+            # pozisyon PnL hesabi HER ZAMAN reqMktData+avgCost yedek yoluna
+            # duser (kullanicinin bildirdigi 'HSBA maliyeti gercek dolum
+            # fiyatina hic cikmamis' sorununun asil kok nedeni - item hep
+            # None kaliyordu). account'u ACIKCA vererek reqAccountUpdates'in
+            # her zaman tetiklenmesini garanti ediyoruz.
+            ib.connect(
+                IBKR_HOST,
+                IBKR_PORT,
+                clientId=IBKR_CLIENT_ID,
+                timeout=8,
+                account=(IBKR_ACCOUNT or ""),
+            )
             if not ib.isConnected():
                 raise RuntimeError("IBKR bağlantısı kurulamadı.")
             
