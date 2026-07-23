@@ -9495,19 +9495,37 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
 
 
 def ibkr_position_profit_pct(position: Dict[str, Any]) -> float:
-    """IBKR hisse pozisyonu icin maliyet bazli kar/zarar yuzdesini hesaplar."""
+    """IBKR hisse pozisyonu icin maliyet bazli kar/zarar yuzdesini hesaplar.
+
+    KRITIK DUZELTME: 'avgCost' ve 'mark_price' HER ZAMAN ayni (native/yerel)
+    para biriminde gelir (ornegin LSE/GBP hisselerinde ikisi de pence -
+    ibkr_positions_snapshot() bunu zaten garanti eder), ama 'pnl' alani
+    HER ZAMAN USD'ye cevrilmis olarak gelir. Onceki kod once avgCost*qty
+    (native birim, ornegin pence) ile 'cost_basis' hesaplayip USD 'pnl'i
+    buna bolyordu - bu FARKLI BIRIMLERI karistiriyordu (pence'i USD sanip
+    bolme). Sonuc: LSE hisselerinde (SHEL/HSBA gibi) gercekte %17-18 gibi
+    buyuk fiyat hareketleri olsa bile hesaplanan yuzde neredeyse SIFIRA
+    yakin (%0.1-0.2) cikiyordu - bu yuzden hem kar-al hem zarar-kes bu
+    hisselerde PRATIKTE HICBIR ZAMAN tetiklenmiyordu (kullanicinin
+    bildirdigi 'IBKR kar da kesmiyor, zarar da kesmiyor' sorununun kok
+    nedeni). Fiyat orani (mark_price - avg_cost) / avg_cost HER ZAMAN
+    para birimi baglantisiz ve dogru oldugu icin (ikisi de ayni native
+    birimde) artik ONCELIKLE bu yontem kullaniliyor; pnl/cost_basis
+    yontemi SADECE mark_price mevcut olmadiginda ve pozisyon zaten USD
+    cinsindense (birim karismasin diye) yedek olarak kullanilir."""
     avg_cost = safe_float(position.get("avgCost") or position.get("entry_price"))
-    pnl = safe_float(position.get("pnl"))
-    qty = abs(safe_float(position.get("position") or position.get("size")))
-    if avg_cost > 0 and qty > 0:
-        cost_basis = avg_cost * qty
-        if cost_basis > 0:
-            return (pnl / cost_basis) * 100.0
     mark = safe_float(position.get("mark_price"))
     if avg_cost > 0 and mark > 0:
         side = str(position.get("side", "LONG")).upper()
         raw_pct = ((mark - avg_cost) / avg_cost) * 100.0
         return raw_pct if side == "LONG" else -raw_pct
+    pnl = safe_float(position.get("pnl"))
+    qty = abs(safe_float(position.get("position") or position.get("size")))
+    currency = str(position.get("currency") or "USD").upper()
+    if avg_cost > 0 and qty > 0 and currency == "USD":
+        cost_basis = avg_cost * qty
+        if cost_basis > 0:
+            return (pnl / cost_basis) * 100.0
     return 0.0
 
 
