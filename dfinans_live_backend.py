@@ -3471,6 +3471,15 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
             item = portfolio_by_key.get((pos.contract.secType, pos.contract.symbol, pos.account))
             mark_price = safe_float(getattr(item, "marketPrice", 0.0)) if item else 0.0
             pnl = safe_float(getattr(item, "unrealizedPNL", 0.0)) if item else 0.0
+            # market_value ve unrealizedPNL AYNI ib.portfolio() cagrisindan/AYNI
+            # IBKR kaydindan gelir, bu yuzden birbirleriyle HER ZAMAN tutarli
+            # bir para biriminde olurlar (avgCost'un aksine - avgCost pence/GBP
+            # karisimi veya eski/hatali bir maliyet bazi tasiyabilir - kullanicinin
+            # bildirdigi 'HSBA maliyeti hic o fiyata cikmamis ki' sorunu). Kullanici
+            # acikca 'IBKR kar/zarar rakamindan DOGRUDAN hesapla' istedigi icin
+            # pnl_pct hesabinda artik oncelik market_value/unrealizedPNL ikilisine
+            # veriliyor (avgCost'a hic dokunmadan, birim karismasi riski sifir).
+            market_value = safe_float(getattr(item, "marketValue", 0.0)) if item else 0.0
             if mark_price <= 0:
                 # Onceden bu fallback SADECE portfolio() pozisyonu hic
                 # icermiyorsa (item is None) calisiyordu. Ancak canlida
@@ -3529,6 +3538,7 @@ def ibkr_positions_snapshot() -> List[Dict[str, Any]]:
                 "entry_price": avg_cost,
                 "mark_price": round(mark_price, 6),
                 "pnl": round(pnl, 4),
+                "market_value": round(market_value, 4),
                 "leverage": "",
                 # iOS uygulamasi (IBKRService.swift) bu alan adlarini bekliyor:
                 "position": qty,
@@ -9522,29 +9532,34 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
 def ibkr_position_profit_pct(position: Dict[str, Any]) -> float:
     """IBKR hisse pozisyonu icin maliyet bazli kar/zarar yuzdesini hesaplar.
 
-    KRITIK DUZELTME: 'avgCost' ve 'mark_price' HER ZAMAN ayni (native/yerel)
-    para biriminde gelir (ornegin LSE/GBP hisselerinde ikisi de pence -
-    ibkr_positions_snapshot() bunu zaten garanti eder), ama 'pnl' alani
-    HER ZAMAN USD'ye cevrilmis olarak gelir. Onceki kod once avgCost*qty
-    (native birim, ornegin pence) ile 'cost_basis' hesaplayip USD 'pnl'i
-    buna bolyordu - bu FARKLI BIRIMLERI karistiriyordu (pence'i USD sanip
-    bolme). Sonuc: LSE hisselerinde (SHEL/HSBA gibi) gercekte %17-18 gibi
-    buyuk fiyat hareketleri olsa bile hesaplanan yuzde neredeyse SIFIRA
-    yakin (%0.1-0.2) cikiyordu - bu yuzden hem kar-al hem zarar-kes bu
-    hisselerde PRATIKTE HICBIR ZAMAN tetiklenmiyordu (kullanicinin
-    bildirdigi 'IBKR kar da kesmiyor, zarar da kesmiyor' sorununun kok
-    nedeni). Fiyat orani (mark_price - avg_cost) / avg_cost HER ZAMAN
-    para birimi baglantisiz ve dogru oldugu icin (ikisi de ayni native
-    birimde) artik ONCELIKLE bu yontem kullaniliyor; pnl/cost_basis
-    yontemi SADECE mark_price mevcut olmadiginda ve pozisyon zaten USD
-    cinsindense (birim karismasin diye) yedek olarak kullanilir."""
+    KULLANICI TALEBI: 'direkt IBKR kar/zarardan hesapla' - HSBA'da avgCost
+    alaninin (ib.positions() -> pos.avgCost) gercek dolum fiyatiyla
+    ORTUSMEDIGI goruldu (ornek: trade_journal'daki gercek dolum 1541.6p
+    iken pozisyondaki avgCost 1849.308p olarak geldi - muhtemelen IBKR'in
+    kendi hesap-genelinde biriktirdigi tarihsel/harmanlı maliyet bazi,
+    bizim ×100 pence donusumumuzden BAGIMSIZ bir tutarsizlik). avgCost'u
+    fiyat oranina sokmak bu yuzden yanlis/yaniltici sonuc verebiliyor.
+
+    market_value VE unrealizedPNL ('pnl') ib.portfolio()'nun AYNI kaydindan
+    geldigi icin birbirleriyle HER ZAMAN tutarli bir para biriminde olur
+    (IBKR bunlari kendi ic hesaplamasinda birlikte urettigi icin) - bu
+    yuzden artik ONCELIKLE bu ikili kullaniliyor: cost_basis = market_value
+    - pnl, pct = pnl / cost_basis. avgCost/mark_price fiyat orani sadece
+    market_value/pnl mevcut degilse (ornegin eski/manuel kayit) yedek
+    olarak kullanilir; en son care olarak eski pnl/(avgCost*qty) yontemi
+    (sadece USD pozisyonlarda, birim karismasin diye) devrede kalir."""
+    pnl = safe_float(position.get("pnl"))
+    market_value = safe_float(position.get("market_value"))
+    if market_value:
+        cost_basis = market_value - pnl
+        if cost_basis:
+            return (pnl / cost_basis) * 100.0
     avg_cost = safe_float(position.get("avgCost") or position.get("entry_price"))
     mark = safe_float(position.get("mark_price"))
     if avg_cost > 0 and mark > 0:
         side = str(position.get("side", "LONG")).upper()
         raw_pct = ((mark - avg_cost) / avg_cost) * 100.0
         return raw_pct if side == "LONG" else -raw_pct
-    pnl = safe_float(position.get("pnl"))
     qty = abs(safe_float(position.get("position") or position.get("size")))
     currency = str(position.get("currency") or "USD").upper()
     if avg_cost > 0 and qty > 0 and currency == "USD":
