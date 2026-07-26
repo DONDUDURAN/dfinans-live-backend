@@ -263,3 +263,26 @@ def test_symbol_in_stop_loss_cooldown_ignores_non_stop_loss_and_disabled(
 
     assert backend_module._symbol_in_stop_loss_cooldown("IBKR", "USO", 8.0) is None
     assert backend_module._symbol_in_stop_loss_cooldown("IBKR", "SHEL", 0.0) is None
+
+
+def test_lse_grandfather_exempts_existing_position_from_tight_threshold(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    backend_module.db_grandfather_lse_symbol("SHEL")
+
+    assert backend_module.db_is_lse_symbol_grandfathered("SHEL") is True
+    assert backend_module.db_is_lse_symbol_grandfathered("HSBA") is False
+
+
+def test_lse_grandfather_cleared_on_full_position_closure(
+    backend_module, isolated_runtime_db, runtime_db_connection, monkeypatch
+):
+    monkeypatch.setattr(backend_module, "now_text", lambda: "2026-07-26 13:00:00")
+    backend_module.db_grandfather_lse_symbol("HSBA")
+    assert backend_module.db_is_lse_symbol_grandfathered("HSBA") is True
+
+    backend_module.db_record_position_closure(
+        "IBKR", "HSBA", "LONG", 10, 18.49, 15.28, -32.1, -16.06, "STOP_LOSS", "{}"
+    )
+
+    assert backend_module.db_is_lse_symbol_grandfathered("HSBA") is False
