@@ -213,3 +213,53 @@ def test_db_position_added_today_resets_on_next_day(backend_module, isolated_run
     monkeypatch.setattr(backend_module, "now_text", lambda: "2026-07-13 08:00:00")
 
     assert backend_module.db_position_added_today("BINANCE", "SOLUSDT") is False
+
+
+def _insert_position_closure(conn, broker, symbol, close_reason, created_at):
+    conn.execute(
+        """
+        INSERT INTO position_closures
+            (id, created_at, broker, symbol, side, qty, entry_price, exit_price,
+             realized_pnl, realized_pnl_pct, close_reason, detail)
+        VALUES (?, ?, ?, ?, 'LONG', 1, 10, 9, -1, -10, ?, '{}')
+        """,
+        (f"{broker}-{symbol}-{created_at}", created_at, broker, symbol, close_reason),
+    )
+    conn.commit()
+
+
+def test_symbol_in_stop_loss_cooldown_blocks_within_window(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    from datetime import datetime, timedelta
+
+    recent = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    _insert_position_closure(runtime_db_connection, "IBKR", "SHEL", "STOP_LOSS", recent)
+
+    remaining = backend_module._symbol_in_stop_loss_cooldown("IBKR", "SHEL", 8.0)
+
+    assert remaining is not None
+    assert 5.5 < remaining < 6.5
+
+
+def test_symbol_in_stop_loss_cooldown_clears_after_window(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    from datetime import datetime, timedelta
+
+    old = (datetime.now() - timedelta(hours=20)).strftime("%Y-%m-%d %H:%M:%S")
+    _insert_position_closure(runtime_db_connection, "IBKR", "HSBA", "STOP_LOSS", old)
+
+    assert backend_module._symbol_in_stop_loss_cooldown("IBKR", "HSBA", 8.0) is None
+
+
+def test_symbol_in_stop_loss_cooldown_ignores_non_stop_loss_and_disabled(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    from datetime import datetime, timedelta
+
+    recent = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    _insert_position_closure(runtime_db_connection, "IBKR", "USO", "TAKE_PROFIT", recent)
+
+    assert backend_module._symbol_in_stop_loss_cooldown("IBKR", "USO", 8.0) is None
+    assert backend_module._symbol_in_stop_loss_cooldown("IBKR", "SHEL", 0.0) is None
