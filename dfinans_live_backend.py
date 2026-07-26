@@ -13680,6 +13680,89 @@ def ibkr_manual_order():
         }), 500
 
 
+@app.route("/ibkr/buy-max-affordable", methods=["POST"])
+def ibkr_buy_max_affordable():
+    """Kullanicinin talebi ('açılınca ne kadar alabilirsek alalım'): verilen
+    sembolde, o an mevcut olan (ilgili para biriminde) nakit bakiyeyle
+    alinabilecek MAKSIMUM tam sayi hisseyi hesaplayip piyasa emriyle alir.
+    Borsa kapaliyken (ornegin LSE mesai-disi) cagrilirsa oldugu gibi hata
+    doner - cagiran taraf (ornegin zamanlanmis bir bekleme gorevi) borsa
+    acildiktan sonra tekrar denemelidir."""
+    body = request.get_json(force=True) or {}
+    symbol = body.get("symbol", "")
+    if not symbol:
+        return jsonify({"error": "symbol gerekli."}), 400
+    asset_type = str(body.get("asset_type", ""))
+    exchange = str(body.get("exchange", ""))
+    currency = str(body.get("currency", ""))
+    _pool_info = IBKR_SYMBOL_MARKET_INFO.get(normalize_symbol(symbol).upper())
+    if not asset_type:
+        asset_type = str((_pool_info or {}).get("asset_type") or "STK")
+    if not exchange:
+        exchange = str((_pool_info or {}).get("exchange") or "SMART")
+    if not currency:
+        currency = str((_pool_info or {}).get("currency") or "USD")
+    # Slipaj/fiyat hareketi icin nakidin tamamini degil, kucuk bir tampon
+    # payi dusulmus kismini kullaniyoruz (varsayilan %3 - body'den ezilebilir).
+    buffer_pct = safe_float(body.get("buffer_pct"), 3.0)
+    try:
+        closed_msg = _ibkr_closed_exchange_message(exchange)
+        if closed_msg:
+            return jsonify({
+                "broker": "IBKR", "symbol": normalize_symbol(symbol),
+                "error": closed_msg, "last_update": now_text(),
+            }), 409
+        cash_balance = get_ibkr_cash_balance(currency)
+        # Fiyat kaynagi: eger bu sembolde ZATEN acik bir pozisyon varsa, onun
+        # (bkz. ibkr_positions_snapshot - LSE/pence birim duzeltmesi zaten
+        # uygulanmis) guncel mark_price'i kullanilir - bu, market-summary'nin
+        # HAM ticker fiyatindan (LSE'de pence, GBP degil) daha guvenilirdir.
+        # Acik pozisyon yoksa market-summary fiyati kullanilir, LSE/GBP ise
+        # pence->GBP donusumu burada ayrica uygulanir.
+        price = 0.0
+        try:
+            for pos in ibkr_positions_snapshot():
+                if str(pos.get("symbol", "")).upper() == normalize_symbol(symbol).upper():
+                    price = safe_float(pos.get("mark_price"))
+                    break
+        except Exception:
+            price = 0.0
+        if price <= 0:
+            snapshot = ibkr_market_snapshot(symbol, asset_type, exchange, currency, contract_month=str((_pool_info or {}).get("contract_month", "") or ""))
+            price = safe_float(snapshot.get("price"))
+            if exchange.upper() == "LSE" and currency.upper() == "GBP" and price > 0:
+                price = price / 100.0
+        if price <= 0:
+            return jsonify({
+                "broker": "IBKR", "symbol": normalize_symbol(symbol),
+                "error": "Güncel fiyat alınamadı.", "last_update": now_text(),
+            }), 500
+        usable_cash = cash_balance * (1 - max(buffer_pct, 0) / 100.0)
+        quantity = math.floor(usable_cash / price) if price > 0 else 0
+        if quantity < 1:
+            return jsonify({
+                "broker": "IBKR", "symbol": normalize_symbol(symbol),
+                "error": (
+                    f"1 tam hisseye yetecek {currency} nakit yok "
+                    f"(bakiye {cash_balance:.2f} {currency}, fiyat {price:.4f} {currency})."
+                ),
+                "cash_balance": cash_balance, "price": price, "last_update": now_text(),
+            }), 409
+        request_id = str(uuid.uuid4())
+        result = ibkr_place_market_order(
+            symbol, "BUY", quantity, asset_type, exchange, currency, request_id=request_id,
+        )
+        result["computed_quantity"] = quantity
+        result["cash_balance_used"] = cash_balance
+        result["price_used"] = price
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({
+            "broker": "IBKR", "symbol": normalize_symbol(symbol),
+            "error": str(e), "last_update": now_text(),
+        }), 500
+
+
 @app.route("/close-position", methods=["POST"])
 def close_position():
     body = request.get_json(force=True) or {}
