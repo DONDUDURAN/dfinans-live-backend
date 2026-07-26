@@ -865,6 +865,14 @@ def init_runtime_db() -> None:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS ibkr_lse_stop_loss_grandfather (
+                    symbol TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS symbol_tp_sl_overrides (
                     broker TEXT NOT NULL,
                     symbol TEXT NOT NULL,
@@ -1695,6 +1703,16 @@ def db_record_position_closure(
     except Exception:
         pass
 
+    # Sembol grandfather (eski/muaf) listesindeyse ve pozisyon artik tamamen
+    # kapandiysa, bu kaydi temizle - sembol tekrar acilirsa artik 'yeni
+    # pozisyon' sayilmali ve dar LSE zarar-kes esigine (IBKR_LSE_STOP_LOSS_PCT)
+    # tabi olmali (bkz. seed_lse_stop_loss_grandfather_once).
+    if str(broker).upper() == "IBKR":
+        try:
+            db_clear_lse_grandfather(symbol)
+        except Exception:
+            pass
+
     send_position_closure_email(
         broker=broker,
         symbol=symbol,
@@ -1813,6 +1831,90 @@ def _symbol_in_stop_loss_cooldown(broker: str, symbol: str, cooldown_hours: floa
     elapsed_hours = (datetime.now() - last_sl).total_seconds() / 3600.0
     remaining = cooldown_hours - elapsed_hours
     return remaining if remaining > 0 else None
+
+
+def db_grandfather_lse_symbol(symbol: str) -> None:
+    """Bir sembolu 'eski (grandfathered)' olarak isaretler - bu sembol yeni,
+    daha dar LSE zarar-kes esiginden (IBKR_LSE_STOP_LOSS_PCT) MUAF tutulur ve
+    onun yerine genel IBKR_STOP_LOSS_PCT kullanilir. Kullanicinin talebi:
+    'mevcut pozisyonları bu eşikten uzak tut' - yeni esik SADECE bu degisiklik
+    canliya alindiktan SONRA acilan yeni LSE pozisyonlarina uygulanmali,
+    o an ZATEN acik olan pozisyonlar (SHEL, HSBA) etkilenmemeli."""
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                conn.execute(
+                    "INSERT OR IGNORE INTO ibkr_lse_stop_loss_grandfather (symbol, created_at) VALUES (?, ?)",
+                    (str(symbol).upper(), now_text()),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+def db_is_lse_symbol_grandfathered(symbol: str) -> bool:
+    """Sembol grandfather listesindeyse True doner (yeni dar LSE esigi yerine
+    genel esik kullanilmali)."""
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM ibkr_lse_stop_loss_grandfather WHERE symbol = ?",
+                    (str(symbol).upper(),),
+                ).fetchone()
+            finally:
+                conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def db_clear_lse_grandfather(symbol: str) -> None:
+    """Pozisyon tamamen kapandiginda grandfather kaydini temizler - sembol
+    sonra tekrar acilirsa artik 'yeni pozisyon' sayilir ve dar LSE zarar-kes
+    esigine tabi olur."""
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                conn.execute(
+                    "DELETE FROM ibkr_lse_stop_loss_grandfather WHERE symbol = ?",
+                    (str(symbol).upper(),),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+def seed_lse_stop_loss_grandfather_once() -> None:
+    """Uygulama IBKR'ye ilk kez basariyla baglandiginda, O AN ZATEN acik olan
+    tum LSE pozisyonlarini bir kereligine grandfather listesine ekler - boylece
+    yeni dar LSE zarar-kes esigi (IBKR_LSE_STOP_LOSS_PCT) SADECE bundan SONRA
+    acilacak yeni LSE pozisyonlarina uygulanir, mevcut acik pozisyonlar
+    (ornegin SHEL/HSBA) eski/genel esikte kalir. Process yasam suresi
+    boyunca sadece bir kez calisir (IBKR_RUNTIME bayragiyla korunur)."""
+    if IBKR_RUNTIME.get("lse_grandfather_seeded"):
+        return
+    IBKR_RUNTIME["lse_grandfather_seeded"] = True
+    try:
+        positions = ibkr_positions_snapshot()
+        for position in positions:
+            qty = abs(safe_float(position.get("position") or position.get("size")))
+            if qty <= 0:
+                continue
+            if str(position.get("exchange") or "").upper() == "LSE":
+                symbol = str(position.get("symbol", "")).upper()
+                if symbol and symbol != "IBKR":
+                    db_grandfather_lse_symbol(symbol)
+                    print(f"[IBKR LSE SL] {symbol}: mevcut acik pozisyon olarak grandfathered (eski/genel esik kullanilacak).")
+    except Exception as e:
+        print(f"[IBKR LSE SL] grandfather seed hatasi: {e}")
 
 
 def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2904,6 +3006,10 @@ def ensure_ibkr_connection(force_reconnect: bool = False):
             except Exception as mdt_err:
                 print(f"[IBKR] reqMarketDataType ayarlanamadi: {mdt_err}")
             print(f"[IBKR] Connected successfully at attempt {reconnect_count+1}")
+            try:
+                seed_lse_stop_loss_grandfather_once()
+            except Exception as seed_err:
+                print(f"[IBKR] LSE grandfather seed cagrisi basarisiz: {seed_err}")
             return ib, ibs
         except Exception as e:
             IBKR_RUNTIME["failed_attempts"] = int(IBKR_RUNTIME.get("failed_attempts", 0)) + 1
@@ -9736,8 +9842,17 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         # buyuklukte durdurulur. Genel esik (kullanicinin talebiyle %20'de
         # sabit) diger tum borsalar icin degismeden kalir.
         position_exchange = str(position.get("exchange") or "SMART").upper()
+        # Kullanicinin talebi: 'mevcut pozisyonları bu eşikten uzak tut' - dar
+        # LSE esigi degisiklik canliya alindiginda ZATEN acik olan pozisyonlara
+        # (grandfathered, bkz. seed_lse_stop_loss_grandfather_once) uygulanmaz,
+        # bunlar eski/genel esikte kalir. Sadece bu degisiklikten SONRA
+        # acilacak yeni LSE pozisyonlari dar esige tabi olur.
+        _is_lse_grandfathered = position_exchange == "LSE" and db_is_lse_symbol_grandfathered(
+            str(position.get("symbol", "")).upper()
+        )
         effective_stop_loss_pct = (
-            IBKR_LSE_STOP_LOSS_PCT if position_exchange == "LSE" and IBKR_LSE_STOP_LOSS_PCT > 0
+            IBKR_LSE_STOP_LOSS_PCT
+            if position_exchange == "LSE" and IBKR_LSE_STOP_LOSS_PCT > 0 and not _is_lse_grandfathered
             else IBKR_STOP_LOSS_PCT
         )
         hit_stop_loss = effective_stop_loss_pct > 0 and profit_pct <= -effective_stop_loss_pct
