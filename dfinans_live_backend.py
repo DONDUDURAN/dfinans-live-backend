@@ -568,6 +568,26 @@ BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "2.0"))
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "2.0"))
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
+# Kullanicinin talebi: son 1 haftalik islem gecmisi analiz edilince (bkz.
+# /position-closures) SHEL ve HSBA (ikisi de LSE/Londra hisseleri) 3'er kez
+# ust uste zarar-kesildigi, hemen ardindan tekrar acilip yine zarar ettigi
+# gorulduu ('SHEL -8.7% x3, HSBA -16.6% x3, hepsi 0 kazanc') - LSE hisselerinde
+# mesai-disi/ince islem hacimli veri daha guvenilmez oldugu ve genel olarak
+# kayiplarin cogunlugu buradan geldigi icin LSE'ye ozel daha dar bir zarar-kes
+# esigi ve yeni ALIM icin ekstra teyit sarti eklendi (bkz. IBKR_LSE_STOP_LOSS_PCT
+# ve _auto_trader_run_symbol'daki LSE BUY kapisi).
+IBKR_LSE_STOP_LOSS_PCT = float(os.getenv("IBKR_LSE_STOP_LOSS_PCT", "6.0"))
+# LSE'de yeni ALIM icin normal esigin ne kadar UZERINDE ekstra net teyit
+# gerektigi (RISK_OFF kapisiyla ayni mantik, ama LSE'ye HER ZAMAN uygulanir,
+# sadece RISK_OFF rejiminde degil - cunku LSE kayiplari makro rejimden
+# bagimsiz olarak da tekrarlanan bir sorun).
+IBKR_LSE_EXTRA_CONFIRMATIONS = int(os.getenv("IBKR_LSE_EXTRA_CONFIRMATIONS", "4"))
+# Ayni sembolde zarar-kes (STOP_LOSS) sonrasi ne kadar sure (saat) yeni ALIM
+# denenmesin. Kullanicinin bildirdigi 'zarar kesip hemen tekrar aciyoruz, yine
+# zarar ediyoruz' dongusunu kirmak icin - zarar-kesten sonra sembol bu sure
+# boyunca 'soguma' (cooldown) durumunda kalir, yeni ALIM denemesi atlanir.
+IBKR_STOP_LOSS_COOLDOWN_HOURS = float(os.getenv("IBKR_STOP_LOSS_COOLDOWN_HOURS", "8"))
+
 # Kullanicinin talebi: 'sadece ıbkr de hisselerde yüzde 2 kar arayalım diğer
 # varlıklarda yüzde 1 de kapatalım, altın ve petrolde de yüzde 1 olsun' -
 # hisseler (STK) IBKR_TAKE_PROFIT_PCT (%2) ile kalir, forex/futures (MGC/MCL
@@ -1752,6 +1772,47 @@ def db_all_position_closures(
         finally:
             conn.close()
     return [dict(r) for r in rows]
+
+
+def db_last_stop_loss_close_at(broker: str, symbol: str) -> Optional[datetime]:
+    """Bir sembolde/broker'da EN SON zarar-kes (STOP_LOSS) kapanisinin ne zaman
+    oldugunu doner (yoksa None). Kullanicinin bildirdigi 'ayni sembolde ust uste
+    zarar kesip tekrar tekrar giriyoruz' sorununu (SHEL/HSBA 3'er kez ust uste
+    zarar etti) onlemek icin eklenen 'cooldown' (bekleme suresi) kontrolunun
+    temelini olusturur - bkz. _symbol_in_stop_loss_cooldown()."""
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            row = conn.execute(
+                """
+                SELECT created_at FROM position_closures
+                WHERE UPPER(broker) = ? AND UPPER(symbol) = ? AND UPPER(close_reason) = 'STOP_LOSS'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (broker.upper(), symbol.upper()),
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row or not row[0]:
+        return None
+    try:
+        return datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _symbol_in_stop_loss_cooldown(broker: str, symbol: str, cooldown_hours: float) -> Optional[float]:
+    """Sembolde son zarar-kesten bu yana gecen sure cooldown_hours'tan azsa,
+    kalan bekleme suresini (saat) doner; degilse (veya hic zarar-kes yoksa)
+    None doner. cooldown_hours <= 0 ise kontrol tamamen devre disi (None)."""
+    if cooldown_hours <= 0:
+        return None
+    last_sl = db_last_stop_loss_close_at(broker, symbol)
+    if not last_sl:
+        return None
+    elapsed_hours = (datetime.now() - last_sl).total_seconds() / 3600.0
+    remaining = cooldown_hours - elapsed_hours
+    return remaining if remaining > 0 else None
 
 
 def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -8659,6 +8720,40 @@ def _auto_trader_run_symbol(
                                     ).strip()
                                     qty = 0
                                     ibkr_cash_qty_amount = None
+                            if qty > 0 or ibkr_cash_qty_amount:
+                                # Kullanicinin talebi: son 1 haftalik analizde SHEL/HSBA'nin
+                                # zarar-kesten hemen sonra tekrar acilip yine zarar ettigi
+                                # gorulduu icin - bir sembol zarar-kes ile kapandiysa,
+                                # IBKR_STOP_LOSS_COOLDOWN_HOURS boyunca o sembolde yeni ALIM
+                                # denenmez (soguma suresi).
+                                _sl_cooldown_left = _symbol_in_stop_loss_cooldown(
+                                    "IBKR", symbol, IBKR_STOP_LOSS_COOLDOWN_HOURS
+                                )
+                                if _sl_cooldown_left is not None:
+                                    reason = (
+                                        reason
+                                        + f" (IBKR emri atlandı: bu sembol yakın zamanda zarar-kes ile "
+                                        f"kapandı, tekrar açılmadan önce {_sl_cooldown_left:.1f} saat daha "
+                                        f"soğuma süresi var - üst üste zarar döngüsünü önlemek için.)"
+                                    ).strip()
+                                    qty = 0
+                                    ibkr_cash_qty_amount = None
+                            if (qty > 0 or ibkr_cash_qty_amount) and exchange.upper() == "LSE":
+                                # Kullanicinin talebi: son 1 haftalik analizde kayiplarin
+                                # buyuk cogunlugu LSE (Londra) hisselerinden (SHEL, HSBA,
+                                # RIO, ULVR) geldigi icin - LSE'de yeni ALIM icin normal
+                                # esigin uzerinde ekstra net teyit sarti getiriliyor (RISK_OFF
+                                # kapisindan bagimsiz, LSE'ye HER ZAMAN uygulanir).
+                                _lse_min_confirmations = _effective_min_confirmations + IBKR_LSE_EXTRA_CONFIRMATIONS
+                                if cum_confirm["net"] < _lse_min_confirmations:
+                                    reason = (
+                                        reason
+                                        + f" (IBKR emri atlandı: LSE hissesi - geçmişte tekrarlanan "
+                                        f"zararlar nedeniyle normalin üzerinde teyit gerekiyor (net "
+                                        f"{cum_confirm['net']}/{_lse_min_confirmations}).)"
+                                    ).strip()
+                                    qty = 0
+                                    ibkr_cash_qty_amount = None
                     if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
                         # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
                         # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
@@ -9601,7 +9696,7 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
     (IBKR_STOP_LOSS_PCT) esiklerini kontrol eder, esik asilirsa pozisyonu piyasa
     emriyle kapatir. Onceden IBKR icin HICBIR otomatik kar-al/zarar-kes mekanizmasi
     yoktu - pozisyonlar sinirsiz acik kalabiliyordu."""
-    if IBKR_TAKE_PROFIT_PCT <= 0 and IBKR_STOP_LOSS_PCT <= 0:
+    if IBKR_TAKE_PROFIT_PCT <= 0 and IBKR_STOP_LOSS_PCT <= 0 and IBKR_LSE_STOP_LOSS_PCT <= 0:
         return None
     if not bool(IBKR_RUNTIME.get("connected")):
         return None
@@ -9634,7 +9729,18 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         if ibkr_take_profit_pct > 0 and db_position_ever_scaled("IBKR", symbol_check):
             ibkr_take_profit_pct = min(ibkr_take_profit_pct, IBKR_SCALED_TAKE_PROFIT_PCT)
         hit_take_profit = ibkr_take_profit_pct > 0 and profit_pct >= ibkr_take_profit_pct
-        hit_stop_loss = IBKR_STOP_LOSS_PCT > 0 and profit_pct <= -IBKR_STOP_LOSS_PCT
+        # Kullanicinin talebi: son 1 haftalik analizde LSE (Londra) hisselerinde
+        # (SHEL, HSBA, RIO, ULVR) tekrarlanan buyuk zararlar goruldugu icin,
+        # genel IBKR_STOP_LOSS_PCT yerine LSE'de daha dar bir esik
+        # (IBKR_LSE_STOP_LOSS_PCT) kullanilir - kayiplar daha erken, daha kucuk
+        # buyuklukte durdurulur. Genel esik (kullanicinin talebiyle %20'de
+        # sabit) diger tum borsalar icin degismeden kalir.
+        position_exchange = str(position.get("exchange") or "SMART").upper()
+        effective_stop_loss_pct = (
+            IBKR_LSE_STOP_LOSS_PCT if position_exchange == "LSE" and IBKR_LSE_STOP_LOSS_PCT > 0
+            else IBKR_STOP_LOSS_PCT
+        )
+        hit_stop_loss = effective_stop_loss_pct > 0 and profit_pct <= -effective_stop_loss_pct
         if not hit_take_profit and not hit_stop_loss:
             continue
         symbol = str(position.get("symbol", "")).upper()
@@ -9674,7 +9780,7 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             result = {"simulated": False, "broker": "IBKR", "symbol": symbol, "error": str(e), "time": now_text()}
         result["trigger"] = trigger
         result["trigger_pct"] = round(profit_pct, 4)
-        result["target_pct"] = ibkr_take_profit_pct if hit_take_profit else -IBKR_STOP_LOSS_PCT
+        result["target_pct"] = ibkr_take_profit_pct if hit_take_profit else -effective_stop_loss_pct
         result["symbol"] = symbol
         result["pnl"] = safe_float(position.get("pnl"))
         # KRITIK DUZELTME (bkz. _is_order_actually_filled dokumani): sadece
