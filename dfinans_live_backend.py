@@ -587,6 +587,17 @@ IBKR_LSE_EXTRA_CONFIRMATIONS = int(os.getenv("IBKR_LSE_EXTRA_CONFIRMATIONS", "4"
 # zarar ediyoruz' dongusunu kirmak icin - zarar-kesten sonra sembol bu sure
 # boyunca 'soguma' (cooldown) durumunda kalir, yeni ALIM denemesi atlanir.
 IBKR_STOP_LOSS_COOLDOWN_HOURS = float(os.getenv("IBKR_STOP_LOSS_COOLDOWN_HOURS", "8"))
+# Kullanicinin talebi: HSBA ve SHEL'de (ikisi de LSE) cooldown/ekstra teyit/
+# dar zarar-kes onlemlerine RAGMEN tekrar tekrar (toplam 9 kez, 0 kazanc,
+# ~-$35) zarar-kes ile kapanmaya devam etti - buyuk cogunlugu muhtemelen
+# gece/seans-acilisi fiyat atlamasi (gap) kaynakli, periyodik tarama %6
+# esigine ulasmadan once fiyat zaten cok dusmus oluyordu. Bu iki sembol
+# artik otomatik ALIM icin tamamen HARIC tutuluyor (bkz. _auto_trader_run_symbol
+# BUY kapisi). Ortam degiskeniyle (virgulle ayrilmis) genisletilebilir/
+# degistirilebilir.
+IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
+    s.strip().upper() for s in os.getenv("IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,SHEL").split(",") if s.strip()
+)
 
 # Kullanicinin talebi: 'sadece ıbkr de hisselerde yüzde 2 kar arayalım diğer
 # varlıklarda yüzde 1 de kapatalım, altın ve petrolde de yüzde 1 olsun' -
@@ -8802,6 +8813,19 @@ def _auto_trader_run_symbol(
                             qty = 0
                             ibkr_cash_qty_amount = None
                         elif action == "BUY":
+                            # Kullanicinin talebi: HSBA/SHEL (ikisi de LSE) cooldown/
+                            # ekstra teyit/dar zarar-kes onlemlerine RAGMEN tekrar
+                            # tekrar (toplam 9 kez, 0 kazanc) zarar-kes ile kapandi -
+                            # bu semboller artik otomatik ALIM icin TAMAMEN haric
+                            # tutuluyor (bkz. IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS).
+                            if symbol.upper() in IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS:
+                                reason = (
+                                    reason
+                                    + f" (IBKR emri atlandı: {symbol} tekrarlanan zarar-kes geçmişi "
+                                    f"nedeniyle otomatik alım listesinden çıkarıldı.)"
+                                ).strip()
+                                qty = 0
+                                ibkr_cash_qty_amount = None
                             # KRITIK EK ONLEM: kullanicinin bildirdigi 'bugun acilan TUM IBKR
                             # pozisyonlari zararda, piyasayi okuyamiyoruz' sorunu incelenince
                             # gorulan asil kok neden - her bir gercek alim, sistemin KENDI
@@ -8813,19 +8837,20 @@ def _auto_trader_run_symbol(
                             # RISK-OFF sirasinda yeni alimi neredeyse tamamen durdurur, ama
                             # gercekten ezici coklukta (cok nadir) BUY teyidi varsa yine de
                             # gecebilir (tam kilit degil, ekstra guvenlik katmani).
-                            _macro_regime_gate = get_macro_regime()
-                            if not _macro_regime_gate.get("error") and _macro_regime_gate.get("regime") == "RISK_OFF":
-                                _risk_off_min_confirmations = _effective_min_confirmations + 6
-                                if cum_confirm["net"] < _risk_off_min_confirmations:
-                                    reason = (
-                                        reason
-                                        + f" (IBKR emri atlandı: Makro rejim RISK-OFF - yeni ALIM için "
-                                        f"normalin çok üzerinde teyit gerekiyor (net {cum_confirm['net']}/"
-                                        f"{_risk_off_min_confirmations}), piyasa geneli baskı altındayken "
-                                        f"riskli alım engellendi.)"
-                                    ).strip()
-                                    qty = 0
-                                    ibkr_cash_qty_amount = None
+                            if qty > 0 or ibkr_cash_qty_amount:
+                                _macro_regime_gate = get_macro_regime()
+                                if not _macro_regime_gate.get("error") and _macro_regime_gate.get("regime") == "RISK_OFF":
+                                    _risk_off_min_confirmations = _effective_min_confirmations + 6
+                                    if cum_confirm["net"] < _risk_off_min_confirmations:
+                                        reason = (
+                                            reason
+                                            + f" (IBKR emri atlandı: Makro rejim RISK-OFF - yeni ALIM için "
+                                            f"normalin çok üzerinde teyit gerekiyor (net {cum_confirm['net']}/"
+                                            f"{_risk_off_min_confirmations}), piyasa geneli baskı altındayken "
+                                            f"riskli alım engellendi.)"
+                                        ).strip()
+                                        qty = 0
+                                        ibkr_cash_qty_amount = None
                             if qty > 0 or ibkr_cash_qty_amount:
                                 # Kullanicinin talebi: son 1 haftalik analizde SHEL/HSBA'nin
                                 # zarar-kesten hemen sonra tekrar acilip yine zarar ettigi
