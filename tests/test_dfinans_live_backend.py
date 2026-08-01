@@ -517,3 +517,76 @@ def test_kelly_position_size_scale_isolated_per_broker(
     result = backend_module.get_kelly_position_size_scale("BTCUSDT", "BINANCE_FUTURES")
     assert result["trades"] == 0
     assert result["qty_scale"] == 1.0
+
+
+def test_orderbook_wall_signal_near_ask_wall_dampens_buy(backend_module, monkeypatch):
+    """Kullanicinin talebi: 'tavana emir yigma durumu'. Fiyata cok yakin
+    (near band icinde) buyuk bir satis duvari varsa, BUY confidence'i
+    kucultulmeli, SELL biraz desteklenmeli."""
+    depth = {
+        "bids": [["99.9", "1"], ["99.8", "1"], ["99.7", "1"], ["99.6", "1"], ["99.5", "1"]],
+        "asks": [["100.1", "1"], ["100.2", "1"], ["100.3", "50"], ["100.4", "1"], ["100.5", "1"]],
+    }
+    monkeypatch.setattr(backend_module, "public_get", lambda base, path, params=None: depth)
+    result = backend_module.get_orderbook_wall_signal("WALLTESTBUY", "FUTURES", "BINANCE_FUTURES", "BUY")
+    assert result["bias"] < 0
+    assert result["notes"]
+
+
+def test_orderbook_wall_signal_far_wall_is_informational_only(backend_module, monkeypatch):
+    """Uzak bir duvar (near..far bandi arasi, ör. fiyatin %10 altinda) hem
+    'destek' hem 'fiyat oraya cektirilebilir' seklinde iki zit yorumu da
+    mumkun kildigi icin, YALNIZCA bilgi notu eklenmeli - confidence'a
+    yonlu bir bias UYGULANMAMALI."""
+    depth = {
+        "bids": [["90.0", "80"], ["99.8", "1"], ["99.7", "1"], ["99.6", "1"], ["99.5", "1"]],
+        "asks": [["100.1", "1"], ["100.2", "1"], ["100.3", "1"], ["100.4", "1"], ["100.5", "1"]],
+    }
+    monkeypatch.setattr(backend_module, "public_get", lambda base, path, params=None: depth)
+    result = backend_module.get_orderbook_wall_signal("WALLTESTFAR", "FUTURES", "BINANCE_FUTURES", "BUY")
+    assert result["bias"] == 0
+    assert result["notes"]
+    assert "bilgi" in result["notes"][0]
+
+
+def test_orderbook_wall_signal_ibkr_fails_open(backend_module, monkeypatch):
+    """IBKR hisselerinde Level 2 emir defteri verisi yok - fail-open (bias=0,
+    notes bos) donmeli, public_get hic cagrilmamali."""
+    called = {"count": 0}
+
+    def _boom(*args, **kwargs):
+        called["count"] += 1
+        raise AssertionError("public_get IBKR icin cagrilmamali")
+
+    monkeypatch.setattr(backend_module, "public_get", _boom)
+    result = backend_module.get_orderbook_wall_signal("AAPL", "STK", "IBKR", "BUY")
+    assert result == {"bias": 0, "notes": []}
+    assert called["count"] == 0
+
+
+def test_large_trade_flow_bias_detects_buy_dominant_flow(backend_module, monkeypatch):
+    """Kullanicinin talebi: 'hacimli emirlerle fiyat kademesi cektirme'.
+    Son islemlerde buyuk (blok) alicilarin baskin oldugu tespit edilirse,
+    BUY'i destekleyen bir bias uygulanmali."""
+    small_trades = [{"p": "100.0", "q": "0.01", "m": i % 2 == 0} for i in range(30)]
+    large_buy_trades = [{"p": "100.0", "q": "5.0", "m": False} for _ in range(5)]
+    trades = small_trades + large_buy_trades
+    monkeypatch.setattr(backend_module, "public_get", lambda base, path, params=None: trades)
+    result = backend_module.get_large_trade_flow_bias("BLOCKTESTBUY", "BINANCE_FUTURES", "BUY")
+    assert result["bias"] > 0
+    assert result["notes"]
+
+
+def test_large_trade_flow_bias_ibkr_fails_open(backend_module, monkeypatch):
+    """IBKR icin (bu veri sadece kripto borsalarinda mevcut) fail-open
+    donmeli, public_get hic cagrilmamali."""
+    called = {"count": 0}
+
+    def _boom(*args, **kwargs):
+        called["count"] += 1
+        raise AssertionError("public_get IBKR icin cagrilmamali")
+
+    monkeypatch.setattr(backend_module, "public_get", _boom)
+    result = backend_module.get_large_trade_flow_bias("AAPL", "IBKR", "BUY")
+    assert result == {"bias": 0, "notes": []}
+    assert called["count"] == 0
