@@ -445,3 +445,75 @@ def test_compute_dynamic_take_profit_pct_widens_with_atr_and_leverage(
     )
     expected_atr_target = 1.0 * backend_module.ATR_TARGET_MULTIPLIER * 2.0
     assert result["take_profit_pct"] >= expected_atr_target
+
+
+def _seed_closures(backend_module, broker, symbol, pnl_pcts):
+    for pct in pnl_pcts:
+        backend_module.db_record_position_closure(
+            broker=broker,
+            symbol=symbol,
+            side="LONG",
+            qty=1.0,
+            entry_price=100.0,
+            exit_price=100.0 * (1.0 + pct / 100.0),
+            realized_pnl=pct,
+            realized_pnl_pct=pct,
+            close_reason="TAKE_PROFIT" if pct > 0 else "STOP_LOSS",
+            detail="test",
+        )
+
+
+def test_kelly_position_size_scale_fails_open_below_min_trades(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    """Kullanicinin talebi: 'pozisyon boyutlandirma yapalim' (Kelly-kriteri).
+    Yeterli gecmis islem (KELLY_MIN_TRADES) yoksa fail-open olmali - boyut
+    degismemeli (x1.0)."""
+    _seed_closures(backend_module, "BINANCE_FUTURES", "ADAUSDT", [2.0, -1.0])
+    result = backend_module.get_kelly_position_size_scale("ADAUSDT", "BINANCE_FUTURES")
+    assert result["qty_scale"] == 1.0
+
+
+def test_kelly_position_size_scale_shrinks_for_losing_symbol(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    """Kullanicinin talebi: surekli zarar eden bir sembolde (dusuk kazanma
+    orani, kucuk kazanc/buyuk kayip) pozisyon boyutu otomatik olarak
+    kuculmeli."""
+    _seed_closures(
+        backend_module,
+        "IBKR",
+        "HSBA",
+        [1.0, -8.0, 1.0, -9.0, -7.0, 1.0, -8.0],
+    )
+    result = backend_module.get_kelly_position_size_scale("HSBA", "IBKR")
+    assert result["qty_scale"] < 1.0
+    assert result["qty_scale"] >= backend_module.KELLY_MIN_SCALE
+
+
+def test_kelly_position_size_scale_grows_for_winning_symbol(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    """Kullanicinin talebi: surekli kazanan bir sembolde (yuksek kazanma
+    orani, buyuk kazanc/kucuk kayip) pozisyon boyutu otomatik olarak
+    buyumeli."""
+    _seed_closures(
+        backend_module,
+        "BINANCE_FUTURES",
+        "BTCUSDT",
+        [5.0, 4.0, 6.0, -1.0, 5.0, -1.0, 4.0],
+    )
+    result = backend_module.get_kelly_position_size_scale("BTCUSDT", "BINANCE_FUTURES")
+    assert result["qty_scale"] > 1.0
+    assert result["qty_scale"] <= backend_module.KELLY_MAX_SCALE
+
+
+def test_kelly_position_size_scale_isolated_per_broker(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    """Ayni sembolun farkli broker'lardaki (ör. IBKR vs BINANCE_FUTURES)
+    gecmisi birbirine karismamali."""
+    _seed_closures(backend_module, "IBKR", "BTCUSDT", [1.0, -8.0, 1.0, -9.0, -7.0, 1.0, -8.0])
+    result = backend_module.get_kelly_position_size_scale("BTCUSDT", "BINANCE_FUTURES")
+    assert result["trades"] == 0
+    assert result["qty_scale"] == 1.0

@@ -397,6 +397,12 @@ def _parse_symbol_list(raw: str) -> List[str]:
 
 
 AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
+# Kullanicinin talebi: 'günlük işlem sayıları artsın'. Eskiden sabit 5'te
+# kaliyordu (env ile ayarlanamiyordu) - genis sembol havuzu ve Kelly bazli
+# pozisyon boyutlandirma ile birlikte artik daha fazla gunluk emir hakkina
+# ihtiyac var, bu yuzden diger iki auto-trader gibi env ile ayarlanabilir
+# hale getirildi ve varsayilan 5 -> 12'ye cikarildi.
+AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_AUTO_MAX_DAILY_TRADES", "12"))
 
 # IBKR icin bagimsiz, Binance'tan tamamen ayri calisan ikinci bir auto-trader ornegi.
 # Eskiden tek bir global AUTO_TRADER/broker alani vardi ve varsayilan olarak "BINANCE"a
@@ -423,7 +429,7 @@ IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower()
 # eski varsayilan (5) tum semboller arasinda paylasilan gunluk emir hakkini
 # cok hizli tuketiyor, ozellikle kriptoyu (BTCUSD/ETHUSD) sıraya hic
 # giremeden disarida birakiyordu.
-IBKR_AUTO_TRADER.max_daily_trades = int(os.getenv("IBKR_AUTO_MAX_DAILY_TRADES", "15"))
+IBKR_AUTO_TRADER.max_daily_trades = int(os.getenv("IBKR_AUTO_MAX_DAILY_TRADES", "25"))
 IBKR_AUTO_LOCK = threading.Lock()
 IBKR_AUTO_HISTORY: List[Dict[str, Any]] = []
 
@@ -450,7 +456,7 @@ SPOT_AUTO_TRADER.symbol = "ETHUSDT"
 SPOT_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_SPOT_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
 SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "65"))
 SPOT_AUTO_TRADER.interval_sec = int(os.getenv("BINANCE_SPOT_AUTO_INTERVAL_SEC", "25"))
-SPOT_AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_SPOT_AUTO_MAX_DAILY_TRADES", "5"))
+SPOT_AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_SPOT_AUTO_MAX_DAILY_TRADES", "12"))
 SPOT_AUTO_TRADER.mode = AUTO_TRADER.mode
 SPOT_AUTO_TRADER.enabled = os.getenv("BINANCE_SPOT_AUTO_TRADER_ENABLED", "true").lower() == "true"
 SPOT_AUTO_LOCK = threading.Lock()
@@ -706,6 +712,23 @@ BINANCE_MIN_CONFIRMATIONS = int(os.getenv("BINANCE_MIN_CONFIRMATIONS", "4"))
 ATR_HIGH_VOL_THRESHOLD_PCT = float(os.getenv("ATR_HIGH_VOL_THRESHOLD_PCT", "6.0"))
 ATR_LOW_VOL_THRESHOLD_PCT = float(os.getenv("ATR_LOW_VOL_THRESHOLD_PCT", "1.5"))
 BINANCE_AI_SELL_MIN_LOSS_PCT = float(os.getenv("BINANCE_AI_SELL_MIN_LOSS_PCT", "10.0"))
+
+# Kullanicinin talebi: 'pozisyon boyutlandirma yapalim' (Kelly-kriteri tarzi).
+# Bir sembolun (broker bazinda) gecmis kapanmis islemlerinden (position_closures)
+# kazanma orani (W) ve ortalama kazanc/kayip oranini (R) kullanarak Kelly
+# formulunu (f* = W - (1-W)/R) uygular. Tam Kelly asiri agresif/oynak oldugu
+# icin KELLY_FRACTION ile (varsayilan yari-Kelly 0.5x) sonuc yumusatilir ve
+# nihai olcek KELLY_MIN_SCALE..KELLY_MAX_SCALE araliginda sinirlanir - boylece
+# surekli kazanan semboller biraz buyutulur, surekli kaybeden semboller
+# (ör. HSBA/SHEL gecmisi) otomatik olarak kuculur. Yetersiz gecmis (
+# KELLY_MIN_TRADES altinda) veya gecerli kayip/kazanc verisi yoksa fail-open
+# olarak qty_scale=1.0 (etkisiz) doner - bu katman da diger boyut
+# katmanlari gibi asla islemi tamamen engellemez.
+KELLY_MIN_TRADES = int(os.getenv("KELLY_MIN_TRADES", "6"))
+KELLY_FRACTION = float(os.getenv("KELLY_FRACTION", "0.5"))
+KELLY_MIN_SCALE = float(os.getenv("KELLY_MIN_SCALE", "0.5"))
+KELLY_MAX_SCALE = float(os.getenv("KELLY_MAX_SCALE", "1.5"))
+KELLY_LOOKBACK_DAYS = int(os.getenv("KELLY_LOOKBACK_DAYS", "60"))
 
 # Kullanicinin talebi: 'acigа satis islemi yapamiyor mu sistem, açığa satış
 # yapılabilecek hisselerde açığa satış denenebilir'. Onceden bu hesap SADECE
@@ -5343,6 +5366,64 @@ def get_atr_position_size_scale(symbol: str, market: str, broker: str) -> Dict[s
         return {"qty_scale": 1.0, "atr_pct": None, "notes": []}
 
 
+def get_kelly_position_size_scale(symbol: str, broker: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'pozisyon boyutlandirma yapalim'. Bu sembolun bu
+    broker'daki gecmis kapanmis islemlerinden (position_closures, son
+    KELLY_LOOKBACK_DAYS gun) kazanma orani (W) ve ortalama kazanc/kayip
+    oranini (R = ort. kazanc% / ort. kayip%) cikarip Kelly formulunu
+    (f* = W - (1-W)/R) uygular. f* > 0 -> bu sembolde gecmiste pozitif bir
+    edge var -> boyut buyutulur. f* < 0 -> gecmiste bu sembolde kaybedilmis
+    -> boyut kuculur (ör. surekli zarar eden bir sembol otomatik olarak daha
+    kucuk acilir, tamamen durdurulmaz - hariç tutma listesi ayri bir mekanizma).
+    Asiri agresif/oynak olan tam Kelly yerine KELLY_FRACTION ile yumusatilir
+    (varsayilan yari-Kelly) ve sonuc KELLY_MIN_SCALE..KELLY_MAX_SCALE ile
+    sinirlanir. Yetersiz gecmis (KELLY_MIN_TRADES altinda) veya kayip/kazanc
+    verisi eksikse fail-open olarak qty_scale=1.0 doner."""
+    try:
+        rows = db_all_position_closures(days=KELLY_LOOKBACK_DAYS, broker=broker, include_mandatory_holdings=False)
+        symbol_rows = [r for r in rows if str(r.get("symbol", "")).upper() == symbol.upper()]
+        total_trades = len(symbol_rows)
+        if total_trades < KELLY_MIN_TRADES:
+            return {"qty_scale": 1.0, "trades": total_trades, "notes": []}
+
+        win_pcts = [safe_float(r.get("realized_pnl_pct")) for r in symbol_rows if safe_float(r.get("realized_pnl_pct")) > 0]
+        loss_pcts = [abs(safe_float(r.get("realized_pnl_pct"))) for r in symbol_rows if safe_float(r.get("realized_pnl_pct")) <= 0]
+        win_rate = len(win_pcts) / total_trades
+        avg_win = (sum(win_pcts) / len(win_pcts)) if win_pcts else 0.0
+        avg_loss = (sum(loss_pcts) / len(loss_pcts)) if loss_pcts else 0.0
+        if avg_win <= 0 or avg_loss <= 0:
+            # Ya hic kazanc yok ya da hic kayip yok (ör. hepsi kazanc) - Kelly
+            # oranı (R = ort. kazanc/ort. kayip) tanimsiz/anlamsiz olur, guvenli
+            # taraftan fail-open.
+            return {"qty_scale": 1.0, "trades": total_trades, "win_rate": round(win_rate, 3), "notes": []}
+
+        reward_risk_ratio = avg_win / avg_loss
+        kelly_f = win_rate - ((1.0 - win_rate) / reward_risk_ratio)
+        damped_f = kelly_f * KELLY_FRACTION
+        qty_scale = max(KELLY_MIN_SCALE, min(KELLY_MAX_SCALE, 1.0 + damped_f))
+
+        notes = []
+        if qty_scale < 0.95:
+            notes.append(
+                f"[Kelly] {symbol} ({broker}) son {total_trades} işlemde kazanma oranı %{win_rate * 100:.0f}, "
+                f"ort. kazanç/kayıp oranı {reward_risk_ratio:.2f} - geçmiş performans zayıf, pozisyon boyutu küçültüldü (x{qty_scale:.2f})."
+            )
+        elif qty_scale > 1.05:
+            notes.append(
+                f"[Kelly] {symbol} ({broker}) son {total_trades} işlemde kazanma oranı %{win_rate * 100:.0f}, "
+                f"ort. kazanç/kayıp oranı {reward_risk_ratio:.2f} - geçmiş performans güçlü, pozisyon boyutu büyütüldü (x{qty_scale:.2f})."
+            )
+        return {
+            "qty_scale": round(qty_scale, 3),
+            "trades": total_trades,
+            "win_rate": round(win_rate, 3),
+            "reward_risk_ratio": round(reward_risk_ratio, 3),
+            "notes": notes,
+        }
+    except Exception:
+        return {"qty_scale": 1.0, "trades": 0, "notes": []}
+
+
 def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str) -> Dict[str, Any]:
     """RSI(14) asiri-alim/satim + SMA20/SMA50 trend hizalanmasini birlestirip
     BUY/SELL confidence'ina bias uretir. Hem kripto hem IBKR (hisse) icin gecerlidir
@@ -8125,6 +8206,7 @@ def _auto_trader_run_symbol(
     market_cycle_qty_scale = 1.0
     atr_qty_scale = 1.0
     portfolio_risk_qty_scale = 1.0
+    kelly_qty_scale = 1.0
 
     if broker == "IBKR":
         # Cok-borsali havuz destegi: her sembolun kendi borsa/para birimi vardir
@@ -8439,6 +8521,16 @@ def _auto_trader_run_symbol(
             reason = (reason + " " + " ".join(portfolio_risk["notes"])).strip()
         portfolio_risk_qty_scale = portfolio_risk.get("qty_scale", 1.0)
 
+        # Kullanicinin talebi: 'pozisyon boyutlandirma yapalim' (Kelly-kriteri).
+        # Bu sembolun bu broker'daki gecmis islem performansina (kazanma orani +
+        # ort. kazanc/kayip orani) gore boyut kucultulur/buyutulur - surekli
+        # kaybeden semboller (ör. HSBA/SHEL) otomatik olarak daha kucuk acilir,
+        # surekli kazananlar biraz buyutulur. Yetersiz gecmiste etkisiz (x1.0).
+        kelly_scale_info = get_kelly_position_size_scale(symbol, broker)
+        if kelly_scale_info.get("notes"):
+            reason = (reason + " " + " ".join(kelly_scale_info["notes"])).strip()
+        kelly_qty_scale = kelly_scale_info.get("qty_scale", 1.0)
+
         # Kullanicinin talebi: 'sektör rotasyonu ekle' - ayni sektordeki lider
         # varlik belirgin hareket ettiyse ama bu sembol henuz takip etmediyse
         # destekleyici bias uygulanir (bkz. get_sector_rotation_bias).
@@ -8595,7 +8687,7 @@ def _auto_trader_run_symbol(
                     elif price > 0:
                         available_usdt = get_spot_available_usdt()
                         if available_usdt > 0:
-                            pct = spot_auto_trader_size_pct(symbol) * market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale
+                            pct = spot_auto_trader_size_pct(symbol) * market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale * kelly_qty_scale
                             min_pos_usd = effective_min_position_usd(symbol, "SPOT")
                             sized_qty = round((available_usdt * pct) / price, 6)
                             if sized_qty * price < min_pos_usd:
@@ -9238,7 +9330,7 @@ def _auto_trader_run_symbol(
                 if price > 0:
                     available_usdt = get_futures_available_usdt()
                     if available_usdt > 0:
-                        pct = asset_size_pct(symbol) * market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale
+                        pct = asset_size_pct(symbol) * market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale * kelly_qty_scale
                         sized_qty = round((available_usdt * pct * leverage) / price, 3)
                         if sized_qty > 0:
                             reason = (
