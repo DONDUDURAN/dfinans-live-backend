@@ -617,6 +617,29 @@ IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
     if s.strip()
 )
 
+# Kullanicinin talebi: 'genel olarak uygulamanin daha karli calismasi icin
+# eklenebilecek bir sey var mi, buyuk fon/yatirimci/karli sistemlerde ne
+# var bizde eksik'. 30 gunluk portfoy analizinde ort. kazanc %1.86 iken ort.
+# kayip %9.79 idi - yapisal olarak kazanc/kayip orani TERS (kayiplar
+# kazanclardan kat kat buyuk). Profesyonel sistemler ASLA bir islemi minimum
+# Odul:Risk orani saglanmadan (genelde >=1:1.5) almaz - MIN_REWARD_RISK_RATIO
+# bunu yapisal olarak garanti eder: kullanilan zarar-kes esigi ne olursa olsun
+# (LSE/grandfather/scaled dahil), kar hedefi bu oranin ALTINA asla dusurulmez
+# (bkz. compute_dynamic_take_profit_pct).
+MIN_REWARD_RISK_RATIO = float(os.getenv("MIN_REWARD_RISK_RATIO", "1.5"))
+# ATR-bazli dinamik kar hedefi carpani: sabit yuzde yerine, o an ki
+# volatiliteye (ATR% - bkz. get_technical_indicator_snapshot) gore hedef
+# ATR_TARGET_MULTIPLIER kati kadar buyutulur (asla kucultulmez, sadece
+# volatil donemlerde daha gerceci/buyuk bir hedefe izin verir).
+ATR_TARGET_MULTIPLIER = float(os.getenv("ATR_TARGET_MULTIPLIER", "3.0"))
+# Trailing stop (kazananlari uzatma): sabit kar hedefine ulasildiginda ARTIK
+# HEMEN KAPATILMAZ, zirve kar izlenmeye baslanir (armed) ve sadece zirveden
+# TRAILING_GIVEBACK_PCT puan kadar geri cekilme olunca kapatilir - boylece
+# guclu trendlerde kazanc sabit hedefin cok otesine buyuyebilir (bkz.
+# resolve_trailing_take_profit).
+TRAILING_STOP_ENABLED = os.getenv("TRAILING_STOP_ENABLED", "1") != "0"
+TRAILING_GIVEBACK_PCT = float(os.getenv("TRAILING_GIVEBACK_PCT", "1.2"))
+
 # Kullanicinin talebi: 'sadece ıbkr de hisselerde yüzde 2 kar arayalım diğer
 # varlıklarda yüzde 1 de kapatalım, altın ve petrolde de yüzde 1 olsun' -
 # hisseler (STK) IBKR_TAKE_PROFIT_PCT (%2) ile kalir, forex/futures (MGC/MCL
@@ -897,6 +920,18 @@ def init_runtime_db() -> None:
                 CREATE TABLE IF NOT EXISTS ibkr_lse_stop_loss_grandfather (
                     symbol TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS position_trailing_stop (
+                    broker TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    peak_profit_pct REAL NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (broker, symbol)
                 )
                 """
             )
@@ -1742,6 +1777,14 @@ def db_record_position_closure(
         except Exception:
             pass
 
+    # Trailing-stop zirve takibini de temizle - pozisyon tamamen kapandi,
+    # sembol yeniden acilirsa (yeni giris fiyatiyla) sifirdan bir 'dongu'
+    # olarak izlenmeli (bkz. resolve_trailing_take_profit).
+    try:
+        db_clear_trailing_peak(broker, symbol)
+    except Exception:
+        pass
+
     send_position_closure_email(
         broker=broker,
         symbol=symbol,
@@ -1919,6 +1962,153 @@ def db_clear_lse_grandfather(symbol: str) -> None:
                 conn.close()
     except Exception:
         pass
+
+
+def db_get_trailing_peak(broker: str, symbol: str) -> Optional[Dict[str, float]]:
+    """Acik bir pozisyonun bugune kadar ulastigi EN YUKSEK (zirve) kar yuzdesini
+    dondurur - trailing-stop (kazananlari uzatma) mekanizmasi icin kullanilir.
+    Kayit yoksa (henuz izlenmemis/ilk kez goruluyor) None doner."""
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                row = conn.execute(
+                    "SELECT entry_price, peak_profit_pct FROM position_trailing_stop WHERE broker = ? AND symbol = ?",
+                    (str(broker).upper(), str(symbol).upper()),
+                ).fetchone()
+            finally:
+                conn.close()
+        if row is None:
+            return None
+        return {"entry_price": float(row[0]), "peak_profit_pct": float(row[1])}
+    except Exception:
+        return None
+
+
+def db_upsert_trailing_peak(broker: str, symbol: str, entry_price: float, peak_profit_pct: float) -> None:
+    """Zirve kar yuzdesini (ve pozisyonun giris fiyatini - yeni bir pozisyon
+    dongusunu ayirt etmek icin) kalici olarak gunceller/olusturur."""
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO position_trailing_stop (broker, symbol, entry_price, peak_profit_pct, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (broker, symbol) DO UPDATE SET
+                        entry_price = excluded.entry_price,
+                        peak_profit_pct = excluded.peak_profit_pct,
+                        updated_at = excluded.updated_at
+                    """,
+                    (str(broker).upper(), str(symbol).upper(), float(entry_price), float(peak_profit_pct), now_text()),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+def db_clear_trailing_peak(broker: str, symbol: str) -> None:
+    """Pozisyon kapandiginda (kar-al/zarar-kes/manuel) zirve-takip kaydini
+    temizler - sembol yeniden acilirsa 'yeni pozisyon dongusu' olarak sifirdan
+    izlenir, eski zirveden miras kalmis yanlis bir trailing durumu olusmaz."""
+    try:
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                conn.execute(
+                    "DELETE FROM position_trailing_stop WHERE broker = ? AND symbol = ?",
+                    (str(broker).upper(), str(symbol).upper()),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+
+def resolve_trailing_take_profit(
+    broker: str, symbol: str, entry_price: float, profit_pct: float, take_profit_pct: float,
+) -> bool:
+    """Kullanicinin talebi: 'kazananlari kucuk bir hedefte hemen kapatmak
+    yerine trendin sonuna kadar tasi (trailing stop)'. Sabit hedefe (ör. %2)
+    ulasildiginda ARTIK HEMEN KAPATMAZ - 'kar tetiklendi' olarak isaretleyip
+    zirve kari izlemeye baslar (arms). Zirveden TRAILING_GIVEBACK_PCT kadar
+    geri cekilme olana kadar pozisyon ACIK KALIR, boylece guclu bir trend
+    devam ederse kazanc sabit hedefin cok otesine buyuyebilir. Hicbir zaman
+    zirveye ulasilmadiysa (TRAILING_STOP_ENABLED kapaliysa veya hedef hic
+    tutmadiysa) eski davranisa (dogrudan esik karsilastirmasi) esdeger sonuc
+    verir."""
+    if take_profit_pct <= 0:
+        return False
+    if not TRAILING_STOP_ENABLED:
+        return profit_pct >= take_profit_pct
+
+    existing = db_get_trailing_peak(broker, symbol)
+    if existing is None or abs(existing["entry_price"] - entry_price) > 1e-9:
+        # Ya hic izlenmemis ya da giris fiyati degismis (pozisyon kapanip
+        # tekrar acilmis) - yeni bir 'dongu' olarak zirveyi sifirdan baslat.
+        peak_profit_pct = profit_pct
+        db_upsert_trailing_peak(broker, symbol, entry_price, peak_profit_pct)
+    else:
+        peak_profit_pct = max(existing["peak_profit_pct"], profit_pct)
+        if peak_profit_pct > existing["peak_profit_pct"]:
+            db_upsert_trailing_peak(broker, symbol, entry_price, peak_profit_pct)
+
+    if peak_profit_pct < take_profit_pct:
+        # Zirve henuz sabit hedefe ulasmadi - trailing HENUZ ARMED degil,
+        # normal esik karsilastirmasiyla ayni davranir (erken kapanma yok).
+        return False
+    # Trailing armed: sadece zirveden belirgin bir geri cekilme olduysa kapat.
+    return profit_pct <= (peak_profit_pct - TRAILING_GIVEBACK_PCT)
+
+
+def compute_dynamic_take_profit_pct(
+    symbol: str, market: str, broker: str, base_take_profit_pct: float, effective_stop_loss_pct: float,
+    leverage_multiplier: float = 1.0,
+) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'genel olarak daha karli calismasi icin ne
+    eklenebilir' - buyuk fonlarin/karli sistemlerin ortak ozelligi olan IKI
+    seyi birlestirir:
+      1) ATR-bazli dinamik hedef: sabit yuzde yerine, o an ki volatiliteye
+         (ATR%) gore hedef buyutulur - sakin bir varlikta %2 anlamli olabilir
+         ama volatil bir varlikta cok erken/kucuk bir kazanc demektir.
+         leverage_multiplier (Binance Futures icin >1) - profit_pct zaten
+         kaldiracli (leveraged) ROI oldugu icin, ATR%'nin fiyat-bazli
+         (kaldiracsiz) degerini ayni olcege getirmek icin kullanilir.
+      2) Minimum Odul:Risk orani (MIN_REWARD_RISK_RATIO, varsayilan 1.5):
+         kullanilan zarar-kes esigi ne olursa olsun (LSE/grandfather/scaled
+         dahil), kar hedefi ASLA bundan (oranla) kucuk olamaz - analiz
+         gosterdi ki (bkz. 30 gunluk portfoy taramasi) ort. kazanc %1.86 iken
+         ort. kayip %9.79 idi; bu yapisal dengesizligi yapisal olarak duzeltir.
+    Sonuc, orijinal sabit hedeften KUCUK olamaz (sadece buyutur, asla kisaltmaz
+    - boylece zaten iyi calisan dar hedefler bozulmaz)."""
+    notes: List[str] = []
+    target = base_take_profit_pct
+    try:
+        tech = get_technical_indicator_snapshot(symbol, market, broker)
+        atr_pct = tech.get("atr_pct") if not tech.get("error") else None
+        if atr_pct:
+            atr_target = atr_pct * ATR_TARGET_MULTIPLIER * max(1.0, leverage_multiplier)
+            if atr_target > target:
+                notes.append(
+                    f"ATR-bazlı dinamik hedef: volatilite (ATR%{atr_pct:.2f}) nedeniyle kâr hedefi "
+                    f"%{target:.2f} -> %{atr_target:.2f} olarak büyütüldü."
+                )
+                target = atr_target
+    except Exception:
+        pass
+    if effective_stop_loss_pct > 0 and MIN_REWARD_RISK_RATIO > 0:
+        min_target = effective_stop_loss_pct * MIN_REWARD_RISK_RATIO
+        if min_target > target:
+            notes.append(
+                f"Min. Ödül:Risk oranı ({MIN_REWARD_RISK_RATIO:.1f}x): kâr hedefi zarar-kes eşiğine "
+                f"(%{effective_stop_loss_pct:.2f}) göre %{target:.2f} -> %{min_target:.2f} olarak büyütüldü."
+            )
+            target = min_target
+    return {"take_profit_pct": target, "notes": notes}
 
 
 def seed_lse_stop_loss_grandfather_once() -> None:
@@ -9791,8 +9981,25 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
             )
             if take_profit_pct > 0 and db_position_ever_scaled("BINANCE_FUTURES", symbol):
                 take_profit_pct = min(take_profit_pct, BINANCE_SCALED_TAKE_PROFIT_PCT)
+            # Kullanicinin talebi: 'genel olarak daha karli calismasi icin ne
+            # eklenebilir' - ATR-bazli dinamik hedef + minimum Odul:Risk orani
+            # (bkz. compute_dynamic_take_profit_pct). profit_pct kaldiracli
+            # (leveraged) ROI oldugu icin ATR%'nin fiyat-bazli degeri kaldirac
+            # ile olceklenir.
+            leverage_mult = max(1.0, safe_float(position.get("leverage"), 1.0))
+            dynamic_tp = compute_dynamic_take_profit_pct(
+                symbol, "FUTURES", "BINANCE_FUTURES", take_profit_pct, stop_loss_pct, leverage_mult,
+            )
+            take_profit_pct = dynamic_tp["take_profit_pct"]
             profit_pct = binance_position_profit_pct(position)
-            hit_take_profit = take_profit_pct > 0 and profit_pct >= take_profit_pct
+            # Kullanicinin talebi: 'trailing stop ekle, kazananlari uzatalim'.
+            # Sabit hedefe ulasildiginda ARTIK HEMEN KAPATMAZ - zirveden
+            # TRAILING_GIVEBACK_PCT kadar geri cekilme olana kadar acik kalir
+            # (bkz. resolve_trailing_take_profit).
+            entry_price_for_trail = safe_float(position.get("entry_price"))
+            hit_take_profit = resolve_trailing_take_profit(
+                "BINANCE_FUTURES", symbol, entry_price_for_trail, profit_pct, take_profit_pct,
+            )
             hit_stop_loss = stop_loss_pct > 0 and profit_pct <= -stop_loss_pct
             if not hit_take_profit and not hit_stop_loss:
                 continue
@@ -9919,7 +10126,6 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         )
         if ibkr_take_profit_pct > 0 and db_position_ever_scaled("IBKR", symbol_check):
             ibkr_take_profit_pct = min(ibkr_take_profit_pct, IBKR_SCALED_TAKE_PROFIT_PCT)
-        hit_take_profit = ibkr_take_profit_pct > 0 and profit_pct >= ibkr_take_profit_pct
         # Kullanicinin talebi: son 1 haftalik analizde LSE (Londra) hisselerinde
         # (SHEL, HSBA, RIO, ULVR) tekrarlanan buyuk zararlar goruldugu icin,
         # genel IBKR_STOP_LOSS_PCT yerine LSE'de daha dar bir esik
@@ -9946,6 +10152,21 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             IBKR_LSE_STOP_LOSS_PCT
             if position_exchange in IBKR_NON_US_EXCHANGES and IBKR_LSE_STOP_LOSS_PCT > 0 and not _is_lse_grandfathered
             else IBKR_STOP_LOSS_PCT
+        )
+        # Kullanicinin talebi: 'genel olarak daha karli calismasi icin ne
+        # eklenebilir' - ATR-bazli dinamik hedef + minimum Odul:Risk orani
+        # (bkz. compute_dynamic_take_profit_pct).
+        dynamic_tp = compute_dynamic_take_profit_pct(
+            symbol_check, position_asset_type, "IBKR", ibkr_take_profit_pct, effective_stop_loss_pct,
+        )
+        ibkr_take_profit_pct = dynamic_tp["take_profit_pct"]
+        # Kullanicinin talebi: 'trailing stop ekle, kazananlari uzatalim'.
+        # Sabit hedefe ulasildiginda ARTIK HEMEN KAPATMAZ - zirveden
+        # TRAILING_GIVEBACK_PCT kadar geri cekilme olana kadar acik kalir
+        # (bkz. resolve_trailing_take_profit).
+        entry_price_for_trail = safe_float(position.get("avgCost") or position.get("entry_price"))
+        hit_take_profit = resolve_trailing_take_profit(
+            "IBKR", symbol_check, entry_price_for_trail, profit_pct, ibkr_take_profit_pct,
         )
         hit_stop_loss = effective_stop_loss_pct > 0 and profit_pct <= -effective_stop_loss_pct
         if not hit_take_profit and not hit_stop_loss:
@@ -10661,7 +10882,17 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         spot_take_profit_pct = BINANCE_TAKE_PROFIT_PCT
         if spot_take_profit_pct > 0 and db_position_ever_scaled("BINANCE_SPOT", symbol):
             spot_take_profit_pct = min(spot_take_profit_pct, BINANCE_SCALED_TAKE_PROFIT_PCT)
-        hit_take_profit = spot_take_profit_pct > 0 and profit_pct >= spot_take_profit_pct
+        # Kullanicinin talebi: 'genel olarak daha karli calismasi icin ne
+        # eklenebilir' - ATR-bazli dinamik hedef + minimum Odul:Risk orani.
+        dynamic_tp = compute_dynamic_take_profit_pct(
+            symbol, "SPOT", "BINANCE_SPOT", spot_take_profit_pct, BINANCE_STOP_LOSS_PCT,
+        )
+        spot_take_profit_pct = dynamic_tp["take_profit_pct"]
+        # Kullanicinin talebi: 'trailing stop ekle, kazananlari uzatalim'.
+        entry_price_for_trail = safe_float(pos.get("avg_cost"))
+        hit_take_profit = resolve_trailing_take_profit(
+            "BINANCE_SPOT", symbol, entry_price_for_trail, profit_pct, spot_take_profit_pct,
+        )
         hit_stop_loss = BINANCE_STOP_LOSS_PCT > 0 and profit_pct <= -BINANCE_STOP_LOSS_PCT
         if not hit_take_profit and not hit_stop_loss:
             continue
