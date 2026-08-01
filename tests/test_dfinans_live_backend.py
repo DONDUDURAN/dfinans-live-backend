@@ -286,3 +286,75 @@ def test_lse_grandfather_cleared_on_full_position_closure(
     )
 
     assert backend_module.db_is_lse_symbol_grandfathered("HSBA") is False
+
+
+def test_technical_signal_bias_hard_blocks_sell_on_confirmed_reversal_up(
+    backend_module, monkeypatch
+):
+    """Kullanicinin talebi: 'BTC dustu, artik donus yapacak yukari dogru
+    SHORT acmisiz' - RSI asiri satimda (<=25) VE MACD histogram zaten
+    pozitife donmusse, trend-yonundeki (chasing) SELL sert engellenmeli."""
+    monkeypatch.setattr(
+        backend_module,
+        "get_technical_indicator_snapshot",
+        lambda symbol, market, broker: {
+            "rsi_14": 18.0,
+            "macd_histogram": 41.3,
+            "sma_20": None,
+            "sma_50": None,
+            "last_close": None,
+            "volume_ratio": None,
+        },
+    )
+
+    result = backend_module.get_technical_signal_bias("BTCUSDT", "Futures", "BINANCE_FUTURES", "SELL")
+
+    assert result["hard_block"] is True
+    assert any("SERT ENGEL" in note for note in result["notes"])
+
+
+def test_technical_signal_bias_hard_blocks_buy_on_confirmed_reversal_down(
+    backend_module, monkeypatch
+):
+    monkeypatch.setattr(
+        backend_module,
+        "get_technical_indicator_snapshot",
+        lambda symbol, market, broker: {
+            "rsi_14": 82.0,
+            "macd_histogram": -12.5,
+            "sma_20": None,
+            "sma_50": None,
+            "last_close": None,
+            "volume_ratio": None,
+        },
+    )
+
+    result = backend_module.get_technical_signal_bias("BTCUSDT", "Futures", "BINANCE_FUTURES", "BUY")
+
+    assert result["hard_block"] is True
+    assert any("SERT ENGEL" in note for note in result["notes"])
+
+
+def test_technical_signal_bias_no_hard_block_when_macd_not_yet_reversed(
+    backend_module, monkeypatch
+):
+    """RSI asiri uc bolgede olsa bile MACD histogram HENUZ ters yone
+    donmemisse (donus teyitli degil), sadece yumusak bias uygulanir - sert
+    engel devreye girmez."""
+    monkeypatch.setattr(
+        backend_module,
+        "get_technical_indicator_snapshot",
+        lambda symbol, market, broker: {
+            "rsi_14": 18.0,
+            "macd_histogram": -5.0,
+            "sma_20": None,
+            "sma_50": None,
+            "last_close": None,
+            "volume_ratio": None,
+        },
+    )
+
+    result = backend_module.get_technical_signal_bias("BTCUSDT", "Futures", "BINANCE_FUTURES", "SELL")
+
+    assert result["hard_block"] is False
+    assert result["bias"] < 0
