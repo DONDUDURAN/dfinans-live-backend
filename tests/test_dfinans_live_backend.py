@@ -358,3 +358,90 @@ def test_technical_signal_bias_no_hard_block_when_macd_not_yet_reversed(
 
     assert result["hard_block"] is False
     assert result["bias"] < 0
+
+
+def test_resolve_trailing_take_profit_not_armed_below_target(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    """Kar hedefine henuz ulasilmadiysa (peak < take_profit_pct), trailing
+    ARMED degildir - islem kapanmamali."""
+    hit = backend_module.resolve_trailing_take_profit("BINANCE_FUTURES", "BTCUSDT", 60000.0, 1.0, 2.0)
+    assert hit is False
+
+
+def test_resolve_trailing_take_profit_arms_and_lets_winner_run(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    """Kullanicinin talebi: 'trailing stop ekle, kazananlari uzatalim'. Fiyat
+    sabit hedefi (%2) gectiginde HEMEN KAPANMAMALI - zirve %5'e kadar
+    yukselirse (armed), sadece zirveden belirgin bir geri cekilme
+    (TRAILING_GIVEBACK_PCT) olunca kapanmali."""
+    # Zirveye dogru tirmanma: hicbiri kapanmamali (hala zirvenin en yuksek noktasi).
+    assert backend_module.resolve_trailing_take_profit("BINANCE_FUTURES", "BTCUSDT", 60000.0, 2.5, 2.0) is False
+    assert backend_module.resolve_trailing_take_profit("BINANCE_FUTURES", "BTCUSDT", 60000.0, 5.0, 2.0) is False
+    # Zirve %5 iken, kar %5 - giveback (1.2) = %3.8'in USTUNDE kaldigi surece kapanmamali.
+    assert backend_module.resolve_trailing_take_profit("BINANCE_FUTURES", "BTCUSDT", 60000.0, 4.0, 2.0) is False
+    # Zirveden giveback kadar geri cekilince (>=%1.2 dusus) artik kapanmali.
+    assert backend_module.resolve_trailing_take_profit("BINANCE_FUTURES", "BTCUSDT", 60000.0, 3.5, 2.0) is True
+
+
+def test_resolve_trailing_take_profit_resets_on_new_entry_price(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    """Pozisyon kapanip ayni sembolde YENI bir giris fiyatiyla acildiginda,
+    eski zirveden miras kalmamali - sifirdan bir dongu olarak izlenmeli."""
+    backend_module.resolve_trailing_take_profit("BINANCE_FUTURES", "ETHUSDT", 2000.0, 5.0, 2.0)
+    # Ayni giris fiyatiyla devam - hala armed, giveback esigi ayni.
+    assert backend_module.resolve_trailing_take_profit("BINANCE_FUTURES", "ETHUSDT", 2000.0, 4.5, 2.0) is False
+
+    # Yeni pozisyon dongusu (farkli giris fiyati) - zirve sifirlanmali, %1
+    # kar hemen kapanmaya yol acmamali (henuz hedefe bile ulasmadi).
+    hit = backend_module.resolve_trailing_take_profit("BINANCE_FUTURES", "ETHUSDT", 2100.0, 1.0, 2.0)
+    assert hit is False
+
+
+def test_compute_dynamic_take_profit_pct_never_shrinks_base_target(
+    backend_module, monkeypatch
+):
+    """ATR/Odul-Risk hesaplamalari hicbir zaman orijinal sabit hedeften
+    KUCUK bir sonuc uretmemeli - sadece buyutur."""
+    monkeypatch.setattr(
+        backend_module,
+        "get_technical_indicator_snapshot",
+        lambda symbol, market, broker: {"atr_pct": 0.1},
+    )
+    result = backend_module.compute_dynamic_take_profit_pct("AAPL", "STK", "IBKR", 2.0, 4.0)
+    assert result["take_profit_pct"] >= 2.0
+
+
+def test_compute_dynamic_take_profit_pct_enforces_minimum_reward_risk_ratio(
+    backend_module, monkeypatch
+):
+    """Kullanicinin talebi: 30 gunluk analizde ort. kazanc %1.86 iken ort.
+    kayip %9.79 idi - kar hedefi artik kullanilan zarar-kes esiginin
+    MIN_REWARD_RISK_RATIO kati kadarindan asla kucuk olamaz."""
+    monkeypatch.setattr(
+        backend_module,
+        "get_technical_indicator_snapshot",
+        lambda symbol, market, broker: {"atr_pct": None},
+    )
+    # base_take_profit_pct=2.0 ama stop_loss_pct=20.0 -> min hedef 20*1.5=30.0 olmali.
+    result = backend_module.compute_dynamic_take_profit_pct("HSBA", "STK", "IBKR", 2.0, 20.0)
+    assert result["take_profit_pct"] == pytest.approx(20.0 * backend_module.MIN_REWARD_RISK_RATIO)
+
+
+def test_compute_dynamic_take_profit_pct_widens_with_atr_and_leverage(
+    backend_module, monkeypatch
+):
+    """Volatilite (ATR%) yuksekse ve kaldirac varsa, hedef bunlara gore
+    olceklenerek buyutulmeli."""
+    monkeypatch.setattr(
+        backend_module,
+        "get_technical_indicator_snapshot",
+        lambda symbol, market, broker: {"atr_pct": 1.0},
+    )
+    result = backend_module.compute_dynamic_take_profit_pct(
+        "BTCUSDT", "FUTURES", "BINANCE_FUTURES", 2.0, 6.0, leverage_multiplier=2.0,
+    )
+    expected_atr_target = 1.0 * backend_module.ATR_TARGET_MULTIPLIER * 2.0
+    assert result["take_profit_pct"] >= expected_atr_target
