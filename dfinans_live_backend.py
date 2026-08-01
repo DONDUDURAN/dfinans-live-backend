@@ -8453,6 +8453,22 @@ def _auto_trader_run_symbol(
         if ext["notes"]:
             reason = (reason + " " + " ".join(ext["notes"])).strip()
 
+        # Kullanicinin talebi: 'fiyatin nereye gidecegine dair tahmin - tavana
+        # emir yigma, hacimli emirlerle fiyat kademesi cektirme'. Sadece Binance
+        # kripto icin (public depth/aggTrades verisi) - IBKR hisselerinde Level 2
+        # verisi olmadigi icin fail-open doner (bkz. fonksiyon dokumanlari).
+        orderbook_wall = get_orderbook_wall_signal(symbol, market, broker, action)
+        if orderbook_wall["bias"] != 0:
+            confidence = max(0, min(95, confidence + orderbook_wall["bias"]))
+        if orderbook_wall["notes"]:
+            reason = (reason + " " + " ".join(orderbook_wall["notes"])).strip()
+
+        large_trade_flow = get_large_trade_flow_bias(symbol, broker, action)
+        if large_trade_flow["bias"] != 0:
+            confidence = max(0, min(95, confidence + large_trade_flow["bias"]))
+        if large_trade_flow["notes"]:
+            reason = (reason + " " + " ".join(large_trade_flow["notes"])).strip()
+
         # Kullanicinin talebi: varlik son 24s'te zaten %2+ hareket ettiyse,
         # ayni yondeki (chasing) BUY/SELL degerlendirmesine -20 puan uygula.
         exhaustion = get_recent_move_exhaustion_bias(action, recent_move_pct)
@@ -9850,6 +9866,196 @@ def get_orderbook_pressure(symbol: str, market: str, limit: int = 50) -> Dict[st
         "sell_pressure": round(sell_pressure, 2),
         "summary": f"Alış %{buy_pressure:.1f} / Satış %{sell_pressure:.1f}",
     }
+
+
+# Kullanicinin talebi: 'fiyatin nereye gidecegine dair tahmin - tavana emir
+# yigma, hacimli emirlerle fiyat kademesi yukari/asagi cektirme, HFT emir
+# kademesi doldurma'. GERCEKCI SINIRLAR: bireysel/kurumsal bir yatirimcinin
+# KIMLIGINI gormek hicbir public API'de mumkun degil (13F sadece 3 ayda bir,
+# 45 gun gecikmeli). HFT quote-stuffing tespiti milisaniye seviyesinde veri
+# gerektirir, bu sistem 20-30 saniyede bir tarar - guvenilir tespit edilemez.
+# IBKR hisselerinde (NVDA vb.) Level 2 emir defteri verisi bu hesabin veri
+# aboneliginde YOK - bu yuzden asagidaki iki fonksiyon SADECE Binance kripto
+# (herkese acik depth/aggTrades API'leri) icin calisir, IBKR icin fail-open
+# (bias=0) doner.
+ORDERBOOK_WALL_RATIO = float(os.getenv("ORDERBOOK_WALL_RATIO", "5.0"))
+ORDERBOOK_WALL_NEAR_BAND_PCT = float(os.getenv("ORDERBOOK_WALL_NEAR_BAND_PCT", "3.0"))
+ORDERBOOK_WALL_FAR_BAND_PCT = float(os.getenv("ORDERBOOK_WALL_FAR_BAND_PCT", "15.0"))
+LARGE_TRADE_SIZE_MULTIPLIER = float(os.getenv("LARGE_TRADE_SIZE_MULTIPLIER", "8.0"))
+LARGE_TRADE_LOOKBACK = int(os.getenv("LARGE_TRADE_LOOKBACK", "500"))
+
+
+def get_orderbook_wall_signal(symbol: str, market: str, broker: str, action: str) -> Dict[str, Any]:
+    """Emir defterinde (Binance depth) tek bir fiyat kademesinde ortalamanin
+    ORDERBOOK_WALL_RATIO katindan fazla buyuklukte emir varsa 'duvar' olarak
+    isaretler.
+      - YAKIN duvar (fiyata ORDERBOOK_WALL_NEAR_BAND_PCT icinde): klasik
+        destek/direnc mantigi uygulanir - yakin SATIS duvari yukselisi
+        zorlastirir (BUY'a kucuk eksi, SELL'e kucuk arti), yakin ALIS duvari
+        tam tersi.
+      - UZAK duvar (NEAR..FAR bandi arasinda, ör. fiyatin %15 altinda buyuk
+        bir alis duvari): kullanicinin sordugu senaryo tam olarak bu - hem
+        'burada guclu destek var' hem de 'fiyat oraya cekilip ucuzdan
+        toplanmaya calisilabilir' seklinde IKI ZIT yorumu da mumkun oldugu
+        icin, bu YALNIZCA BILGILENDIRME notu olarak eklenir, confidence'a
+        yonlu bir bahis (bias) UYGULANMAZ - kanitlanmamis bir teoriye
+        gercek parayla yon verilmez.
+    IBKR/STK icin (Level 2 verisi yok) ve herhangi bir hata/yetersiz veri
+    durumunda fail-open (bias=0, notes=[]) doner."""
+    if broker not in ("BINANCE_FUTURES", "BINANCE_SPOT") or action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+    try:
+        binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
+        base = FUTURES_BASE if binance_market == "FUTURES" else SPOT_BASE
+        path = "/fapi/v1/depth" if binance_market == "FUTURES" else "/api/v3/depth"
+        data = _cache_get_or_fetch(
+            f"orderbook_depth:{broker}:{symbol}",
+            30,
+            lambda: public_get(base, path, {"symbol": symbol, "limit": 500}),
+        )
+        bids = [(safe_float(p), safe_float(q)) for p, q in data.get("bids", []) if safe_float(q) > 0]
+        asks = [(safe_float(p), safe_float(q)) for p, q in data.get("asks", []) if safe_float(q) > 0]
+        if not bids or not asks:
+            return {"bias": 0, "notes": []}
+
+        best_bid, best_ask = bids[0][0], asks[0][0]
+        mid_price = (best_bid + best_ask) / 2.0
+        if mid_price <= 0:
+            return {"bias": 0, "notes": []}
+
+        def _find_wall(levels):
+            qtys = sorted(q for _, q in levels)
+            median_qty = qtys[len(qtys) // 2] if qtys else 0.0
+            if median_qty <= 0:
+                return None
+            price, qty = max(levels, key=lambda pq: pq[1])
+            if qty / median_qty >= ORDERBOOK_WALL_RATIO:
+                return {"price": price, "qty": qty, "ratio": qty / median_qty}
+            return None
+
+        bid_wall = _find_wall(bids)
+        ask_wall = _find_wall(asks)
+
+        bias = 0
+        notes: List[str] = []
+
+        if ask_wall:
+            dist_pct = abs(ask_wall["price"] - mid_price) / mid_price * 100.0
+            if dist_pct <= ORDERBOOK_WALL_NEAR_BAND_PCT:
+                if action == "BUY":
+                    bias -= 4
+                    notes.append(
+                        f"[Emir Defteri] {symbol}: fiyatın %{dist_pct:.1f} üzerinde ortalamanın "
+                        f"{ask_wall['ratio']:.1f} katı büyüklüğünde satış duvarı var, yükseliş zorlaşabilir."
+                    )
+                else:
+                    bias += 3
+                    notes.append(
+                        f"[Emir Defteri] {symbol}: yakında güçlü bir satış duvarı SELL'i destekliyor."
+                    )
+            elif dist_pct <= ORDERBOOK_WALL_FAR_BAND_PCT:
+                notes.append(
+                    f"[Emir Defteri - bilgi] {symbol}: fiyatın %{dist_pct:.1f} üzerinde büyük bir satış "
+                    f"emri birikmiş ({ask_wall['ratio']:.1f}x) - direnç ya da fiyatın oraya çekilme hedefi olabilir, yön garantisi yok."
+                )
+
+        if bid_wall:
+            dist_pct = abs(mid_price - bid_wall["price"]) / mid_price * 100.0
+            if dist_pct <= ORDERBOOK_WALL_NEAR_BAND_PCT:
+                if action == "BUY":
+                    bias += 3
+                    notes.append(
+                        f"[Emir Defteri] {symbol}: yakında güçlü bir alış duvarı BUY'ı destekliyor."
+                    )
+                else:
+                    bias -= 4
+                    notes.append(
+                        f"[Emir Defteri] {symbol}: fiyatın %{dist_pct:.1f} altında ortalamanın "
+                        f"{bid_wall['ratio']:.1f} katı büyüklüğünde alış duvarı var, düşüş zorlaşabilir."
+                    )
+            elif dist_pct <= ORDERBOOK_WALL_FAR_BAND_PCT:
+                notes.append(
+                    f"[Emir Defteri - bilgi] {symbol}: fiyatın %{dist_pct:.1f} altında büyük bir alış "
+                    f"emri birikmiş ({bid_wall['ratio']:.1f}x) - destek ya da fiyatın ucuzdan toplanmak "
+                    f"için oraya çekilme hedefi olabilir, yön garantisi yok."
+                )
+
+        return {"bias": max(-6, min(6, bias)), "notes": notes}
+    except Exception:
+        return {"bias": 0, "notes": []}
+
+
+def get_large_trade_flow_bias(symbol: str, broker: str, action: str) -> Dict[str, Any]:
+    """Son islemlerde (Binance aggTrades) ortalamanin LARGE_TRADE_SIZE_MULTIPLIER
+    katindan buyuk 'blok' islemleri tespit eder ve bunlarin agresif alici mi
+    (taker buy) yoksa agresif satici mi (taker sell) kaynakli oldugunu ayirt
+    eder (Binance 'isBuyerMaker' alani: True ise islem satici tarafindan
+    baslatilmis - taker sell; False ise alici tarafindan baslatilmis - taker
+    buy). Buyuk islemlerin net yonu (whale/blok islem akisi - klasik 'tape
+    reading') o yondeki islem tipine kucuk bir destek verir. IBKR icin
+    (bu veri sadece kripto borsalarinda mevcut) ve hata/yetersiz veri
+    durumunda fail-open (bias=0) doner."""
+    if broker not in ("BINANCE_FUTURES", "BINANCE_SPOT") or action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+    try:
+        binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
+        base = FUTURES_BASE if binance_market == "FUTURES" else SPOT_BASE
+        path = "/fapi/v1/aggTrades" if binance_market == "FUTURES" else "/api/v3/aggTrades"
+        trades = _cache_get_or_fetch(
+            f"agg_trades:{broker}:{symbol}",
+            30,
+            lambda: public_get(base, path, {"symbol": symbol, "limit": LARGE_TRADE_LOOKBACK}),
+        )
+        if not isinstance(trades, list) or len(trades) < 20:
+            return {"bias": 0, "notes": []}
+
+        notionals = [safe_float(t.get("p")) * safe_float(t.get("q")) for t in trades]
+        sorted_notionals = sorted(n for n in notionals if n > 0)
+        if not sorted_notionals:
+            return {"bias": 0, "notes": []}
+        median_notional = sorted_notionals[len(sorted_notionals) // 2]
+        if median_notional <= 0:
+            return {"bias": 0, "notes": []}
+
+        large_buy = 0.0
+        large_sell = 0.0
+        for t in trades:
+            notional = safe_float(t.get("p")) * safe_float(t.get("q"))
+            if notional / median_notional >= LARGE_TRADE_SIZE_MULTIPLIER:
+                if bool(t.get("m")):
+                    large_sell += notional
+                else:
+                    large_buy += notional
+
+        total_large = large_buy + large_sell
+        if total_large <= 0:
+            return {"bias": 0, "notes": []}
+
+        imbalance_pct = (large_buy - large_sell) / total_large * 100.0
+        bias = 0
+        notes: List[str] = []
+        if imbalance_pct >= 40:
+            if action == "BUY":
+                bias += 4
+                notes.append(
+                    f"[Blok İşlem] {symbol}: son işlemlerde büyük alıcı akışı baskın (%{imbalance_pct:.0f} net), BUY'ı destekler."
+                )
+            else:
+                bias -= 3
+                notes.append(f"[Blok İşlem] {symbol}: büyük alıcı akışı baskın, yeni SELL riskli olabilir.")
+        elif imbalance_pct <= -40:
+            if action == "SELL":
+                bias += 4
+                notes.append(
+                    f"[Blok İşlem] {symbol}: son işlemlerde büyük satıcı akışı baskın (%{abs(imbalance_pct):.0f} net), SELL'i destekler."
+                )
+            else:
+                bias -= 3
+                notes.append(f"[Blok İşlem] {symbol}: büyük satıcı akışı baskın, yeni BUY riskli olabilir.")
+
+        return {"bias": max(-6, min(6, bias)), "notes": notes}
+    except Exception:
+        return {"bias": 0, "notes": []}
 
 
 def try_coinbase_ticker(symbol: str) -> Optional[Dict[str, Any]]:
