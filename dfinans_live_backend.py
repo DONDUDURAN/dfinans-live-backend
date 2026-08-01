@@ -5075,6 +5075,13 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
         sma20 = compute_sma(closes, 20)
         sma50 = compute_sma(closes, 50)
         atr = compute_atr(highs, lows, closes, 14)
+        # Kullanicinin talebi: 'RSI/SMA aşırı-uç sinyali sadece yumuşak puan
+        # (bias) - dipte SHORT/zirvede LONG açmayı engellemiyor'. MACD
+        # histogramı burada da hesaplanip donus teyidi (RSI asiri uc + MACD
+        # zaten ters yone donmus) icin sert engel (hard block) katmaninda
+        # kullanilir (bkz. get_technical_signal_bias).
+        macd = calculate_macd(closes)
+        macd_histogram = macd["histogram"] if macd else None
         last_close = closes[-1]
         atr_pct = (atr / last_close * 100.0) if (atr is not None and last_close > 0) else None
         # Hacim teyidi: son (bugunku/en guncel) mum GUN ICINDE hala olusmakta oldugu
@@ -5103,6 +5110,7 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
             "last_closed_volume": round(last_closed_volume, 2),
             "avg_volume_20": round(avg_volume, 2) if avg_volume else None,
             "volume_ratio": round(volume_ratio, 2) if volume_ratio is not None else None,
+            "macd_histogram": round(macd_histogram, 6) if macd_histogram is not None else None,
             "time": now_text(),
         }
     ttl = 3600 if broker == "IBKR" else 1800
@@ -5154,13 +5162,15 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
 
     bias = 0
     notes: List[str] = []
+    hard_block = False
 
     try:
         tech = get_technical_indicator_snapshot(symbol, market, broker)
         if tech.get("error"):
-            return {"bias": 0, "notes": []}
+            return {"bias": 0, "notes": [], "hard_block": False}
 
         rsi = tech.get("rsi_14")
+        macd_histogram = tech.get("macd_histogram")
         if rsi is not None:
             if rsi <= 30:
                 if action == "BUY":
@@ -5176,6 +5186,27 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
                 else:
                     bias -= 5
                     notes.append(f"RSI(14) aşırı alım bölgesinde ({rsi}): yeni BUY riskli (düzeltme gelebilir).")
+
+        # Kullanicinin talebi: 'BTC dustu, artik donus yapacak yukari dogru
+        # SHORT acmisiz' - RSI asiri uc bolgede OLUP UZERINE MACD histogrami
+        # zaten ters yone donmusse (donus TEYITLI), trend-yonundeki (ayni
+        # yondeki, yani devam/chasing) islem artik sadece yumusak puanla
+        # degil SERT ENGEL (hard_block) ile durdurulur - cagiran yer (qty'yi
+        # sifirlar) tam da 'dipte SHORT / zirvede LONG acma' senaryosunu
+        # engeller.
+        if rsi is not None and macd_histogram is not None:
+            if action == "SELL" and rsi <= 25 and macd_histogram > 0:
+                hard_block = True
+                notes.append(
+                    f"SERT ENGEL: RSI(14) aşırı satımda ({rsi}) VE MACD histogram zaten pozitife dönmüş "
+                    f"({macd_histogram:+.4f}) - yükseliş dönüşü teyitli, trend-yönü (chasing) SELL engellendi."
+                )
+            elif action == "BUY" and rsi >= 75 and macd_histogram < 0:
+                hard_block = True
+                notes.append(
+                    f"SERT ENGEL: RSI(14) aşırı alımda ({rsi}) VE MACD histogram zaten negatife dönmüş "
+                    f"({macd_histogram:+.4f}) - düşüş dönüşü teyitli, trend-yönü (chasing) BUY engellendi."
+                )
 
         sma20 = tech.get("sma_20")
         sma50 = tech.get("sma_50")
@@ -5211,7 +5242,7 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
     except Exception:
         pass
 
-    return {"bias": max(-18, min(18, bias)), "notes": notes}
+    return {"bias": max(-18, min(18, bias)), "notes": notes, "hard_block": hard_block}
 
 
 def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
@@ -8235,6 +8266,14 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + technical["bias"]))
         if technical["notes"]:
             reason = (reason + " " + " ".join(technical["notes"])).strip()
+        if technical.get("hard_block"):
+            # Kullanicinin talebi: 'BTC dustu, artik donus yapacak yukari dogru
+            # SHORT acmisiz' - RSI asiri uc + MACD histogram zaten ters yone
+            # donmusse (donus teyitli), trend-yonundeki (chasing) islem SADECE
+            # yumusak puanla degil burada qty SIFIRLANARAK sert engellenir -
+            # fonksiyonun en alt katindaki allow_trade kapisi 'qty > 0' sarti
+            # aradigi icin bu tek satir tum broker/emir yollarini kapsar.
+            qty = 0
 
         # Coklu zaman dilimi (kisa/orta/uzun vadeli) momentum teyidi - hem
         # kripto hem IBKR icin gecerlidir. Sadece 24s degisim kullanildiginda
