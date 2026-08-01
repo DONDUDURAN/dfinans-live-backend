@@ -582,6 +582,20 @@ IBKR_LSE_STOP_LOSS_PCT = float(os.getenv("IBKR_LSE_STOP_LOSS_PCT", "6.0"))
 # sadece RISK_OFF rejiminde degil - cunku LSE kayiplari makro rejimden
 # bagimsiz olarak da tekrarlanan bir sorun).
 IBKR_LSE_EXTRA_CONFIRMATIONS = int(os.getenv("IBKR_LSE_EXTRA_CONFIRMATIONS", "4"))
+# Kullanicinin talebi: 30 gunluk portfoy-genelinde kayip analizinde LSE
+# (HSBA/SHEL/RIO/ULVR) disinda ABD-disi diger borsalarda da (IBIS/Frankfurt-
+# Almanya: BMW/SAP/SIE; SBF/Paris: MC/OR; SEHK/Hong Kong: 700/9988/5/1299/3690)
+# ayni 'seans-disi/gece fiyat atlamasi (gap)' riskinin gecerli oldugu
+# degerlendirildi (BMW -%5.1, SAP -%2.8 acik pozisyonlarda zaten zararda).
+# LSE'ye ozel dar zarar-kes esigi ve ekstra ALIM teyidi artik TUM ABD-disi
+# borsalara genisletildi (bkz. IBKR_NON_US_EXCHANGES ve kullanildigi yerler:
+# seed_lse_stop_loss_grandfather_once, enforce_ibkr_take_profit_stop_loss,
+# _auto_trader_run_symbol BUY kapisi).
+IBKR_NON_US_EXCHANGES = frozenset(
+    s.strip().upper()
+    for s in os.getenv("IBKR_NON_US_EXCHANGES", "LSE,IBIS,SBF,SEHK").split(",")
+    if s.strip()
+)
 # Ayni sembolde zarar-kes (STOP_LOSS) sonrasi ne kadar sure (saat) yeni ALIM
 # denenmesin. Kullanicinin bildirdigi 'zarar kesip hemen tekrar aciyoruz, yine
 # zarar ediyoruz' dongusunu kirmak icin - zarar-kesten sonra sembol bu sure
@@ -593,10 +607,14 @@ IBKR_STOP_LOSS_COOLDOWN_HOURS = float(os.getenv("IBKR_STOP_LOSS_COOLDOWN_HOURS",
 # gece/seans-acilisi fiyat atlamasi (gap) kaynakli, periyodik tarama %6
 # esigine ulasmadan once fiyat zaten cok dusmus oluyordu. Bu iki sembol
 # artik otomatik ALIM icin tamamen HARIC tutuluyor (bkz. _auto_trader_run_symbol
-# BUY kapisi). Ortam degiskeniyle (virgulle ayrilmis) genisletilebilir/
-# degistirilebilir.
+# BUY kapisi). RIO ve ULVR de (ikisi de LSE) 30 gunluk analizde 0 kazanc/1
+# zarar ile ayni deseni gosterdigi icin (kucuk ornek boyutuna ragmen ayni
+# borsa/mekanizma) ayni listeye eklendi. Ortam degiskeniyle (virgulle
+# ayrilmis) genisletilebilir/degistirilebilir.
 IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
-    s.strip().upper() for s in os.getenv("IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,SHEL").split(",") if s.strip()
+    s.strip().upper()
+    for s in os.getenv("IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,SHEL,RIO,ULVR").split(",")
+    if s.strip()
 )
 
 # Kullanicinin talebi: 'sadece ıbkr de hisselerde yüzde 2 kar arayalım diğer
@@ -1919,7 +1937,7 @@ def seed_lse_stop_loss_grandfather_once() -> None:
             qty = abs(safe_float(position.get("position") or position.get("size")))
             if qty <= 0:
                 continue
-            if str(position.get("exchange") or "").upper() == "LSE":
+            if str(position.get("exchange") or "").upper() in IBKR_NON_US_EXCHANGES:
                 symbol = str(position.get("symbol", "")).upper()
                 if symbol and symbol != "IBKR":
                     db_grandfather_lse_symbol(symbol)
@@ -8869,19 +8887,22 @@ def _auto_trader_run_symbol(
                                     ).strip()
                                     qty = 0
                                     ibkr_cash_qty_amount = None
-                            if (qty > 0 or ibkr_cash_qty_amount) and exchange.upper() == "LSE":
-                                # Kullanicinin talebi: son 1 haftalik analizde kayiplarin
-                                # buyuk cogunlugu LSE (Londra) hisselerinden (SHEL, HSBA,
-                                # RIO, ULVR) geldigi icin - LSE'de yeni ALIM icin normal
-                                # esigin uzerinde ekstra net teyit sarti getiriliyor (RISK_OFF
-                                # kapisindan bagimsiz, LSE'ye HER ZAMAN uygulanir).
+                            if (qty > 0 or ibkr_cash_qty_amount) and exchange.upper() in IBKR_NON_US_EXCHANGES:
+                                # Kullanicinin talebi: 30 gunluk portfoy-genelinde analizde
+                                # kayiplarin buyuk cogunlugu LSE (Londra: SHEL, HSBA, RIO,
+                                # ULVR) hisselerinden geldigi, ayrica IBIS/SBF/SEHK gibi diger
+                                # ABD-disi borsalarda da (BMW, SAP) ayni 'seans-disi/gece
+                                # fiyat atlamasi (gap)' riskinin gecerli oldugu gorulduu icin -
+                                # TUM ABD-disi borsalarda yeni ALIM icin normal esigin
+                                # uzerinde ekstra net teyit sarti getiriliyor (RISK_OFF
+                                # kapisindan bagimsiz, HER ZAMAN uygulanir).
                                 _lse_min_confirmations = _effective_min_confirmations + IBKR_LSE_EXTRA_CONFIRMATIONS
                                 if cum_confirm["net"] < _lse_min_confirmations:
                                     reason = (
                                         reason
-                                        + f" (IBKR emri atlandı: LSE hissesi - geçmişte tekrarlanan "
-                                        f"zararlar nedeniyle normalin üzerinde teyit gerekiyor (net "
-                                        f"{cum_confirm['net']}/{_lse_min_confirmations}).)"
+                                        + f" (IBKR emri atlandı: ABD-dışı borsa ({exchange.upper()}) - "
+                                        f"geçmişte tekrarlanan zararlar nedeniyle normalin üzerinde teyit "
+                                        f"gerekiyor (net {cum_confirm['net']}/{_lse_min_confirmations}).)"
                                     ).strip()
                                     qty = 0
                                     ibkr_cash_qty_amount = None
@@ -9866,18 +9887,25 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         # (IBKR_LSE_STOP_LOSS_PCT) kullanilir - kayiplar daha erken, daha kucuk
         # buyuklukte durdurulur. Genel esik (kullanicinin talebiyle %20'de
         # sabit) diger tum borsalar icin degismeden kalir.
+        # Kullanicinin talebi: 30 gunluk portfoy-genelinde analizde LSE
+        # (SHEL, HSBA, RIO, ULVR) disinda IBIS/SBF/SEHK gibi diger ABD-disi
+        # borsalarda da (BMW, SAP) ayni gap-riski deseni goruldugu icin,
+        # genel IBKR_STOP_LOSS_PCT yerine TUM ABD-disi borsalarda daha dar
+        # bir esik (IBKR_LSE_STOP_LOSS_PCT) kullanilir - kayiplar daha erken,
+        # daha kucuk buyuklukte durdurulur. Genel esik (kullanicinin talebiyle
+        # %20'de sabit) SMART/US borsalari icin degismeden kalir.
         position_exchange = str(position.get("exchange") or "SMART").upper()
         # Kullanicinin talebi: 'mevcut pozisyonları bu eşikten uzak tut' - dar
-        # LSE esigi degisiklik canliya alindiginda ZATEN acik olan pozisyonlara
+        # esik degisiklik canliya alindiginda ZATEN acik olan pozisyonlara
         # (grandfathered, bkz. seed_lse_stop_loss_grandfather_once) uygulanmaz,
         # bunlar eski/genel esikte kalir. Sadece bu degisiklikten SONRA
-        # acilacak yeni LSE pozisyonlari dar esige tabi olur.
-        _is_lse_grandfathered = position_exchange == "LSE" and db_is_lse_symbol_grandfathered(
+        # acilacak yeni ABD-disi borsa pozisyonlari dar esige tabi olur.
+        _is_lse_grandfathered = position_exchange in IBKR_NON_US_EXCHANGES and db_is_lse_symbol_grandfathered(
             str(position.get("symbol", "")).upper()
         )
         effective_stop_loss_pct = (
             IBKR_LSE_STOP_LOSS_PCT
-            if position_exchange == "LSE" and IBKR_LSE_STOP_LOSS_PCT > 0 and not _is_lse_grandfathered
+            if position_exchange in IBKR_NON_US_EXCHANGES and IBKR_LSE_STOP_LOSS_PCT > 0 and not _is_lse_grandfathered
             else IBKR_STOP_LOSS_PCT
         )
         hit_stop_loss = effective_stop_loss_pct > 0 and profit_pct <= -effective_stop_loss_pct
