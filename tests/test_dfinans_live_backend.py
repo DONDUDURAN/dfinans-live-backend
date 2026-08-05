@@ -400,6 +400,25 @@ def test_resolve_trailing_take_profit_resets_on_new_entry_price(
     assert hit is False
 
 
+def test_resolve_trailing_take_profit_use_trailing_false_closes_immediately(
+    backend_module, isolated_runtime_db, runtime_db_connection
+):
+    """Kullanicinin IBKR ornegi: SAP/GLD hedefi (%2) gecmisti ama trailing
+    zirveden %1.2 geri cekilme bekledigi icin kapanmiyordu, kullanici bunu
+    kafa karistirici buldu ve 'hedefe ulasinca hemen kapat' istedi.
+    use_trailing=False verildiginde (IBKR cagri noktasinda kullanilir)
+    trailing/arming mantigi tamamen atlanmali - dogrudan esik karsilastirmasi
+    yapilmali."""
+    # Hedefin (%2) USTUNDE ama trailing armed olmadan hemen kapanmali.
+    assert backend_module.resolve_trailing_take_profit(
+        "IBKR", "SAP", 163.86, 3.234, 2.0, use_trailing=False,
+    ) is True
+    # Hedefin ALTINDA ise hala kapanmamali.
+    assert backend_module.resolve_trailing_take_profit(
+        "IBKR", "GLD", 381.24, 1.0, 2.0, use_trailing=False,
+    ) is False
+
+
 def test_compute_dynamic_take_profit_pct_never_shrinks_base_target(
     backend_module, monkeypatch
 ):
