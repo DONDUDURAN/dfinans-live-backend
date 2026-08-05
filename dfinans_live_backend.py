@@ -2090,7 +2090,7 @@ def resolve_trailing_take_profit(
 
 def compute_dynamic_take_profit_pct(
     symbol: str, market: str, broker: str, base_take_profit_pct: float, effective_stop_loss_pct: float,
-    leverage_multiplier: float = 1.0,
+    leverage_multiplier: float = 1.0, enforce_min_reward_risk: bool = True,
 ) -> Dict[str, Any]:
     """Kullanicinin talebi: 'genel olarak daha karli calismasi icin ne
     eklenebilir' - buyuk fonlarin/karli sistemlerin ortak ozelligi olan IKI
@@ -2106,6 +2106,17 @@ def compute_dynamic_take_profit_pct(
          dahil), kar hedefi ASLA bundan (oranla) kucuk olamaz - analiz
          gosterdi ki (bkz. 30 gunluk portfoy taramasi) ort. kazanc %1.86 iken
          ort. kayip %9.79 idi; bu yapisal dengesizligi yapisal olarak duzeltir.
+
+         GUNCELLEME (kullanicinin canli ornegi: BTC %2.42 kar gordu ama
+         SL%6 x 1.5 = hedef %9 oldugu icin kapanmadi - 'bu riskli, o duzeye
+         cikmaz ki, %6 kara ulasmak bile zor'): kaldiracli (leveraged) ROI
+         skalasinda calisan Binance Futures/Spot icin bu min R:R zorunlulugu
+         GERCEKCI DEGIL - sik sik hic ulasilamayan hedeflere yol aciyor.
+         Bu yuzden enforce_min_reward_risk=False verilerek (Binance cagri
+         noktalarinda) bu katman TAMAMEN ATLANABILIR - sadece ATR-bazli
+         hedef (daha kucuk, ulasilabilir) uygulanir. IBKR icin (asil
+         TP%2/SL%20 dengesizligi orada bulunmustu) enforce_min_reward_risk
+         varsayilan olarak True kalir.
     Sonuc, orijinal sabit hedeften KUCUK olamaz (sadece buyutur, asla kisaltmaz
     - boylece zaten iyi calisan dar hedefler bozulmaz)."""
     notes: List[str] = []
@@ -2123,7 +2134,7 @@ def compute_dynamic_take_profit_pct(
                 target = atr_target
     except Exception:
         pass
-    if effective_stop_loss_pct > 0 and MIN_REWARD_RISK_RATIO > 0:
+    if enforce_min_reward_risk and effective_stop_loss_pct > 0 and MIN_REWARD_RISK_RATIO > 0:
         min_target = effective_stop_loss_pct * MIN_REWARD_RISK_RATIO
         if min_target > target:
             notes.append(
@@ -10284,9 +10295,16 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
             # (bkz. compute_dynamic_take_profit_pct). profit_pct kaldiracli
             # (leveraged) ROI oldugu icin ATR%'nin fiyat-bazli degeri kaldirac
             # ile olceklenir.
+            # GUNCELLEME (kullanicinin canli ornegi: BTC %2.42 kar gordu, SL%6
+            # x1.5=hedef %9 oldugu icin kapanmadi - 'bu riskli, o duzeye
+            # cikmaz, %6 kara ulasmak bile zor'): kaldiracli ROI skalasinda
+            # min R:R zorunlulugu gercekci olmayan hedeflere yol acabiliyor,
+            # bu yuzden Binance Futures'ta bu katman KAPATILDI - sadece
+            # ATR-bazli (daha kucuk, ulasilabilir) dinamik hedef kalir.
             leverage_mult = max(1.0, safe_float(position.get("leverage"), 1.0))
             dynamic_tp = compute_dynamic_take_profit_pct(
                 symbol, "FUTURES", "BINANCE_FUTURES", take_profit_pct, stop_loss_pct, leverage_mult,
+                enforce_min_reward_risk=False,
             )
             take_profit_pct = dynamic_tp["take_profit_pct"]
             profit_pct = binance_position_profit_pct(position)
@@ -11182,8 +11200,12 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             spot_take_profit_pct = min(spot_take_profit_pct, BINANCE_SCALED_TAKE_PROFIT_PCT)
         # Kullanicinin talebi: 'genel olarak daha karli calismasi icin ne
         # eklenebilir' - ATR-bazli dinamik hedef + minimum Odul:Risk orani.
+        # GUNCELLEME (BTC canli ornegi - bkz. enforce_binance_take_profit):
+        # min R:R zorunlulugu Binance tarafinda KAPATILDI, sadece ATR-bazli
+        # dinamik hedef kalir.
         dynamic_tp = compute_dynamic_take_profit_pct(
             symbol, "SPOT", "BINANCE_SPOT", spot_take_profit_pct, BINANCE_STOP_LOSS_PCT,
+            enforce_min_reward_risk=False,
         )
         spot_take_profit_pct = dynamic_tp["take_profit_pct"]
         # Kullanicinin talebi: 'trailing stop ekle, kazananlari uzatalim'.

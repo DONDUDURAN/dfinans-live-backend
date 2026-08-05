@@ -430,6 +430,27 @@ def test_compute_dynamic_take_profit_pct_enforces_minimum_reward_risk_ratio(
     assert result["take_profit_pct"] == pytest.approx(20.0 * backend_module.MIN_REWARD_RISK_RATIO)
 
 
+def test_compute_dynamic_take_profit_pct_can_disable_min_reward_risk_ratio(
+    backend_module, monkeypatch
+):
+    """Kullanicinin canli ornegi: BTC %2.42 kar gordu ama SL%6 x1.5=hedef %9
+    oldugu icin kapanmadi - 'bu riskli, o duzeye cikmaz, %6 kara ulasmak
+    bile zor'. enforce_min_reward_risk=False verildiginde (Binance Futures/
+    Spot cagri noktalarinda kullanilir) min R:R katmani TAMAMEN atlanmali,
+    sadece ATR-bazli (veya hicbiri yoksa base) hedef kalmali."""
+    monkeypatch.setattr(
+        backend_module,
+        "get_technical_indicator_snapshot",
+        lambda symbol, market, broker: {"atr_pct": None},
+    )
+    # base=2.0, stop_loss=6.0 -> min R:R aktif olsaydi hedef 6*1.5=9.0 olurdu,
+    # ama enforce_min_reward_risk=False oldugu icin base (2.0) korunmali.
+    result = backend_module.compute_dynamic_take_profit_pct(
+        "BTCUSDT", "FUTURES", "BINANCE_FUTURES", 2.0, 6.0, enforce_min_reward_risk=False,
+    )
+    assert result["take_profit_pct"] == pytest.approx(2.0)
+
+
 def test_compute_dynamic_take_profit_pct_widens_with_atr_and_leverage(
     backend_module, monkeypatch
 ):
