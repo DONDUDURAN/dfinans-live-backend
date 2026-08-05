@@ -468,6 +468,27 @@ def test_compute_dynamic_take_profit_pct_widens_with_atr_and_leverage(
     assert result["take_profit_pct"] >= expected_atr_target
 
 
+def test_compute_dynamic_take_profit_pct_can_disable_atr_target(
+    backend_module, monkeypatch
+):
+    """Kullanicinin canli ornegi: BTC %3.15 kar gordu ama yine kapanmadi -
+    ATR%2.43 x ATR_TARGET_MULTIPLIER(3.0) x kaldirac(3x) = hedef %21.85
+    oldugu icin. enforce_atr_target=False verildiginde (Binance Futures/
+    Spot cagri noktalarinda kullanilir) ATR katmani TAMAMEN atlanmali,
+    sadece sabit base_take_profit_pct kalmali."""
+    monkeypatch.setattr(
+        backend_module,
+        "get_technical_indicator_snapshot",
+        lambda symbol, market, broker: {"atr_pct": 2.43},
+    )
+    result = backend_module.compute_dynamic_take_profit_pct(
+        "BTCUSDT", "FUTURES", "BINANCE_FUTURES", 2.0, 6.0, leverage_multiplier=3.0,
+        enforce_min_reward_risk=False, enforce_atr_target=False,
+    )
+    assert result["take_profit_pct"] == pytest.approx(2.0)
+    assert result["notes"] == []
+
+
 def _seed_closures(backend_module, broker, symbol, pnl_pcts):
     for pct in pnl_pcts:
         backend_module.db_record_position_closure(
