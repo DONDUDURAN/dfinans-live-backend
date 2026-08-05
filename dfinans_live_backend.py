@@ -2090,7 +2090,7 @@ def resolve_trailing_take_profit(
 
 def compute_dynamic_take_profit_pct(
     symbol: str, market: str, broker: str, base_take_profit_pct: float, effective_stop_loss_pct: float,
-    leverage_multiplier: float = 1.0, enforce_min_reward_risk: bool = True,
+    leverage_multiplier: float = 1.0, enforce_min_reward_risk: bool = True, enforce_atr_target: bool = True,
 ) -> Dict[str, Any]:
     """Kullanicinin talebi: 'genel olarak daha karli calismasi icin ne
     eklenebilir' - buyuk fonlarin/karli sistemlerin ortak ozelligi olan IKI
@@ -2117,21 +2117,32 @@ def compute_dynamic_take_profit_pct(
          hedef (daha kucuk, ulasilabilir) uygulanir. IBKR icin (asil
          TP%2/SL%20 dengesizligi orada bulunmustu) enforce_min_reward_risk
          varsayilan olarak True kalir.
+
+         GUNCELLEME 2 (kullanicinin canli ornegi: BTC %3.15 kar gordu ama
+         yine kapanmadi - ATR%2.43 x ATR_TARGET_MULTIPLIER(3.0) x kaldirac(3x)
+         = hedef %21.85 oldugu icin): kaldiracli Binance pozisyonlarinda ATR
+         hedefi de kaldirac ile carpildigi icin ayni derecede ulasilamaz hale
+         gelebiliyor. Bu yuzden enforce_atr_target=False verilerek (Binance
+         cagri noktalarinda) bu katman da TAMAMEN ATLANABILIR - sadece sabit
+         base_take_profit_pct + trailing stop kalir. IBKR icin (kaldiracsiz,
+         leverage_multiplier=1) enforce_atr_target varsayilan olarak True
+         kalir.
     Sonuc, orijinal sabit hedeften KUCUK olamaz (sadece buyutur, asla kisaltmaz
     - boylece zaten iyi calisan dar hedefler bozulmaz)."""
     notes: List[str] = []
     target = base_take_profit_pct
     try:
-        tech = get_technical_indicator_snapshot(symbol, market, broker)
-        atr_pct = tech.get("atr_pct") if not tech.get("error") else None
-        if atr_pct:
-            atr_target = atr_pct * ATR_TARGET_MULTIPLIER * max(1.0, leverage_multiplier)
-            if atr_target > target:
-                notes.append(
-                    f"ATR-bazlı dinamik hedef: volatilite (ATR%{atr_pct:.2f}) nedeniyle kâr hedefi "
-                    f"%{target:.2f} -> %{atr_target:.2f} olarak büyütüldü."
-                )
-                target = atr_target
+        if enforce_atr_target:
+            tech = get_technical_indicator_snapshot(symbol, market, broker)
+            atr_pct = tech.get("atr_pct") if not tech.get("error") else None
+            if atr_pct:
+                atr_target = atr_pct * ATR_TARGET_MULTIPLIER * max(1.0, leverage_multiplier)
+                if atr_target > target:
+                    notes.append(
+                        f"ATR-bazlı dinamik hedef: volatilite (ATR%{atr_pct:.2f}) nedeniyle kâr hedefi "
+                        f"%{target:.2f} -> %{atr_target:.2f} olarak büyütüldü."
+                    )
+                    target = atr_target
     except Exception:
         pass
     if enforce_min_reward_risk and effective_stop_loss_pct > 0 and MIN_REWARD_RISK_RATIO > 0:
@@ -10304,7 +10315,7 @@ def enforce_binance_take_profit(channel: str = "auto") -> Optional[Dict[str, Any
             leverage_mult = max(1.0, safe_float(position.get("leverage"), 1.0))
             dynamic_tp = compute_dynamic_take_profit_pct(
                 symbol, "FUTURES", "BINANCE_FUTURES", take_profit_pct, stop_loss_pct, leverage_mult,
-                enforce_min_reward_risk=False,
+                enforce_min_reward_risk=False, enforce_atr_target=False,
             )
             take_profit_pct = dynamic_tp["take_profit_pct"]
             profit_pct = binance_position_profit_pct(position)
@@ -11209,7 +11220,7 @@ def enforce_spot_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         # dinamik hedef kalir.
         dynamic_tp = compute_dynamic_take_profit_pct(
             symbol, "SPOT", "BINANCE_SPOT", spot_take_profit_pct, BINANCE_STOP_LOSS_PCT,
-            enforce_min_reward_risk=False,
+            enforce_min_reward_risk=False, enforce_atr_target=False,
         )
         spot_take_profit_pct = dynamic_tp["take_profit_pct"]
         # Kullanicinin talebi: 'trailing stop ekle, kazananlari uzatalim'.
