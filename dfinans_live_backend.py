@@ -10470,10 +10470,14 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             else IBKR_STOP_LOSS_PCT
         )
         # Kullanicinin talebi: 'genel olarak daha karli calismasi icin ne
-        # eklenebilir' - ATR-bazli dinamik hedef + minimum Odul:Risk orani
-        # (bkz. compute_dynamic_take_profit_pct).
+        # eklenebilir' - ATR-bazli dinamik hedef (bkz. compute_dynamic_take_profit_pct).
+        # NOT: Min Odul:Risk orani IBKR icin de KAPALI - genis zarar-kes
+        # esikleri (orn. %20) ile hedefi ulasilamaz seviyelere (%30+)
+        # zorluyordu; SAP/GLD gibi pozisyonlar hic kapanmiyordu (bkz. BTC
+        # ile ayni sorun, Binance icin de ayni sebeple kapatilmisti).
         dynamic_tp = compute_dynamic_take_profit_pct(
             symbol_check, position_asset_type, "IBKR", ibkr_take_profit_pct, effective_stop_loss_pct,
+            enforce_min_reward_risk=False,
         )
         ibkr_take_profit_pct = dynamic_tp["take_profit_pct"]
         # Kullanicinin talebi: 'trailing stop ekle, kazananlari uzatalim'.
