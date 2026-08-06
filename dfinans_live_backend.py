@@ -4335,6 +4335,12 @@ def ibkr_place_market_order(
             payload=result,
             request_id=request_id,
         )
+        # Kullanicinin bildirdigi hata: /trade-log (bellek ici TRADE_LOG) hep
+        # bos gorunuyordu cunku IBKR emirleri sadece db_insert_trade_journal'a
+        # (kalici /trade-journal endpointine) yaziliyordu, Binance emirlerinde
+        # (place_spot_order/place_futures_order) oldugu gibi TRADE_LOG'a hic
+        # eklenmiyordu - bu yuzden /trade-log IBKR islemlerini asla gostermiyordu.
+        TRADE_LOG.insert(0, {"simulated": False, "time": now_text(), "order": result, "request_id": request_id})
         return result
     return ibkr_execute(_run)
 
