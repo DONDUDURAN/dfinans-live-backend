@@ -37,9 +37,34 @@ while true; do
     if [ -n "${WID:-}" ] && [ "$CAPTURED" = "0" ]; then
         echo "ACCEPTWATCH: found window id=$WID"
         xwininfo -id "$WID" 2>&1 | sed 's/^/ACCEPTWATCH_INFO: /'
-        xwd -id "$WID" -out /tmp/dialog.xwd 2>&1 | sed 's/^/ACCEPTWATCH_XWD: /'
+
+        # Click the "Configure API Settings" button (bottom-left button of
+        # this dialog, no "grant access" button exists - the dialog is
+        # purely informational, telling the user Read-Only API is still
+        # checked in Global Configuration and must be manually unchecked
+        # there). Button offset determined empirically from a prior
+        # screenshot capture of this exact dialog (602x210 window).
+        GEOM=$(xdotool getwindowgeometry --shell "$WID" 2>/dev/null)
+        WX=$(echo "$GEOM" | grep '^X=' | cut -d= -f2)
+        WY=$(echo "$GEOM" | grep '^Y=' | cut -d= -f2)
+        if [ -n "${WX:-}" ] && [ -n "${WY:-}" ]; then
+            CLICK_X=$((WX + 260))
+            CLICK_Y=$((WY + 185))
+            echo "ACCEPTWATCH: clicking Configure API Settings at $CLICK_X,$CLICK_Y"
+            xdotool mousemove --sync "$CLICK_X" "$CLICK_Y"
+            xdotool click 1
+            sleep 1
+        else
+            echo "ACCEPTWATCH: could not determine window geometry, skipping click"
+        fi
+
+        # Capture the resulting screen (the write-access dialog itself may
+        # have closed/been replaced by the actual Global Configuration
+        # window at this point) - capture the whole root window so we can
+        # see whatever appeared after clicking.
+        xwd -root -out /tmp/dialog.xwd 2>&1 | sed 's/^/ACCEPTWATCH_XWD: /'
         if [ -f /tmp/dialog.xwd ]; then
-            convert /tmp/dialog.xwd -resize 50% /tmp/dialog.png 2>&1 | sed 's/^/ACCEPTWATCH_CONVERT: /'
+            convert /tmp/dialog.xwd -resize 40% /tmp/dialog.png 2>&1 | sed 's/^/ACCEPTWATCH_CONVERT: /'
             if [ -f /tmp/dialog.png ]; then
                 echo "ACCEPTWATCH_PNG_BEGIN"
                 base64 -w 400 /tmp/dialog.png > /tmp/dialog.b64
