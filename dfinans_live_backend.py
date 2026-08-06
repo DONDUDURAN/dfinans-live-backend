@@ -5910,6 +5910,37 @@ def get_market_cycle_bias(symbol: str, action: str, market: str) -> Dict[str, An
     return {"bias": bias, "qty_scale": qty_scale, "notes": [note], "regime": regime}
 
 
+def _hard_block_against_market_cycle(symbol: str, action: str, market: str) -> Optional[str]:
+    """Kullanicinin talebi: 'rejime karsi islemi sert engelle' - yukaridaki
+    get_market_cycle_bias sadece caydirici bir puan/boyut kucultmesi (-6 bias,
+    qty_scale 0.6) uyguluyordu, digger sinyaller yeterince guclu oldugunda
+    kolayca asilabiliyordu (bkz. RISK_OFF rejiminde bile alim yapilan olay).
+    Bu fonksiyon uzun vadeli (50/200 gunluk SMA) BOGA/AYI rejimine TAM TERS
+    yonde YENI pozisyon acmayi/buyutmeyi KOSULSUZ olarak engeller: AYI (BEAR)
+    rejiminde yeni/ek BUY, BOGA (BULL) rejiminde yeni SHORT (SELL) acilamaz.
+    SADECE yeni pozisyon acma/buyutme icin cagrilmalidir - mevcut pozisyonu
+    KAPATMA (closing/buy-to-cover) islemleri bu fonksiyonla ASLA engellenmez
+    (cagiran yerler bunu pre_close_* kontrolleriyle disarida tutar)."""
+    if action not in ("BUY", "SELL"):
+        return None
+    try:
+        regime_info = get_bull_bear_market_regime(market)
+        regime = regime_info.get("regime", "TRANSITION")
+    except Exception:
+        return None
+    if regime == "TRANSITION":
+        return None
+    against = (regime == "BEAR" and action == "BUY") or (regime == "BULL" and action == "SELL")
+    if not against:
+        return None
+    trend_label = "Ayı (BEAR)" if regime == "BEAR" else "Boğa (BULL)"
+    return (
+        f"uzun vadeli {trend_label} piyasa döngüsüne ({regime_info.get('reference_symbol')} "
+        f"SMA200'e göre %{regime_info.get('pct_vs_sma200')}) tam ters yönde yeni {action} "
+        f"pozisyonu, rejime karşı işlem sert engeli nedeniyle koşulsuz atlandı."
+    )
+
+
 def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
     """Kullanicinin talebi: 'genel piyasa dususlerinde (ör. bir cip sirketi
     yuzunden tum borsalar dustugunde) nakitte beklemek yerine guvenli limana
@@ -8725,7 +8756,13 @@ def _auto_trader_run_symbol(
                             qty = 0
                 else:
                     spot_is_position_add = bool(existing_position and safe_float(existing_position.get("quantity")) > 0)
-                    if spot_is_position_add and db_position_added_today("BINANCE_SPOT", symbol):
+                    # Kullanicinin talebi: 'rejime karsi islemi sert engelle' - uzun
+                    # vadeli AYI rejimine tam ters yonde yeni BUY/buyutme kosulsuz engellenir.
+                    _spot_cycle_block_msg = _hard_block_against_market_cycle(symbol, "BUY", market)
+                    if _spot_cycle_block_msg:
+                        spot_skip_reason = f"Spot işlem atlandı: {_spot_cycle_block_msg}"
+                        qty = 0
+                    elif spot_is_position_add and db_position_added_today("BINANCE_SPOT", symbol):
                         spot_skip_reason = (
                             "Zaten açık spot pozisyon var ve bugün bu sembolde bir pozisyon büyütme işlemi "
                             "zaten yapıldı (günde en fazla 1 kez büyütme kuralı)."
@@ -9064,6 +9101,15 @@ def _auto_trader_run_symbol(
                                 reason
                                 + f" (Açığa satış kapatılıyor (buy to cover): {symbol} short pozisyonu kapatılıyor.)"
                             ).strip()
+                    # Kullanicinin talebi: 'rejime karsi islemi sert engelle' - short
+                    # kapatma (buy to cover) DEGILSE (yani yeni LONG acma ya da mevcut
+                    # LONG uzerine ekleme ise), uzun vadeli BOGA/AYI rejimine tam ters
+                    # yonde ise kosulsuz engelle (bkz. _hard_block_against_market_cycle).
+                    if action == "BUY" and qty > 0 and not pre_close_short_position:
+                        _cycle_block_msg = _hard_block_against_market_cycle(symbol, action, market)
+                        if _cycle_block_msg:
+                            reason = (reason + f" (IBKR emri atlandı: {_cycle_block_msg})").strip()
+                            qty = 0
                     # AI'nin SELL karariyla mevcut acik (LONG) bir IBKR pozisyonunu kapatip
                     # kapatmadigini anlamak icin emirden ONCE mevcut pozisyonu (varsa) kaydediyoruz.
                     # Boylece emir basariyla dolarsa gerceklesen kar/zarari hesaplayip
@@ -9123,6 +9169,14 @@ def _auto_trader_run_symbol(
                                 and exchange == "SMART"
                                 and symbol in IBKR_SHORTABLE_SYMBOLS
                             )
+                            # Kullanicinin talebi: 'rejime karsi islemi sert engelle' -
+                            # yeni SHORT acmak, uzun vadeli BOGA rejimine tam ters ise
+                            # kosulsuz engellenir.
+                            if ibkr_can_short:
+                                _cycle_block_msg = _hard_block_against_market_cycle(symbol, "SELL", market)
+                                if _cycle_block_msg:
+                                    ibkr_can_short = False
+                                    reason = (reason + f" (Açığa satış atlandı: {_cycle_block_msg})").strip()
                             if ibkr_can_short:
                                 try:
                                     available_funds_for_short = get_ibkr_available_funds()
@@ -9462,6 +9516,15 @@ def _auto_trader_run_symbol(
                         ).strip()
                         qty = 0
                         pre_close_futures_position = None
+                # Kullanicinin talebi: 'rejime karsi islemi sert engelle' - kapatma
+                # (pre_close_futures_position) DEGILSE (yani yeni pozisyon acma ya da
+                # ayni yonde buyutme ise), uzun vadeli BOGA/AYI rejimine tam ters
+                # yonde ise kosulsuz engellenir.
+                if qty > 0 and not pre_close_futures_position:
+                    _futures_cycle_block_msg = _hard_block_against_market_cycle(symbol, action, market)
+                    if _futures_cycle_block_msg:
+                        reason = (reason + f" (Futures emri atlandı: {_futures_cycle_block_msg})").strip()
+                        qty = 0
                 # Ayni yonde mevcut acik pozisyon uzerine ekleme (piramitleme) yapiliyor mu
                 # kontrol et - kullanicinin talebi: ayni yonde ekleme sembol basina
                 # gunde en fazla 1 kez yapilabilir.
