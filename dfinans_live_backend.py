@@ -9256,24 +9256,23 @@ def _auto_trader_run_symbol(
                                     qty = 0
                                     ibkr_cash_qty_amount = None
                             if (qty > 0 or ibkr_cash_qty_amount) and exchange.upper() in IBKR_NON_US_EXCHANGES:
-                                # Kullanicinin talebi: 30 gunluk portfoy-genelinde analizde
-                                # kayiplarin buyuk cogunlugu LSE (Londra: SHEL, HSBA, RIO,
-                                # ULVR) hisselerinden geldigi, ayrica IBIS/SBF/SEHK gibi diger
-                                # ABD-disi borsalarda da (BMW, SAP) ayni 'seans-disi/gece
-                                # fiyat atlamasi (gap)' riskinin gecerli oldugu gorulduu icin -
-                                # TUM ABD-disi borsalarda yeni ALIM icin normal esigin
-                                # uzerinde ekstra net teyit sarti getiriliyor (RISK_OFF
-                                # kapisindan bagimsiz, HER ZAMAN uygulanir).
-                                _lse_min_confirmations = _effective_min_confirmations + IBKR_LSE_EXTRA_CONFIRMATIONS
-                                if cum_confirm["net"] < _lse_min_confirmations:
-                                    reason = (
-                                        reason
-                                        + f" (IBKR emri atlandı: ABD-dışı borsa ({exchange.upper()}) - "
-                                        f"geçmişte tekrarlanan zararlar nedeniyle normalin üzerinde teyit "
-                                        f"gerekiyor (net {cum_confirm['net']}/{_lse_min_confirmations}).)"
-                                    ).strip()
-                                    qty = 0
-                                    ibkr_cash_qty_amount = None
+                                # Kullanicinin talebi (GUNCELLEME): once ABD-disi borsalarda
+                                # (LSE: SHEL/HSBA/RIO/ULVR, ayrica IBIS/SBF/SEHK: BMW/SAP gibi)
+                                # ekstra teyit sarti getirilmisti, ama 30+ gunluk analizde
+                                # sonuc hala net - 11 LSE islemi de zararla kapandi (toplam
+                                # -43$+), BMW de %-6'ya yaklasip zarar-kesin esigine dayandi.
+                                # Ekstra teyit yeterli olmadigi icin kullanici artik TUM
+                                # ABD-disi borsalarda yeni ALIM emrini TAMAMEN durdurmayi
+                                # istedi - mevcut acik pozisyonlar (grandfathered) etkilenmez,
+                                # sadece YENI pozisyon acilmasi engellenir.
+                                reason = (
+                                    reason
+                                    + f" (IBKR emri atlandı: ABD-dışı borsa ({exchange.upper()}) - "
+                                    f"geçmişte tekrarlanan büyük zararlar nedeniyle bu borsalarda "
+                                    f"yeni pozisyon açma tamamen durduruldu.)"
+                                ).strip()
+                                qty = 0
+                                ibkr_cash_qty_amount = None
                     if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
                         # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
                         # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
