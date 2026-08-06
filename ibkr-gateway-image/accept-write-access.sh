@@ -50,10 +50,15 @@ while true; do
         if [ -n "${WX:-}" ] && [ -n "${WY:-}" ]; then
             CLICK_X=$((WX + 260))
             CLICK_Y=$((WY + 185))
-            echo "ACCEPTWATCH: clicking Configure API Settings at $CLICK_X,$CLICK_Y"
+            echo "ACCEPTWATCH: activating window and clicking Configure API Settings at $CLICK_X,$CLICK_Y"
+            xdotool windowactivate --sync "$WID" 2>&1 | sed 's/^/ACCEPTWATCH_ACTIVATE: /'
+            xdotool windowfocus --sync "$WID" 2>&1 | sed 's/^/ACCEPTWATCH_FOCUS: /'
+            xdotool windowraise "$WID" 2>&1 | sed 's/^/ACCEPTWATCH_RAISE: /'
+            sleep 0.3
             xdotool mousemove --sync "$CLICK_X" "$CLICK_Y"
-            xdotool click 1
-            sleep 1
+            sleep 0.2
+            xdotool click --clearmodifiers 1
+            sleep 1.5
         else
             echo "ACCEPTWATCH: could not determine window geometry, skipping click"
         fi
