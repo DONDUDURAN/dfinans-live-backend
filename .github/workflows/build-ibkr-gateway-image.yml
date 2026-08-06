@@ -1,0 +1,31 @@
+name: Build ibkr-gateway custom image
+
+on:
+  push:
+    paths:
+      - "ibkr-gateway-image/**"
+      - ".github/workflows/build-ibkr-gateway-image.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ibkr-gateway-image
+          push: true
+          tags: ghcr.io/${{ github.repository }}/ibkr-gateway-custom:latest

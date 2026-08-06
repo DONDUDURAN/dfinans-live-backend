@@ -15,7 +15,10 @@ FROM ghcr.io/gnzsnz/ib-gateway:stable
 
 USER root
 RUN apt-get update -y && \
-    apt-get install --no-install-recommends --yes xdotool x11-utils && \
+    apt-get install --no-install-recommends --yes xdotool x11-utils x11-apps imagemagick && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 USER ibgateway
+
+COPY --chown=ibgateway:ibgateway accept-write-access.sh /home/ibgateway/accept-write-access.sh
+RUN chmod +x /home/ibgateway/accept-write-access.sh
