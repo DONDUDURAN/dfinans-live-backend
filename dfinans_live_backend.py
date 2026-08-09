@@ -397,6 +397,11 @@ def _parse_symbol_list(raw: str) -> List[str]:
 
 
 AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
+# Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde - genis
+# sembol havuzu + dusuk guven esigi cok fazla dusuk kaliteli islem aciyordu
+# (60 islemde net kar ~0). Diger iki auto-trader gibi artik env ile
+# ayarlanabilir, varsayilan 65 -> 70'e cikarildi (daha az ama daha kaliteli islem).
+AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "70"))
 # Kullanicinin talebi: 'günlük işlem sayıları artsın'. Eskiden sabit 5'te
 # kaliyordu (env ile ayarlanamiyordu) - genis sembol havuzu ve Kelly bazli
 # pozisyon boyutlandirma ile birlikte artik daha fazla gunluk emir hakkina
@@ -420,7 +425,7 @@ IBKR_AUTO_TRADER.asset_type = "STK"
 IBKR_AUTO_TRADER.exchange = "SMART"
 IBKR_AUTO_TRADER.currency = "USD"
 IBKR_AUTO_TRADER.quantity = float(os.getenv("IBKR_AUTO_QUANTITY", "1"))
-IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "60"))
+IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "68"))
 IBKR_AUTO_TRADER.interval_sec = int(os.getenv("IBKR_AUTO_INTERVAL_SEC", "30"))
 IBKR_AUTO_TRADER.mode = AUTO_TRADER.mode
 IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower() == "true"
@@ -454,7 +459,7 @@ SPOT_AUTO_TRADER.broker = "BINANCE_SPOT"
 SPOT_AUTO_TRADER.market = "SPOT"
 SPOT_AUTO_TRADER.symbol = "ETHUSDT"
 SPOT_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_SPOT_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
-SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "65"))
+SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "70"))
 SPOT_AUTO_TRADER.interval_sec = int(os.getenv("BINANCE_SPOT_AUTO_INTERVAL_SEC", "25"))
 SPOT_AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_SPOT_AUTO_MAX_DAILY_TRADES", "12"))
 SPOT_AUTO_TRADER.mode = AUTO_TRADER.mode
@@ -633,6 +638,12 @@ IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
 # (LSE/grandfather/scaled dahil), kar hedefi bu oranin ALTINA asla dusurulmez
 # (bkz. compute_dynamic_take_profit_pct).
 MIN_REWARD_RISK_RATIO = float(os.getenv("MIN_REWARD_RISK_RATIO", "1.5"))
+# Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde - yatay/
+# gurultulu (chop) piyasada islem acmak (net trend yokken) kayiplarin buyuk
+# kismini olusturuyordu (bkz. compute_adx). ADX bu esigin ALTINDAYSA (zayif/yok
+# trend) yeni pozisyon acma/buyutme koşulsuz engellenir (bkz.
+# _hard_block_weak_trend_chop) - mevcut pozisyon kapatma ASLA etkilenmez.
+ADX_MIN_TREND_STRENGTH = float(os.getenv("ADX_MIN_TREND_STRENGTH", "20"))
 # ATR-bazli dinamik kar hedefi carpani: sabit yuzde yerine, o an ki
 # volatiliteye (ATR% - bkz. get_technical_indicator_snapshot) gore hedef
 # ATR_TARGET_MULTIPLIER kati kadar buyutulur (asla kucultulmez, sadece
@@ -5252,6 +5263,64 @@ def compute_atr(highs: List[float], lows: List[float], closes: List[float], peri
     return atr
 
 
+def compute_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
+    """Wilder'in ADX (Average Directional Index) formulu - trend GUCUNU olcer
+    (yon degil, sadece 'trend var mi yok mu, ne kadar guclu'). Kullanicinin
+    talebi: 'kar elde etmek icin ne yapabiliriz' analizinde - yatay/gurultulu
+    (chop) piyasada islem acmanin kayiplarin buyuk kismini olusturdugu
+    goruldugu icin, ADX dusukken (zayif/yok trend) yeni pozisyon acmayi
+    engelleyen bir filtre eklendi (bkz. _hard_block_weak_trend_chop).
+    ADX < 20: trend yok/cok zayif (yatay/chop piyasa).
+    ADX 20-25: trend olusmaya basliyor.
+    ADX > 25: belirgin trend.
+    En az 2*period+1 bar gerektirir (Wilder cift-katmanli smoothing icin),
+    yetersizse None doner (cagiran taraf sessizce notr davranisa duser)."""
+    n = min(len(highs), len(lows), len(closes))
+    if n < (period * 2) + 1:
+        return None
+    plus_dm: List[float] = []
+    minus_dm: List[float] = []
+    true_ranges: List[float] = []
+    for i in range(1, n):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        true_ranges.append(tr)
+    if len(true_ranges) < period * 2:
+        return None
+
+    def _wilder_smooth(values: List[float]) -> List[float]:
+        smoothed = [sum(values[:period])]
+        for v in values[period:]:
+            smoothed.append(smoothed[-1] - (smoothed[-1] / period) + v)
+        return smoothed
+
+    smoothed_tr = _wilder_smooth(true_ranges)
+    smoothed_plus_dm = _wilder_smooth(plus_dm)
+    smoothed_minus_dm = _wilder_smooth(minus_dm)
+    dx_values: List[float] = []
+    for tr_s, pdm_s, mdm_s in zip(smoothed_tr, smoothed_plus_dm, smoothed_minus_dm):
+        if tr_s <= 0:
+            continue
+        plus_di = 100.0 * (pdm_s / tr_s)
+        minus_di = 100.0 * (mdm_s / tr_s)
+        di_sum = plus_di + minus_di
+        dx = (100.0 * abs(plus_di - minus_di) / di_sum) if di_sum > 0 else 0.0
+        dx_values.append(dx)
+    if len(dx_values) < period:
+        return None
+    adx = sum(dx_values[:period]) / period
+    for dx in dx_values[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
+
+
 def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60, contract_month: str = "") -> List[Dict[str, float]]:
     """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyati VE hacmini ceker
     (RSI/SMA ve hacim teyidi hesaplamalari icin gecmis veri gerekir). /history
@@ -5325,6 +5394,11 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
         sma20 = compute_sma(closes, 20)
         sma50 = compute_sma(closes, 50)
         atr = compute_atr(highs, lows, closes, 14)
+        # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde -
+        # yatay/gurultulu (chop) piyasada islem acmak kayiplarin buyuk kismini
+        # olusturuyordu. ADX (Average Directional Index) trend GUCUNU olcer
+        # (bkz. compute_adx, get_technical_signal_bias'taki hard-block).
+        adx = compute_adx(highs, lows, closes, 14)
         # Kullanicinin talebi: 'RSI/SMA aşırı-uç sinyali sadece yumuşak puan
         # (bias) - dipte SHORT/zirvede LONG açmayı engellemiyor'. MACD
         # histogramı burada da hesaplanip donus teyidi (RSI asiri uc + MACD
@@ -5356,6 +5430,7 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
             "sma_50": round(sma50, 4) if sma50 is not None else None,
             "atr_14": round(atr, 6) if atr is not None else None,
             "atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
+            "adx_14": round(adx, 2) if adx is not None else None,
             "last_close": round(closes[-1], 6),
             "last_closed_volume": round(last_closed_volume, 2),
             "avg_volume_20": round(avg_volume, 2) if avg_volume else None,
@@ -5944,6 +6019,36 @@ def _hard_block_against_market_cycle(symbol: str, action: str, market: str) -> O
         f"uzun vadeli {trend_label} piyasa döngüsüne ({regime_info.get('reference_symbol')} "
         f"SMA200'e göre %{regime_info.get('pct_vs_sma200')}) tam ters yönde yeni {action} "
         f"pozisyonu, rejime karşı işlem sert engeli nedeniyle koşulsuz atlandı."
+    )
+
+
+def _hard_block_weak_trend_chop(symbol: str, market: str, broker: str) -> Optional[str]:
+    """Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz, baskalari nasil
+    kar ediyor' analizinde tespit edildi - yatay/gurultulu (chop, net trend
+    olmayan) piyasada acilan islemler, guclu trendli piyasadakilere gore cok
+    daha dusuk kazanc/zarar oranina sahip oluyor (kucuk sinyal gurultusu ile
+    surekli giris-cikis). ADX (Average Directional Index, bkz. compute_adx)
+    trend GUCUNU olcer - ADX_MIN_TREND_STRENGTH esiginin ALTINDAYSA piyasa
+    net bir yon bulamamis (chop) demektir, bu durumda YENI pozisyon acma/
+    buyutme KOSULSUZ engellenir. SADECE yeni pozisyon acma/buyutme icin
+    cagrilmalidir - mevcut pozisyonu KAPATMA islemleri bu fonksiyonla ASLA
+    engellenmez (cagiran yerler bunu pre_close_* kontrolleriyle disarida
+    tutar). Veri yetersizse (ADX hesaplanamazsa) sessizce izin verir (None)."""
+    if ADX_MIN_TREND_STRENGTH <= 0:
+        return None
+    try:
+        tech_snap = get_technical_indicator_snapshot(symbol, market, broker)
+        adx_val = tech_snap.get("adx_14")
+    except Exception:
+        return None
+    if adx_val is None:
+        return None
+    if adx_val >= ADX_MIN_TREND_STRENGTH:
+        return None
+    return (
+        f"ADX(14) %{adx_val:.1f} - {ADX_MIN_TREND_STRENGTH:.0f} eşiğinin altında "
+        f"(yatay/gürültülü piyasa, net trend yok), yeni pozisyon açma/büyütme "
+        f"trend gücü zayıf olduğu için koşulsuz atlandı."
     )
 
 
@@ -8762,19 +8867,39 @@ def _auto_trader_run_symbol(
                             qty = 0
                 else:
                     spot_is_position_add = bool(existing_position and safe_float(existing_position.get("quantity")) > 0)
+                    # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde
+                    # tespit edildi - pozisyon buyutme (piramitleme) mevcut pozisyonun
+                    # KARDA mi ZARARDA mi olduguna bakmadan yapiliyordu, bu da klasik
+                    # 'averaging down' (zarardaki pozisyona ekleyerek zarari buyutme)
+                    # riskini olusturuyordu. Artik SADECE karda olan pozisyonlara
+                    # ekleme (piramitleme) yapilabilir - zarardaki pozisyona asla eklenmez.
+                    if spot_is_position_add and price > 0:
+                        _spot_add_profit_pct = spot_position_profit_pct(existing_position, price)
+                        if _spot_add_profit_pct <= 0:
+                            spot_skip_reason = (
+                                f"Pozisyon büyütme atlandı: mevcut pozisyon zararda (%{_spot_add_profit_pct:.1f}), "
+                                f"zarardaki pozisyona eklenmez (averaging down engeli)."
+                            )
+                            qty = 0
                     # Kullanicinin talebi: 'rejime karsi islemi sert engelle' - uzun
                     # vadeli AYI rejimine tam ters yonde yeni BUY/buyutme kosulsuz engellenir.
                     _spot_cycle_block_msg = _hard_block_against_market_cycle(symbol, "BUY", market)
-                    if _spot_cycle_block_msg:
+                    # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
+                    # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
+                    _spot_chop_block_msg = None if spot_skip_reason else _hard_block_weak_trend_chop(symbol, market, "BINANCE_SPOT")
+                    if not spot_skip_reason and _spot_cycle_block_msg:
                         spot_skip_reason = f"Spot işlem atlandı: {_spot_cycle_block_msg}"
                         qty = 0
-                    elif spot_is_position_add and db_position_added_today("BINANCE_SPOT", symbol):
+                    elif not spot_skip_reason and _spot_chop_block_msg:
+                        spot_skip_reason = f"Spot işlem atlandı: {_spot_chop_block_msg}"
+                        qty = 0
+                    elif not spot_skip_reason and spot_is_position_add and db_position_added_today("BINANCE_SPOT", symbol):
                         spot_skip_reason = (
                             "Zaten açık spot pozisyon var ve bugün bu sembolde bir pozisyon büyütme işlemi "
                             "zaten yapıldı (günde en fazla 1 kez büyütme kuralı)."
                         )
                         qty = 0
-                    elif price > 0:
+                    elif not spot_skip_reason and price > 0:
                         available_usdt = get_spot_available_usdt()
                         if available_usdt > 0:
                             pct = spot_auto_trader_size_pct(symbol) * market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale * kelly_qty_scale
@@ -9061,15 +9186,31 @@ def _auto_trader_run_symbol(
                     # yapiliyor mu kontrol et - kullanicinin talebi: ayni yonde ekleme
                     # sembol basina gunde en fazla 1 kez yapilabilir.
                     ibkr_is_position_add = False
+                    _ibkr_existing_long_position = None
                     if action == "BUY" and qty > 0:
                         try:
                             for p in ibkr_positions_snapshot():
                                 if str(p.get("symbol", "")).upper() == symbol and str(p.get("side", "")).upper() == "LONG":
                                     ibkr_is_position_add = True
+                                    _ibkr_existing_long_position = p
                                     break
                         except Exception:
                             ibkr_is_position_add = False
-                        if ibkr_is_position_add and db_position_added_today("IBKR", symbol):
+                        # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde
+                        # tespit edildi - averaging down (zarardaki pozisyona ekleme) riskini
+                        # onlemek icin SADECE karda olan pozisyonlara buyutme yapilabilir.
+                        _ibkr_add_profit_pct = (
+                            ibkr_position_profit_pct(_ibkr_existing_long_position)
+                            if ibkr_is_position_add and _ibkr_existing_long_position else 0.0
+                        )
+                        if ibkr_is_position_add and _ibkr_add_profit_pct <= 0:
+                            reason = (
+                                reason
+                                + f" (Pozisyon büyütme atlandı: mevcut pozisyon zararda (%{_ibkr_add_profit_pct:.1f}), "
+                                f"zarardaki pozisyona eklenmez (averaging down engeli).)"
+                            ).strip()
+                            qty = 0
+                        elif ibkr_is_position_add and db_position_added_today("IBKR", symbol):
                             reason = (
                                 reason
                                 + " (Pozisyon büyütme atlandı: bu sembolde bugün zaten bir büyütme yapıldı, günde en fazla 1 kez.)"
@@ -9115,6 +9256,12 @@ def _auto_trader_run_symbol(
                         _cycle_block_msg = _hard_block_against_market_cycle(symbol, action, market)
                         if _cycle_block_msg:
                             reason = (reason + f" (IBKR emri atlandı: {_cycle_block_msg})").strip()
+                            qty = 0
+                        # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
+                        # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
+                        _chop_block_msg = None if qty == 0 else _hard_block_weak_trend_chop(symbol, market, "IBKR")
+                        if _chop_block_msg:
+                            reason = (reason + f" (IBKR emri atlandı: {_chop_block_msg})").strip()
                             qty = 0
                     # AI'nin SELL karariyla mevcut acik (LONG) bir IBKR pozisyonunu kapatip
                     # kapatmadigini anlamak icin emirden ONCE mevcut pozisyonu (varsa) kaydediyoruz.
@@ -9183,6 +9330,13 @@ def _auto_trader_run_symbol(
                                 if _cycle_block_msg:
                                     ibkr_can_short = False
                                     reason = (reason + f" (Açığa satış atlandı: {_cycle_block_msg})").strip()
+                            # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
+                            # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
+                            if ibkr_can_short:
+                                _chop_block_msg = _hard_block_weak_trend_chop(symbol, market, "IBKR")
+                                if _chop_block_msg:
+                                    ibkr_can_short = False
+                                    reason = (reason + f" (Açığa satış atlandı: {_chop_block_msg})").strip()
                             if ibkr_can_short:
                                 try:
                                     available_funds_for_short = get_ibkr_available_funds()
@@ -9531,10 +9685,18 @@ def _auto_trader_run_symbol(
                     if _futures_cycle_block_msg:
                         reason = (reason + f" (Futures emri atlandı: {_futures_cycle_block_msg})").strip()
                         qty = 0
+                # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
+                # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
+                if qty > 0 and not pre_close_futures_position:
+                    _futures_chop_block_msg = _hard_block_weak_trend_chop(symbol, market, "BINANCE_FUTURES")
+                    if _futures_chop_block_msg:
+                        reason = (reason + f" (Futures emri atlandı: {_futures_chop_block_msg})").strip()
+                        qty = 0
                 # Ayni yonde mevcut acik pozisyon uzerine ekleme (piramitleme) yapiliyor mu
                 # kontrol et - kullanicinin talebi: ayni yonde ekleme sembol basina
                 # gunde en fazla 1 kez yapilabilir.
                 futures_is_position_add = False
+                _futures_existing_position_for_add = None
                 if qty > 0 and not pre_close_futures_position:
                     try:
                         for p in get_futures_positions():
@@ -9544,10 +9706,25 @@ def _auto_trader_run_symbol(
                                 p_side = str(p.get("side", "")).upper()
                                 if (p_side == "LONG" and action == "BUY") or (p_side == "SHORT" and action == "SELL"):
                                     futures_is_position_add = True
+                                    _futures_existing_position_for_add = p
                                 break
                     except Exception:
                         futures_is_position_add = False
-                    if futures_is_position_add and db_position_added_today("BINANCE_FUTURES", symbol):
+                    # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde
+                    # tespit edildi - averaging down (zarardaki pozisyona ekleme) riskini
+                    # onlemek icin SADECE karda olan pozisyonlara buyutme yapilabilir.
+                    _futures_add_profit_pct = (
+                        binance_position_profit_pct(_futures_existing_position_for_add)
+                        if futures_is_position_add and _futures_existing_position_for_add else 0.0
+                    )
+                    if futures_is_position_add and _futures_add_profit_pct <= 0:
+                        reason = (
+                            reason
+                            + f" (Pozisyon büyütme atlandı: mevcut pozisyon zararda (%{_futures_add_profit_pct:.1f}), "
+                            f"zarardaki pozisyona eklenmez (averaging down engeli).)"
+                        ).strip()
+                        qty = 0
+                    elif futures_is_position_add and db_position_added_today("BINANCE_FUTURES", symbol):
                         reason = (
                             reason
                             + " (Pozisyon büyütme atlandı: bu sembolde bugün zaten bir büyütme yapıldı, günde en fazla 1 kez.)"
