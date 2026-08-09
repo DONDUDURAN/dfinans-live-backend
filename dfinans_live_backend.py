@@ -10654,7 +10654,7 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
                 close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
                 detail=(
                     f"%{ibkr_take_profit_pct:.1f} kâr hedefi tetiklendi." if hit_take_profit
-                    else f"%{IBKR_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
+                    else f"%{effective_stop_loss_pct:.1f} zarar-kes tetiklendi."
                 ),
             )
             maybe_open_chain_order("IBKR", symbol, qty, exit_price)
