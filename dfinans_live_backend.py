@@ -676,7 +676,7 @@ IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.
 # Bu ust sinir IBKR hisse (STK) pozisyonlarinda ATR-buyutulmus hedefi
 # ASLA bu degerin ustune cikarmaz (sabit taban hedef, IBKR_TAKE_PROFIT_PCT,
 # etkilenmez - o zaten bunun altinda).
-IBKR_ATR_TAKE_PROFIT_CAP_PCT = float(os.getenv("IBKR_ATR_TAKE_PROFIT_CAP_PCT", "2.0"))
+IBKR_ATR_TAKE_PROFIT_CAP_PCT = float(os.getenv("IBKR_ATR_TAKE_PROFIT_CAP_PCT", "3.0"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
 # dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
