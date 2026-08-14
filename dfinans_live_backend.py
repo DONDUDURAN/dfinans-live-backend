@@ -6318,6 +6318,347 @@ def get_cross_session_bias(region: str) -> Dict[str, Any]:
     return {"bias": 0, "note": ""}
 
 
+# Kullanicinin talebi: 'genel piyasa yapisini okuyamiyoruz, her ulkeyi dunya
+# ekonomisine/piyasalara etkisine gore agirlandirip bir dunya borsa endeksi
+# cikarsin'. Asagidaki agirliklar KABA/yaklasiktir - IMF/Dunya Bankasi GSYIH
+# ve MSCI All-Country World Index (ACWI) ulke agirliklarindan esinlenerek
+# elle belirlendi (kesin/resmi degil, gorece buyukluk siralamasini yansitir).
+# Yahoo Finance uzerinden ucretsiz erisilebilen, her ulkeyi/bolgeyi temsil
+# eden ana borsa endeksleri kullanilir.
+WORLD_INDEX_WEIGHTS: Dict[str, tuple] = {
+    # (yfinance ticker, ulke/bolge adi, agirlik)
+    "US": ("^GSPC", "ABD (S&P 500)", 0.38),
+    "CHINA": ("000001.SS", "Çin (Shanghai)", 0.16),
+    "EUROZONE": ("^STOXX50E", "Avrupa Bölgesi (Euro Stoxx 50)", 0.10),
+    "JAPAN": ("^N225", "Japonya (Nikkei 225)", 0.08),
+    "UK": ("^FTSE", "İngiltere (FTSE 100)", 0.05),
+    "INDIA": ("^BSESN", "Hindistan (Sensex)", 0.07),
+    "HONGKONG": ("^HSI", "Hong Kong (Hang Seng)", 0.05),
+    "GERMANY": ("^GDAXI", "Almanya (DAX)", 0.05),
+    "EMERGING": ("EEM", "Diğer Gelişen Piyasalar (EEM ETF)", 0.06),
+}
+
+
+def get_world_market_index() -> Dict[str, Any]:
+    """Kullanicinin talebi: 'her ulkeyi dunya ekonomisine ve piyasalara
+    etkisine gore agirlandirip endeks cikarsin, dunya finans endeksi/dunya
+    borsa endeksi gibi'. Mevcut get_macro_regime() SADECE ABD (S&P500) +
+    Dolar Endeksi'ne bakiyordu - Cin/Avrupa/Japonya/Hindistan/Ingiltere/Hong
+    Kong'daki hareketler tamamen kor noktaydi (ornegin Cin borsasi cokerken
+    ABD henuz tepki vermemis olabilir). Bu fonksiyon WORLD_INDEX_WEIGHTS'teki
+    her ulke/bolge endeksinin 5 gunluk VE 1 aylik yuzde degisimini agirlikli
+    ortalamayla birlestirip tek bir 'Dunya Piyasa Momentum Skoru' uretir,
+    ayrica hangi ulke/bolgenin en cok yukseldigini/dustugunu ('para nereye
+    gidiyor/kaciyor') gosterir. RISK_ON/RISK_OFF/NOTR siniflandirmasi,
+    agirlikli 5 gunluk skor +%0.5 uzeriyse RISK_ON, -%0.5 altiysa RISK_OFF,
+    aksi halde NOTR olarak belirlenir. Agir yfinance cagrisi oldugu icin 4
+    saat cache'lenir; herhangi bir ulke verisi cekilemezse o ulke sessizce
+    atlanir (kalan ulkelerle devam edilir, agirliklar normalize edilir)."""
+    def _fetch():
+        import yfinance as yf
+        tickers = [t for t, _, _ in WORLD_INDEX_WEIGHTS.values()]
+        data = yf.download(tickers, period="35d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"] if "Close" in data else data
+
+        countries: List[Dict[str, Any]] = []
+        weighted_5d_sum = 0.0
+        weighted_1m_sum = 0.0
+        total_weight_used = 0.0
+
+        for key, (ticker, name, weight) in WORLD_INDEX_WEIGHTS.items():
+            try:
+                series = close[ticker].dropna() if ticker in close else close.dropna()
+                if len(series) < 6:
+                    continue
+                last = float(series.iloc[-1])
+                five_day_ago = float(series.iloc[-6])
+                change_5d_pct = ((last - five_day_ago) / five_day_ago) * 100.0 if five_day_ago else 0.0
+                month_ago = float(series.iloc[0])
+                change_1m_pct = ((last - month_ago) / month_ago) * 100.0 if month_ago else 0.0
+                countries.append({
+                    "key": key,
+                    "name": name,
+                    "weight": weight,
+                    "change_5d_pct": round(change_5d_pct, 2),
+                    "change_1m_pct": round(change_1m_pct, 2),
+                })
+                weighted_5d_sum += change_5d_pct * weight
+                weighted_1m_sum += change_1m_pct * weight
+                total_weight_used += weight
+            except Exception:
+                continue
+
+        if total_weight_used <= 0 or not countries:
+            raise RuntimeError("Dünya endeksi için hiçbir ülke verisi çekilemedi.")
+
+        world_change_5d_pct = weighted_5d_sum / total_weight_used
+        world_change_1m_pct = weighted_1m_sum / total_weight_used
+
+        if world_change_5d_pct > 0.5:
+            regime = "RISK_ON"
+        elif world_change_5d_pct < -0.5:
+            regime = "RISK_OFF"
+        else:
+            regime = "NEUTRAL"
+
+        ranked_by_1m = sorted(countries, key=lambda c: c["change_1m_pct"], reverse=True)
+        strongest = ranked_by_1m[:3]
+        weakest = list(reversed(ranked_by_1m[-3:]))
+
+        return {
+            "countries": countries,
+            "world_change_5d_pct": round(world_change_5d_pct, 2),
+            "world_change_1m_pct": round(world_change_1m_pct, 2),
+            "regime": regime,
+            "money_flowing_toward": [{"name": c["name"], "change_1m_pct": c["change_1m_pct"]} for c in strongest],
+            "money_flowing_away_from": [{"name": c["name"], "change_1m_pct": c["change_1m_pct"]} for c in weakest],
+            "coverage_weight_used_pct": round(total_weight_used * 100.0, 1),
+            "note": (
+                "Ülke ağırlıkları (GSYİH/piyasa büyüklüğüne göre kaba yaklaşık tahmin) ile "
+                "5 günlük/1 aylık endeks değişimlerinin ağırlıklı ortalamasıdır - resmi bir "
+                "endeks değildir, yönlendirici bir gösterge niteliğindedir."
+            ),
+            "time": now_text(),
+        }
+
+    try:
+        return _cache_get_or_fetch("world_market_index", 14400, _fetch)
+    except Exception as exc:
+        return {
+            "countries": [], "world_change_5d_pct": 0.0, "world_change_1m_pct": 0.0,
+            "regime": "NEUTRAL", "money_flowing_toward": [], "money_flowing_away_from": [],
+            "error": str(exc), "time": now_text(),
+        }
+
+
+def get_global_macro_bias(action: str) -> Dict[str, Any]:
+    """get_world_market_index() sonucunu (yukarida) BUY/SELL confidence'ina
+    bias olarak baglar - mevcut get_macro_regime() SADECE ABD+Dolar'a
+    bakiyordu, bu fonksiyon GERCEKTEN kuresel (Cin/Avrupa/Japonya/Hindistan/
+    Ingiltere/Hong Kong dahil) piyasa yonunu dikkate alir. Tum sembollere
+    (kripto dahil) uygulanir - kuresel risk-off ortaminda hicbir varlik
+    tam bagisik degildir."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+    try:
+        world = get_world_market_index()
+        regime = world.get("regime", "NEUTRAL")
+        if world.get("error") or regime == "NEUTRAL":
+            return {"bias": 0, "notes": []}
+        world_5d = world.get("world_change_5d_pct", 0.0)
+        if regime == "RISK_ON" and action == "BUY":
+            return {"bias": 6, "notes": [f"[Dünya Piyasa Endeksi] Küresel piyasalar RISK_ON (ağırlıklı 5g %{world_5d:+.2f}): BUY'ı destekler."]}
+        if regime == "RISK_OFF" and action == "SELL":
+            return {"bias": 6, "notes": [f"[Dünya Piyasa Endeksi] Küresel piyasalar RISK_OFF (ağırlıklı 5g %{world_5d:+.2f}): SELL'i destekler."]}
+        if regime == "RISK_OFF" and action == "BUY":
+            return {"bias": -8, "notes": [f"[Dünya Piyasa Endeksi] Küresel piyasalar RISK_OFF (ağırlıklı 5g %{world_5d:+.2f}): yeni alım riski artıyor."]}
+        if regime == "RISK_ON" and action == "SELL":
+            return {"bias": -5, "notes": [f"[Dünya Piyasa Endeksi] Küresel piyasalar RISK_ON (ağırlıklı 5g %{world_5d:+.2f}): satış (SELL) trende karşı."]}
+    except Exception:
+        pass
+    return {"bias": 0, "notes": []}
+
+
+def get_geopolitical_risk_signal() -> Dict[str, Any]:
+    """Kullanicinin talebi: 'fed karari piyasayi nasil etkiler, iran krizi
+    petrol fiyatlarini nasil etkiler' gibi GERCEK dunya olaylarini/haberleri
+    okuyabilmek. Ucretsiz, API-anahtari GEREKTIRMEYEN GDELT Project DOC 2.0
+    haber taramasi API'si kullanilir - onceden tanimli birkac riskli baslik
+    (Fed faiz karari, Iran/Ortadogu gerilimi, petrol arz sarsintisi, banka/
+    finans krizi, kuresel resesyon) icin son 3 gunluk haber hacmi/tonu (ton
+    negatifse kotu haber agirlikli demektir) taranir. GDELT halka acik/ucretsiz
+    oldugu icin sik istekte hiz siniri (rate limit) var - bu yuzden sonuc 12
+    saat cache'lenir VE herhangi bir hata/rate-limit durumunda sessizce bos
+    (etkisiz) sonuc doner (fail-open, ASLA islem kararini bloke etmez,
+    sadece EK bilgi/bias saglar)."""
+    topics = {
+        "FED_FAIZ": "\"Federal Reserve\" interest rate decision",
+        "IRAN_GERILIM": "Iran Middle East conflict tension",
+        "PETROL_ARZ": "oil supply crisis OPEC",
+        "BANKA_KRIZI": "bank financial crisis",
+        "KURESEL_RESESYON": "global recession warning",
+    }
+
+    def _fetch():
+        results: List[Dict[str, Any]] = []
+        for key, query in topics.items():
+            try:
+                import urllib.parse
+                q = urllib.parse.quote(query)
+                url = (
+                    f"https://api.gdeltproject.org/api/v2/doc/doc?query={q}"
+                    f"&mode=ToneChart&format=json&timespan=3d"
+                )
+                resp = requests.get(url, timeout=8)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                tonechart = data.get("tonechart", [])
+                if not tonechart:
+                    continue
+                total_articles = sum(safe_float(b.get("count")) for b in tonechart)
+                if total_articles <= 0:
+                    continue
+                weighted_tone = sum(safe_float(b.get("bin")) * safe_float(b.get("count")) for b in tonechart) / total_articles
+                results.append({
+                    "key": key,
+                    "topic": query,
+                    "avg_tone": round(weighted_tone, 2),
+                    "article_count": int(total_articles),
+                })
+            except Exception:
+                continue
+            time.sleep(1.2)  # GDELT ucretsiz kotasi icin nazik istek araligi
+
+        if not results:
+            raise RuntimeError("GDELT'ten hicbir haber/ton verisi alinamadi (rate-limit veya erisim sorunu).")
+
+        overall_tone = sum(r["avg_tone"] for r in results) / len(results)
+        if overall_tone <= -3:
+            sentiment = "OLUMSUZ (kötü haber ağırlıklı)"
+        elif overall_tone >= 2:
+            sentiment = "OLUMLU"
+        else:
+            sentiment = "NÖTR"
+
+        return {
+            "topics": results,
+            "overall_tone": round(overall_tone, 2),
+            "sentiment": sentiment,
+            "note": (
+                "GDELT Project (ücretsiz, halka açık küresel haber tarama servisi) üzerinden son "
+                "3 günlük haber tonu - -10 (çok olumsuz) ile +10 (çok olumlu) arası bir ölçektir, "
+                "kesin bir öngörü değildir."
+            ),
+            "time": now_text(),
+        }
+
+    try:
+        return _cache_get_or_fetch("geopolitical_risk_signal", 43200, _fetch)
+    except Exception as exc:
+        return {"topics": [], "overall_tone": 0.0, "sentiment": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
+
+
+def get_geopolitical_risk_bias(action: str) -> Dict[str, Any]:
+    """get_geopolitical_risk_signal() sonucunu (Fed/İran/petrol/banka/resesyon
+    haber tonu) BUY/SELL confidence'ına küçük bir bias olarak bağlar - haber
+    verisi gürültülü olabileceği için etkisi kasıtlı olarak küçük tutulur
+    (sert engel DEĞİL, sadece ek bir ipucu)."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+    try:
+        geo = get_geopolitical_risk_signal()
+        if geo.get("error"):
+            return {"bias": 0, "notes": []}
+        tone = safe_float(geo.get("overall_tone"))
+        if tone <= -3 and action == "BUY":
+            return {"bias": -4, "notes": [f"[Jeopolitik] Küresel haber tonu olumsuz (Fed/İran/petrol/banka, ort. ton {tone:.1f}): yeni alım riskini artırır."]}
+        if tone <= -3 and action == "SELL":
+            return {"bias": 2, "notes": [f"[Jeopolitik] Küresel haber tonu olumsuz (ort. ton {tone:.1f}): SELL'i hafif destekler."]}
+        if tone >= 2 and action == "BUY":
+            return {"bias": 2, "notes": [f"[Jeopolitik] Küresel haber tonu olumlu (ort. ton {tone:.1f}): BUY'ı hafif destekler."]}
+    except Exception:
+        pass
+    return {"bias": 0, "notes": []}
+
+
+def get_options_flow_signal(symbol: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'nvda opsiyonlari dun cok atti, vadeli/opsiyonlardaki
+    degisime bakarak pay tarafinda islem yapabilir miyiz'. Profesyonel
+    yatirimcilarin izledigi klasik bir 'akilli para' oncu gostergesi: put/call
+    hacim orani ve ATM (paraya-yakin) opsiyonlarin ima edilen volatilitesi
+    (IV). yfinance uzerinden (IBKR ozel opsiyon veri izni gerektirmeden,
+    ucretsiz) en yakin vadeli islem tarihinin opsiyon zincirine bakilir:
+      - Call hacmi put hacminden belirgin fazlaysa (oran <0.7) -> yukselis
+        beklentisi (BUY'i destekler).
+      - Put hacmi call hacminden belirgin fazlaysa (oran >1.3) -> dusus
+        beklentisi (SELL'i destekler/BUY'a karsi temkinli olunur).
+      - IV, hissenin normal seviyesine gore asiri yuksekse (>%80) buyuk bir
+        haber/olay beklentisi (kazanc aciklamasi, dava, vs.) var demektir -
+        yon vermez ama oynaklik/risk uyarisi olarak not dusulur.
+    Sadece STK (hisse) sembolleri icin anlamlidir. Agir yfinance cagrisi
+    oldugu icin sembol basina 2 saat cache'lenir, veri yoksa (opsiyon
+    islem gormeyen kucuk semboller) sessizce notr/bos doner."""
+    def _fetch():
+        import yfinance as yf
+        ticker = yf.Ticker(to_yfinance_symbol(symbol))
+        expirations = ticker.options
+        if not expirations:
+            raise RuntimeError(f"{symbol} için opsiyon verisi yok.")
+        nearest_expiry = expirations[0]
+        chain = ticker.option_chain(nearest_expiry)
+        calls = chain.calls
+        puts = chain.puts
+        call_volume = float(calls["volume"].fillna(0).sum())
+        put_volume = float(puts["volume"].fillna(0).sum())
+        if call_volume + put_volume <= 0:
+            raise RuntimeError(f"{symbol} için opsiyon hacim verisi yok.")
+        put_call_ratio = (put_volume / call_volume) if call_volume > 0 else 999.0
+
+        last_price = safe_float(ticker.fast_info.get("lastPrice")) if hasattr(ticker, "fast_info") else 0.0
+        atm_iv = None
+        try:
+            if last_price > 0 and not calls.empty:
+                calls = calls.copy()
+                calls["dist"] = (calls["strike"] - last_price).abs()
+                atm_row = calls.sort_values("dist").iloc[0]
+                atm_iv = safe_float(atm_row.get("impliedVolatility")) * 100.0
+        except Exception:
+            atm_iv = None
+
+        if put_call_ratio < 0.7:
+            flow_signal = "BUY"
+            flow_reason = f"Call hacmi put hacminden belirgin fazla (P/C oranı {put_call_ratio:.2f}) - yükseliş beklentisi."
+        elif put_call_ratio > 1.3:
+            flow_signal = "SELL"
+            flow_reason = f"Put hacmi call hacminden belirgin fazla (P/C oranı {put_call_ratio:.2f}) - düşüş beklentisi."
+        else:
+            flow_signal = "NEUTRAL"
+            flow_reason = f"Put/call hacmi dengeli (oran {put_call_ratio:.2f})."
+
+        return {
+            "symbol": symbol,
+            "expiry": nearest_expiry,
+            "call_volume": int(call_volume),
+            "put_volume": int(put_volume),
+            "put_call_ratio": round(put_call_ratio, 3),
+            "atm_implied_volatility_pct": round(atm_iv, 1) if atm_iv else None,
+            "flow_signal": flow_signal,
+            "reason": flow_reason,
+            "time": now_text(),
+        }
+
+    try:
+        return _cache_get_or_fetch(f"options_flow:{symbol}", 7200, _fetch)
+    except Exception as exc:
+        return {"symbol": symbol, "flow_signal": "NEUTRAL", "reason": "", "error": str(exc), "time": now_text()}
+
+
+def get_options_flow_bias(symbol: str, action: str, asset_type: str) -> Dict[str, Any]:
+    """get_options_flow_signal() sonucunu (put/call oranı) BUY/SELL
+    confidence'ına bias olarak bağlar - SADECE hisse (STK) sembolleri için
+    (opsiyon zinciri olmayan forex/futures/kripto IBKR sembollerinde
+    otomatik olarak notr/etkisiz döner). Kullanicinin talebi: 'sadece
+    sinyal olarak kullan, opsiyon islemi acma' - bu yuzden SADECE mevcut
+    hisse BUY/SELL kararina kucuk bir bias ekler, opsiyon/vadeli emri
+    ASLA gondermez."""
+    if action not in ("BUY", "SELL") or asset_type != "STK":
+        return {"bias": 0, "notes": []}
+    try:
+        flow = get_options_flow_signal(symbol)
+        if flow.get("error") or flow.get("flow_signal") == "NEUTRAL":
+            return {"bias": 0, "notes": []}
+        signal = flow.get("flow_signal")
+        reason = flow.get("reason", "")
+        if signal == action:
+            return {"bias": 5, "notes": [f"[Opsiyon Akışı] {reason}"]}
+        if signal != "NEUTRAL" and signal != action:
+            return {"bias": -5, "notes": [f"[Opsiyon Akışı] {reason} ({action} yönüne karşı)."]}
+    except Exception:
+        pass
+    return {"bias": 0, "notes": []}
+
+
 def get_macro_risk_bias(symbol: str, action: str) -> Dict[str, Any]:
     """Balon/asiri degerleme, bilanco/nakit akis sagligi, short/long pozisyonlanma
     ve manipulasyon taramasi, ve sektorler arasi senaryo analizini (hepsi
@@ -8765,6 +9106,39 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + macro_risk["bias"]))
         if macro_risk["notes"]:
             reason = (reason + " " + " ".join(macro_risk["notes"])).strip()
+
+        # Kullanicinin talebi: 'genel piyasa yapisini okuyamiyoruz, dunya
+        # genelinde her ulkeyi agirlandirip bir dunya borsa/finans endeksi
+        # cikarsin'. Bu, SADECE ABD'ye bakan get_macro_risk_bias/market_cycle
+        # gibi katmanlardan farkli olarak gercekten kuresel (Cin/Avrupa/
+        # Japonya/Hindistan/Ingiltere/Hong Kong dahil) piyasa yonunu dikkate
+        # alir - tum sembollere (kripto dahil) uygulanir.
+        global_macro = get_global_macro_bias(action)
+        if global_macro["bias"] != 0:
+            confidence = max(0, min(95, confidence + global_macro["bias"]))
+        if global_macro["notes"]:
+            reason = (reason + " " + " ".join(global_macro["notes"])).strip()
+
+        # Kullanicinin talebi: 'fed karari piyasayi nasil etkiler, iran krizi
+        # petrol fiyatlarini nasil etkiler' - GDELT (ucretsiz, halka acik)
+        # haber taramasindan Fed/Iran/petrol/banka/resesyon basliklarinin son
+        # 3 gunluk haber tonu kucuk bir ek bias olarak eklenir (gurultulu
+        # olabilecegi icin etkisi kasitli olarak kucuk tutulur).
+        geo_risk = get_geopolitical_risk_bias(action)
+        if geo_risk["bias"] != 0:
+            confidence = max(0, min(95, confidence + geo_risk["bias"]))
+        if geo_risk["notes"]:
+            reason = (reason + " " + " ".join(geo_risk["notes"])).strip()
+
+        # Kullanicinin talebi: 'nvda opsiyonlari dun cok atti, vadeli ve
+        # opsiyonlardaki degisime bakarak payda islem yapabilir miyiz' -
+        # opsiyon islemi ACILMAZ, sadece put/call hacim orani hisse (STK)
+        # BUY/SELL kararina ek 'akilli para' sinyali olarak eklenir.
+        options_flow = get_options_flow_bias(symbol, action, asset_type)
+        if options_flow["bias"] != 0:
+            confidence = max(0, min(95, confidence + options_flow["bias"]))
+        if options_flow["notes"]:
+            reason = (reason + " " + " ".join(options_flow["notes"])).strip()
 
         # Kullanicinin talebi: genel piyasa dususlerinde nakitte beklemek yerine
         # guvenli limana (altin/petrol) yonelme veya dipten toparlanan
@@ -14433,6 +14807,85 @@ def valuation_bubble_analysis_endpoint():
         return jsonify(payload)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "assets": [], "time": now_text()}), 200
+
+
+@app.route("/global-market-report", methods=["GET"])
+def global_market_report_endpoint():
+    """Kullanicinin talebi: 'yapay zeka dunyadaki her seyi tarayip genel bir
+    piyasa analizi cikarsin - dunya genelinde balon var mi, abd dis borcu,
+    fed karari, iran krizi/petrol, kur etkisi, para hangi ulkeye/sektore
+    gidiyor, dunya finans endeksi gibi'. Bu tek endpoint mevcut TUM makro
+    analiz katmanlarini (dunya endeksi, balon/cokus riski, sektor rotasyonu,
+    aktif senaryolar, jeopolitik haber tonu) BIRLESTIRIP okunabilir Turkce bir
+    ozet metin + ham veriler olarak dondurur - /valuation-bubble-analysis'ten
+    farki, kuresel (sadece ABD degil) endeks + jeopolitik/haber katmanini da
+    icermesi ve tek bir anlatiya (narrative) donusturmesidir."""
+    try:
+        world = get_world_market_index()
+        valuation = get_valuation_bubble_analysis()
+        geo = get_geopolitical_risk_signal()
+        sector_scenarios = get_sector_scenario_analysis()
+
+        lines: List[str] = []
+        lines.append("🌍 DÜNYA PİYASA ANALİZİ")
+        lines.append("")
+
+        w_regime = world.get("regime", "NEUTRAL")
+        w_5d = world.get("world_change_5d_pct")
+        w_1m = world.get("world_change_1m_pct")
+        if world.get("error"):
+            lines.append("• Dünya endeksi verisi şu an alınamadı.")
+        else:
+            regime_text = {"RISK_ON": "RİSK-AÇIK (iyimser)", "RISK_OFF": "RİSK-KAPALI (temkinli/kaçış)", "NEUTRAL": "NÖTR"}.get(w_regime, w_regime)
+            lines.append(f"• Küresel Piyasa Rejimi: {regime_text} (ağırlıklı 5g %{w_5d:+.2f}, 1 ay %{w_1m:+.2f})")
+            toward = world.get("money_flowing_toward", [])
+            away = world.get("money_flowing_away_from", [])
+            if toward:
+                lines.append("• Para akışının güçlü olduğu bölgeler (1 ay): " + ", ".join(f"{c['name']} (%{c['change_1m_pct']:+.1f})" for c in toward))
+            if away:
+                lines.append("• Zayıf/kaçış yaşanan bölgeler (1 ay): " + ", ".join(f"{c['name']} (%{c['change_1m_pct']:+.1f})" for c in away))
+
+        lines.append("")
+        crash_level = valuation.get("crash_risk_level", "BİLİNMİYOR")
+        lines.append(f"• Genel Balon/Çöküş Riski: {crash_level} - {valuation.get('summary', '')}")
+        lines.append(f"  (VIX {valuation.get('vix')}, Korku/Açgözlülük Endeksi {valuation.get('fear_greed_index')}, {valuation.get('overheat_count')} varlık aşırı ısınmış)")
+
+        lines.append("")
+        active_scenarios = [s for s in sector_scenarios.get("scenarios", []) if s.get("status") == "AKTİF"]
+        if active_scenarios:
+            lines.append("• Şu An AKTİF Sayılan Senaryolar (gerçek veriyle teyitli):")
+            for s in active_scenarios:
+                lines.append(f"  - {s.get('title')}: {s.get('narrative', '')[:200]}")
+        else:
+            lines.append("• Şu an gerçek veriyle teyitli, 'AKTİF' durumda özel bir kriz senaryosu yok.")
+
+        lines.append("")
+        if geo.get("error"):
+            lines.append("• Jeopolitik/haber tonu verisi şu an alınamadı (GDELT erişim/hız sınırı).")
+        else:
+            lines.append(f"• Küresel Haber Tonu (Fed/İran/petrol/banka/resesyon, son 3 gün): {geo.get('sentiment')} (ort. ton {geo.get('overall_tone')})")
+            for t in geo.get("topics", []):
+                lines.append(f"  - {t.get('topic')}: ton {t.get('avg_tone')} ({t.get('article_count')} haber)")
+
+        lines.append("")
+        lines.append(
+            "Not: Bu, sayısal piyasa verisi (ülke endeksleri, VIX, altın/petrol/DXY, sektör "
+            "ETF'leri) ve ücretsiz halka açık haber taramasından (GDELT) otomatik üretilmiş bir "
+            "özet analizdir; yatırım tavsiyesi değildir. Sistem bu verileri otomatik alım-satım "
+            "kararlarına da (küçük bias'lar olarak) dahil eder."
+        )
+
+        return jsonify({
+            "ok": True,
+            "summary_text": "\n".join(lines),
+            "world_market_index": world,
+            "valuation_bubble_analysis": valuation,
+            "geopolitical_risk": geo,
+            "active_scenarios": active_scenarios,
+            "time": now_text(),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
 
 
 @app.route("/market-signals/external", methods=["GET"])
