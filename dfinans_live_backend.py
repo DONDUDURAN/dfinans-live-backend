@@ -668,6 +668,15 @@ IBKR_TAKE_PROFIT_PCT_NON_STOCK = float(os.getenv("IBKR_TAKE_PROFIT_PCT_NON_STOCK
 # arttigi icin risk de arttigindan kari daha erken realize etmek mantikli.
 BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "1.0"))
 IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.0"))
+# Kullanicinin talebi: 'atr çok yüksek, T %3.51 karda kapatılsın, atr
+# olanlarda en fazla yüzde 2'de kapatılsın' - ATR-bazli dinamik hedef
+# (compute_dynamic_take_profit_pct, bkz. ATR_TARGET_MULTIPLIER) volatil
+# hisselerde hedefi %8+ gibi ulasilmasi zor seviyelere buyutebiliyordu (T
+# ornegi: ATR%2.67 x 3.0 = %8 hedef, %3.51 karda pozisyon hic kapanmadi).
+# Bu ust sinir IBKR hisse (STK) pozisyonlarinda ATR-buyutulmus hedefi
+# ASLA bu degerin ustune cikarmaz (sabit taban hedef, IBKR_TAKE_PROFIT_PCT,
+# etkilenmez - o zaten bunun altinda).
+IBKR_ATR_TAKE_PROFIT_CAP_PCT = float(os.getenv("IBKR_ATR_TAKE_PROFIT_CAP_PCT", "2.0"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
 # dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
@@ -10745,6 +10754,10 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             enforce_min_reward_risk=False,
         )
         ibkr_take_profit_pct = dynamic_tp["take_profit_pct"]
+        # Kullanicinin talebi: 'atr çok yüksek, en fazla yüzde 2'de kapatılsın' -
+        # ATR-bazli buyutulmus hedef IBKR_ATR_TAKE_PROFIT_CAP_PCT'yi asamaz.
+        if IBKR_ATR_TAKE_PROFIT_CAP_PCT > 0:
+            ibkr_take_profit_pct = min(ibkr_take_profit_pct, IBKR_ATR_TAKE_PROFIT_CAP_PCT)
         # Kullanicinin talebi (GUNCELLEME): IBKR'de trailing kafa karistirici
         # bulundu (SAP/GLD %2-3 karda idi ama zirveden %1.2 geri cekilme
         # beklendigi icin kapanmiyordu) - IBKR'de artik hedefe ulasilinca
