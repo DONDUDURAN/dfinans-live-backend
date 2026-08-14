@@ -5638,19 +5638,28 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
 
 
 def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
-    """Kisa (1s), orta (4s) ve uzun (24s) vadeli mum kapanislarindan yuzde
-    degisim hesaplayip bunlarin AYNI YONDE olup olmadigina bakar. Mevcut
-    sistem sadece 24s degisimi (change_24h) kullaniyordu - kisa vadeli yon
-    celiskisi (orn. 24s +%5 ama son 1s -%2, yani donus baslamis olabilir)
-    fark edilmiyordu. Kripto icin Binance 1h/4h/1d mumlari, IBKR icin
-    (intraday veri bu ortamda pratik olarak elde edilemedigi icin) gunluk
-    bar serisinden turetilen kisa/orta/uzun pencereler kullanilir.
+    """Kisa (1s), orta (4s), uzun (24s), 1 hafta ve 1 ay vadeli mum
+    kapanislarindan yuzde degisim hesaplayip bunlarin AYNI YONDE olup
+    olmadigina bakar. Mevcut sistem sadece 24s degisimi (change_24h)
+    kullaniyordu - kisa vadeli yon celiskisi (orn. 24s +%5 ama son 1s -%2,
+    yani donus baslamis olabilir) fark edilmiyordu. Kripto icin Binance
+    1h/4h/1d/1w mumlari, IBKR icin (intraday veri bu ortamda pratik olarak
+    elde edilemedigi icin) gunluk bar serisinden turetilen kisa/orta/uzun/
+    hafta/ay pencereler kullanilir.
+    Kullanicinin talebi: 'momentumda bir gun uc gun bir hafta bir ay vs
+    bakacaktik hani' - onceden sadece kisa/orta/uzun (1/3/5 gun) pencereler
+    vardi, hafta/ay YOKTU. Simdi 1 hafta (~5 islem gunu) ve 1 ay (~22 islem
+    gunu) pencereleri de eklendi ve "week_month_aligned" alani (haftalik VE
+    aylik ayni yonde mi, yani orta-uzun vadeli gercek trend var mi) bilgisi
+    donduruluyor - bu bilgi artik SADECE bias degil, get_multi_timeframe_co_signal
+    araciligiyla order_flow gibi bagimsiz bir BUY/SELL co-sinyali de
+    uretebiliyor (bkz. asagida).
     Sembol+broker basina 15dk cache'lenir."""
     def _fetch():
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=10, contract_month=market_info.get("contract_month", ""),
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=35, contract_month=market_info.get("contract_month", ""),
             )
             closes = [b["close"] for b in bars]
             if len(closes) < 6:
@@ -5658,18 +5667,26 @@ def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -
             short_change = ((closes[-1] - closes[-2]) / closes[-2]) * 100.0 if closes[-2] else 0.0
             mid_change = ((closes[-1] - closes[-4]) / closes[-4]) * 100.0 if len(closes) >= 4 and closes[-4] else 0.0
             long_change = ((closes[-1] - closes[-6]) / closes[-6]) * 100.0 if len(closes) >= 6 and closes[-6] else 0.0
-            timeframe_labels = {"short": "1 gün", "mid": "3 gün", "long": "5 gün"}
+            week_idx = -6 if len(closes) >= 6 else None
+            week_change = ((closes[-1] - closes[week_idx]) / closes[week_idx]) * 100.0 if week_idx is not None and closes[week_idx] else 0.0
+            month_idx = -22 if len(closes) >= 22 else None
+            month_change = ((closes[-1] - closes[month_idx]) / closes[month_idx]) * 100.0 if month_idx is not None and closes[month_idx] else None
+            timeframe_labels = {"short": "1 gün", "mid": "3 gün", "long": "5 gün", "week": "1 hafta", "month": "1 ay"}
         else:
             binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
             hourly = fetch_binance_klines(symbol, binance_market, interval="1h", total_candles=6)
             four_hourly = fetch_binance_klines(symbol, binance_market, interval="4h", total_candles=6)
-            daily = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=2)
+            daily = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=32)
             if len(hourly) < 2 or len(four_hourly) < 2 or len(daily) < 2:
                 raise RuntimeError(f"{symbol} için çoklu zaman dilimi hesaplamaya yetecek veri yok.")
             short_change = ((hourly[-1]["close"] - hourly[-2]["close"]) / hourly[-2]["close"]) * 100.0 if hourly[-2]["close"] else 0.0
             mid_change = ((four_hourly[-1]["close"] - four_hourly[-2]["close"]) / four_hourly[-2]["close"]) * 100.0 if four_hourly[-2]["close"] else 0.0
             long_change = ((daily[-1]["close"] - daily[-2]["close"]) / daily[-2]["close"]) * 100.0 if daily[-2]["close"] else 0.0
-            timeframe_labels = {"short": "1 saat", "mid": "4 saat", "long": "24 saat"}
+            week_idx = -8 if len(daily) >= 8 else None
+            week_change = ((daily[-1]["close"] - daily[week_idx]["close"]) / daily[week_idx]["close"]) * 100.0 if week_idx is not None and daily[week_idx]["close"] else 0.0
+            month_idx = -31 if len(daily) >= 31 else None
+            month_change = ((daily[-1]["close"] - daily[month_idx]["close"]) / daily[month_idx]["close"]) * 100.0 if month_idx is not None and daily[month_idx]["close"] else None
+            timeframe_labels = {"short": "1 saat", "mid": "4 saat", "long": "24 saat", "week": "1 hafta", "month": "1 ay"}
 
         directions = []
         for v in (short_change, mid_change, long_change):
@@ -5683,18 +5700,70 @@ def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -
         aligned = len(non_zero) >= 2 and len(set(non_zero)) == 1
         conflicting = len(set(d for d in directions if d != 0)) > 1
 
+        def _dir(v: Optional[float]) -> int:
+            if v is None:
+                return 0
+            if v > 0.5:
+                return 1
+            if v < -0.5:
+                return -1
+            return 0
+
+        week_dir = _dir(week_change)
+        month_dir = _dir(month_change) if month_change is not None else 0
+        week_month_aligned = bool(week_dir != 0 and week_dir == month_dir)
+
         return {
             "symbol": symbol,
             "short_change_pct": round(short_change, 3),
             "mid_change_pct": round(mid_change, 3),
             "long_change_pct": round(long_change, 3),
+            "week_change_pct": round(week_change, 3),
+            "month_change_pct": round(month_change, 3) if month_change is not None else None,
             "timeframe_labels": timeframe_labels,
             "aligned": aligned,
             "conflicting": conflicting,
             "consensus_direction": non_zero[0] if aligned else 0,
+            "week_month_aligned": week_month_aligned,
+            "week_month_direction": week_dir if week_month_aligned else 0,
             "time": now_text(),
         }
     return _cache_get_or_fetch(f"multi_timeframe:{broker}:{symbol}", 900, _fetch)
+
+
+def get_multi_timeframe_co_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'momentumda bir gun uc gun bir hafta bir ay vs
+    bakacaktik hani, ayi boga piyasasi falan' - onceden 1/3/5 gunluk pencere
+    sadece kucuk bir confidence bias'i (+-5/6) uretiyordu, asil BUY/SELL
+    karari HALA dar/anlik '24s degisim'e (change_24h) dayaniyordu - bu da
+    NVDA gibi bir hisse 1 hafta/1 ay net yukari trendliyken bile anlik
+    degisim %0 ise 'net sinyal yok' (WAIT) sonucuna yol aciyordu.
+    Bu fonksiyon 1 hafta VE 1 ay penceresinin AYNI yonde oldugu (gercek
+    orta-uzun vadeli trend, sadece gurultu degil) durumlarda order_flow
+    ile ayni seviyede BAGIMSIZ bir BUY/SELL co-sinyali uretir - boylece
+    kisa vadeli (24s) sinyal notr olsa bile uzun vadeli trend tek basina
+    islem tetikleyebilir. Veri yetersizse veya hafta/ay celisiyorsa NEUTRAL
+    doner (islemi engellemez, sadece katkida bulunmaz)."""
+    try:
+        mtf = get_multi_timeframe_momentum_signal(symbol, market, broker)
+        if mtf.get("error") or not mtf.get("week_month_aligned"):
+            return {"signal": "NEUTRAL", "reason": ""}
+        direction = mtf.get("week_month_direction", 0)
+        if direction == 0:
+            return {"signal": "NEUTRAL", "reason": ""}
+        signal = "BUY" if direction > 0 else "SELL"
+        labels = mtf.get("timeframe_labels", {})
+        reason = (
+            f"{labels.get('week','1 hafta')} (%{mtf.get('week_change_pct')}) ve "
+            f"{labels.get('month','1 ay')} (%{mtf.get('month_change_pct')}) aynı yönde "
+            f"({signal} trend) - orta/uzun vadeli momentum co-sinyali."
+        )
+        return {"signal": signal, "reason": reason}
+    except Exception:
+        return {"signal": "NEUTRAL", "reason": ""}
+
+
+
 
 
 def get_multi_timeframe_signal_bias(symbol: str, market: str, broker: str, action: str) -> Dict[str, Any]:
@@ -8416,14 +8485,22 @@ def _auto_trader_run_symbol(
         assert_ibkr_market_allowed(exchange, currency, symbol)
 
         # IBKR icin iki bagimsiz sinyal kullanilir: (1) fiyat momentumu (change_24h),
-        # (2) emir defteri bid/ask boyut dengesi (order_flow_signal). Ikisi ayni yonde
-        # BUY/SELL derse islem acilir; biri WAIT/NEUTRAL ise digeri tek basina yeterlidir
-        # (boylece tek sinyal her zaman zorunlu tutulmaz, "hic islem acmiyor" sorunu onlenir),
-        # ama ikisi ZIT yon gosterirse (biri BUY biri SELL) islem acilmaz - celiskili sinyal.
+        # (2) emir defteri bid/ask boyut dengesi (order_flow_signal), (3) orta/
+        # uzun vadeli (1 hafta + 1 ay ayni yonde) trend co-sinyali (bkz.
+        # get_multi_timeframe_co_signal). Kullanicinin talebi: 'momentumda bir
+        # gun uc gun bir hafta bir ay vs bakacaktik hani' - onceden sadece (1)
+        # ve (2) vardi, NVDA gibi 1 hafta/1 ay net trendli ama anlik (24s)
+        # degisimi duz olan semboller 'net sinyal yok' (WAIT) olarak
+        # atlanıyordu. Simdi ucu de esit agirlikta: NOTR olmayanlar (BUY/SELL
+        # diyenler) AYNI yonde ise islem acilir (ne kadar cok teyit o kadar
+        # yuksek confidence); herhangi ikisi ZIT yonde ise (biri BUY biri
+        # SELL) celiskili sinyal nedeniyle islem acilmaz.
         snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency, contract_month=contract_month)
         price = safe_float(snap.get("price"))
         change = safe_float(snap.get("change_24h"))
         order_flow = str(snap.get("order_flow_signal", "NEUTRAL")).upper()
+        mtf_co = get_multi_timeframe_co_signal(symbol, market, "IBKR")
+        mtf_co_signal = str(mtf_co.get("signal", "NEUTRAL")).upper()
 
         momentum_signal = "WAIT"
         if change > 0.6:
@@ -8431,26 +8508,48 @@ def _auto_trader_run_symbol(
         elif change < -0.6:
             momentum_signal = "SELL"
 
-        if momentum_signal in ["BUY", "SELL"] and order_flow in ["BUY", "SELL"] and momentum_signal != order_flow:
+        _signal_votes = [s for s in (momentum_signal, order_flow, mtf_co_signal) if s in ("BUY", "SELL")]
+        _distinct_votes = set(_signal_votes)
+
+        if len(_distinct_votes) > 1:
             action = "WAIT"
             confidence = 50
             reason = (
                 f"IBKR sinyalleri çelişiyor: momentum {momentum_signal} (piyasa 24s değişimi %{change:.2f}, pozisyon kârıyla KARIŞTIRILMAMALI), "
-                f"emir akışı {order_flow} -> işlem açılmadı."
+                f"emir akışı {order_flow}, uzun vadeli trend {mtf_co_signal} -> işlem açılmadı."
             )
         else:
-            action = momentum_signal if momentum_signal in ["BUY", "SELL"] else (order_flow if order_flow in ["BUY", "SELL"] else "WAIT")
+            action = _signal_votes[0] if _signal_votes else "WAIT"
             confidence = min(90, int(55 + abs(change) * 11))
-            if momentum_signal in ["BUY", "SELL"] and order_flow == momentum_signal:
-                confidence = min(95, confidence + 10)
+            _num_confirms = len(_signal_votes)
+            if _num_confirms >= 2:
+                confidence = min(95, confidence + 10 * (_num_confirms - 1))
+            if _num_confirms == 3:
+                reason = (
+                    f"IBKR üçlü teyit: momentum {momentum_signal} (24s değişim %{change:.2f}), "
+                    f"emir akışı {order_flow}, uzun vadeli trend ({mtf_co.get('reason','')}) hepsi aynı yönde."
+                )
+            elif momentum_signal in ["BUY", "SELL"] and order_flow == momentum_signal:
                 reason = (
                     f"IBKR çift teyit: momentum {momentum_signal} (24s değişim %{change:.2f}) "
                     f"ve emir akışı da {order_flow} yönünde."
+                )
+            elif momentum_signal in ["BUY", "SELL"] and mtf_co_signal == momentum_signal:
+                reason = (
+                    f"IBKR çift teyit: momentum {momentum_signal} (24s değişim %{change:.2f}) "
+                    f"ve uzun vadeli trend de aynı yönde ({mtf_co.get('reason','')})."
+                )
+            elif order_flow in ["BUY", "SELL"] and mtf_co_signal == order_flow:
+                reason = (
+                    f"IBKR çift teyit: emir akışı {order_flow} ve uzun vadeli trend de aynı yönde "
+                    f"({mtf_co.get('reason','')})."
                 )
             elif momentum_signal in ["BUY", "SELL"]:
                 reason = f"IBKR momentum sinyali: 24s değişim %{change:.2f} ({momentum_signal}), emir akışı nötr."
             elif order_flow in ["BUY", "SELL"]:
                 reason = f"IBKR emir akışı sinyali: bid/ask dengesi {order_flow} yönünde, momentum nötr."
+            elif mtf_co_signal in ["BUY", "SELL"]:
+                reason = f"IBKR uzun vadeli trend sinyali: {mtf_co.get('reason','')} (anlık momentum/emir akışı nötr)."
             else:
                 reason = f"IBKR: net sinyal yok (24s değişim %{change:.2f})."
 
