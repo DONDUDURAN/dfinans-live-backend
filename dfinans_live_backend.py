@@ -9899,13 +9899,14 @@ def _auto_trader_run_symbol(
                                 if qty > 0:
                                     ibkr_fractional_order = True
                             else:
+                                _qty_before_floor = qty
                                 qty = math.floor(qty)
                                 if qty < 1:
                                     if ibkr_allow_fractional_here:
                                         # Zaten hedeflenen miktar 1 hisseden kucuk (ör. AI
                                         # 0.3 hisselik bir tutar hesaplamis) - fon yeterliyse
                                         # dogrudan kesirli emir gonder, hatayla iptal etme.
-                                        fractional_qty = math.floor((base_qty if base_qty > 0 else qty) * 10000) / 10000.0
+                                        fractional_qty = math.floor((_qty_before_floor if _qty_before_floor > 0 else qty) * 10000) / 10000.0
                                         if fractional_qty > 0 and fractional_qty * price_usd <= safe_budget + 1e-9:
                                             qty = fractional_qty
                                             ibkr_fractional_order = True
@@ -9920,13 +9921,13 @@ def _auto_trader_run_symbol(
                                                 "time": now_text(),
                                             }
                                     else:
-                                        if asset_type == "STK" and currency.upper() == "USD" and (base_qty if base_qty > 0 else qty) * price_usd >= 1.0:
+                                        if asset_type == "STK" and currency.upper() == "USD" and (_qty_before_floor if _qty_before_floor > 0 else qty) * price_usd >= 1.0:
                                             # Ayni Cash Quantity mekanizmasi burada da
                                             # denenir: hedeflenen pozisyon zaten 1
                                             # hisseden kucuk (ör. AI 0.3 hisselik tutar
                                             # hesaplamis) - hatayla iptal etmek yerine
                                             # notional tutarla emir denenir.
-                                            ibkr_cash_qty_amount = round((base_qty if base_qty > 0 else qty) * price_usd, 2)
+                                            ibkr_cash_qty_amount = round((_qty_before_floor if _qty_before_floor > 0 else qty) * price_usd, 2)
                                             reason = (
                                                 reason
                                                 + f" ({ibkr_cash_qty_amount:.2f} USD tutarında kesirli (cash quantity) emir denenecek.)"
