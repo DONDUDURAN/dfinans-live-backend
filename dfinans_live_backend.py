@@ -6459,7 +6459,7 @@ def get_global_macro_bias(action: str) -> Dict[str, Any]:
     return {"bias": 0, "notes": []}
 
 
-def get_geopolitical_risk_signal() -> Dict[str, Any]:
+def get_geo_news_topics_signal() -> Dict[str, Any]:
     """Kullanicinin talebi: 'fed karari piyasayi nasil etkiler, iran krizi
     petrol fiyatlarini nasil etkiler' gibi GERCEK dunya olaylarini/haberleri
     okuyabilmek. Ucretsiz, API-anahtari GEREKTIRMEYEN GDELT Project DOC 2.0
@@ -6539,7 +6539,7 @@ def get_geopolitical_risk_signal() -> Dict[str, Any]:
         return {"topics": [], "overall_tone": 0.0, "sentiment": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
 
 
-def get_geopolitical_risk_bias(action: str) -> Dict[str, Any]:
+def get_geo_news_topics_bias(action: str) -> Dict[str, Any]:
     """get_geopolitical_risk_signal() sonucunu (Fed/İran/petrol/banka/resesyon
     haber tonu) BUY/SELL confidence'ına küçük bir bias olarak bağlar - haber
     verisi gürültülü olabileceği için etkisi kasıtlı olarak küçük tutulur
@@ -6547,7 +6547,7 @@ def get_geopolitical_risk_bias(action: str) -> Dict[str, Any]:
     if action not in ("BUY", "SELL"):
         return {"bias": 0, "notes": []}
     try:
-        geo = get_geopolitical_risk_signal()
+        geo = get_geo_news_topics_signal()
         if geo.get("error"):
             return {"bias": 0, "notes": []}
         tone = safe_float(geo.get("overall_tone"))
@@ -6657,6 +6657,270 @@ def get_options_flow_bias(symbol: str, action: str, asset_type: str) -> Dict[str
     except Exception:
         pass
     return {"bias": 0, "notes": []}
+
+
+def get_yield_curve_signal() -> Dict[str, Any]:
+    """Kullanicinin sorusu: 'buyuk yatirimcilar/kurumlar neye bakiyor' -
+    kurumsal yatirimcilarin #1 resesyon gostergesi getiri egrisidir (yield
+    curve). 3 aylik hazine bonosu (^IRX) getirisi 10 yillik tahvil (^TNX)
+    getirisinden YUKSEK olursa egri 'ters donmus' (inverted) sayilir - bu
+    tarihsel olarak her ABD resesyonundan once gorulmustur (3a10y spread,
+    NY Fed arastirmalarina gore 2y10y'den bile daha guvenilir kabul edilir).
+    Ucretsiz Yahoo Finance verisiyle hesaplanir, 6 saat cache'lenir."""
+    def _fetch():
+        import yfinance as yf
+        data = yf.download(["^IRX", "^TNX"], period="10d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"] if "Close" in data else data
+        irx = float(close["^IRX"].dropna().iloc[-1])
+        tnx = float(close["^TNX"].dropna().iloc[-1])
+        spread = tnx - irx
+        if spread < -0.10:
+            status = "TERS_DONMUS (inverted) - resesyon riski yuksek"
+        elif spread < 0.25:
+            status = "DUZLESIYOR (flattening) - dikkatli olunmali"
+        else:
+            status = "NORMAL"
+        return {
+            "three_month_yield_pct": round(irx, 2),
+            "ten_year_yield_pct": round(tnx, 2),
+            "spread_10y_minus_3m": round(spread, 2),
+            "status": status,
+            "note": "3ay-10yil getiri farki (spread) negatifse egri ters donmus demektir; kurumsal yatirimcilarin en cok izledigi resesyon on gostergesidir.",
+            "time": now_text(),
+        }
+    try:
+        return _cache_get_or_fetch("yield_curve_signal", 21600, _fetch)
+    except Exception as exc:
+        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
+
+
+def get_credit_spread_signal() -> Dict[str, Any]:
+    """Kurumsal 'risk istahi' gostergesi: yuksek getirili (junk/high-yield)
+    tahvil ETF'i (HYG) ile orta vadeli hazine tahvili ETF'i (IEF) arasindaki
+    goreceli performans - kredi spreadleri genisliyorsa (HYG, IEF'e gore
+    geriliyorsa) bu genelde borsa dususlerinden ONCE gorulen bir 'akilli para'
+    stres sinyalidir (buyuk fonlar kredi piyasalarini hisse piyasasindan once
+    okur). 20 gunluk goreceli performans farkina bakar, 6 saat cache'lenir."""
+    def _fetch():
+        import yfinance as yf
+        data = yf.download(["HYG", "IEF"], period="30d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"] if "Close" in data else data
+        hyg = close["HYG"].dropna()
+        ief = close["IEF"].dropna()
+        if len(hyg) < 21 or len(ief) < 21:
+            raise RuntimeError("Kredi spreadi icin yeterli veri yok.")
+        hyg_chg = (float(hyg.iloc[-1]) - float(hyg.iloc[-21])) / float(hyg.iloc[-21]) * 100.0
+        ief_chg = (float(ief.iloc[-1]) - float(ief.iloc[-21])) / float(ief.iloc[-21]) * 100.0
+        relative = hyg_chg - ief_chg
+        if relative < -2.0:
+            status = "GENISLIYOR (widening) - kredi stresi artiyor, risk-off"
+        elif relative > 1.5:
+            status = "DARALIYOR (tightening) - risk istahi guclu"
+        else:
+            status = "STABIL"
+        return {
+            "hyg_20d_change_pct": round(hyg_chg, 2),
+            "ief_20d_change_pct": round(ief_chg, 2),
+            "relative_performance_pct": round(relative, 2),
+            "status": status,
+            "note": "Yuksek getirili tahvil (HYG) hazine tahviline (IEF) gore geriliyorsa kredi spreadleri geniyor demektir - buyuk fonlarin izledigi bir risk-off on gostergesidir.",
+            "time": now_text(),
+        }
+    try:
+        return _cache_get_or_fetch("credit_spread_signal", 21600, _fetch)
+    except Exception as exc:
+        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
+
+
+def get_copper_gold_ratio_signal() -> Dict[str, Any]:
+    """'Dr. Copper' - bakir sanayi/insaat buyumesine duyarlidir (buyume
+    iyimserligi), altin ise korku/guvenli liman varligidir. Bakir/Altin
+    orani yukseliyorsa kuresel buyume beklentisi guclenıyor demektir,
+    dusuyorsa resesyon/korku sinyali. Fon yoneticilerinin kuresel buyume
+    yonunu okumak icin kullandigi klasik bir oran. 20 gunluk trend, 6 saat
+    cache'lenir."""
+    def _fetch():
+        import yfinance as yf
+        data = yf.download(["HG=F", "GC=F"], period="30d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"] if "Close" in data else data
+        copper = close["HG=F"].dropna()
+        gold = close["GC=F"].dropna()
+        if len(copper) < 21 or len(gold) < 21:
+            raise RuntimeError("Bakir/altin orani icin yeterli veri yok.")
+        ratio_now = float(copper.iloc[-1]) / float(gold.iloc[-1])
+        ratio_20d_ago = float(copper.iloc[-21]) / float(gold.iloc[-21])
+        change_pct = (ratio_now - ratio_20d_ago) / ratio_20d_ago * 100.0 if ratio_20d_ago else 0.0
+        if change_pct > 3.0:
+            status = "YUKSELIYOR - kuresel buyume iyimserligi guclleniyor"
+        elif change_pct < -3.0:
+            status = "DUSUYOR - buyume korkusu/resesyon sinyali artiyor"
+        else:
+            status = "STABIL"
+        return {
+            "copper_gold_ratio": round(ratio_now, 5),
+            "change_20d_pct": round(change_pct, 2),
+            "status": status,
+            "note": "Bakir/Altin orani kuresel buyume beklentisinin klasik bir gostergesidir; yukselmesi buyumeye guveni, dusmesi korku/resesyon riskini isaret eder.",
+            "time": now_text(),
+        }
+    try:
+        return _cache_get_or_fetch("copper_gold_ratio_signal", 21600, _fetch)
+    except Exception as exc:
+        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
+
+
+def get_real_yield_proxy_signal() -> Dict[str, Any]:
+    """Altin fiyatini asil belirleyen nominal faiz degil REEL (enflasyondan
+    arindirilmis) faizdir. Enflasyon-korumali tahvil ETF'i (TIP) fiyat
+    momentumu, reel faizlerin ters yonlu bir proxy'sidir: TIP fiyati
+    dusuyorsa reel faizler yukseliyor demektir (altin icin olumsuz), TIP
+    yukseliyorsa reel faizler dusuyor demektir (altin icin olumlu). Resmi
+    FRED reel faiz verisine (DFII10) gore daha kaba bir yaklasimdir ama
+    API anahtari gerektirmez. 20 gunluk trend, 6 saat cache'lenir."""
+    def _fetch():
+        import yfinance as yf
+        data = yf.download(["TIP"], period="30d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"] if "Close" in data else data
+        tip = close["TIP"].dropna() if "TIP" in close else close.dropna()
+        if len(tip) < 21:
+            raise RuntimeError("Reel faiz proxy'si icin yeterli veri yok.")
+        change_pct = (float(tip.iloc[-1]) - float(tip.iloc[-21])) / float(tip.iloc[-21]) * 100.0
+        if change_pct < -1.0:
+            status = "REEL_FAIZ_YUKSELIYOR (TIP dusuyor) - altin/risksiz varliklar icin olumsuz"
+        elif change_pct > 1.0:
+            status = "REEL_FAIZ_DUSUYOR (TIP yukseliyor) - altin icin olumlu"
+        else:
+            status = "STABIL"
+        return {
+            "tip_etf_20d_change_pct": round(change_pct, 2),
+            "status": status,
+            "note": "TIP (enflasyon korumali tahvil) fiyati reel faizlerin TERS yonlu bir proxy'sidir - kesin FRED reel faiz verisi degildir, kaba bir yaklasimdir.",
+            "time": now_text(),
+        }
+    try:
+        return _cache_get_or_fetch("real_yield_proxy_signal", 21600, _fetch)
+    except Exception as exc:
+        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
+
+
+def get_cot_positioning_signal() -> Dict[str, Any]:
+    """Kullanicinin sorusu: 'buyuk yatirimcilar neye bakiyor' - CFTC'nin
+    (ABD Emtia Vadeli Islemler Ticaret Komisyonu) her hafta yayinladigi,
+    tamamen ucretsiz/halka acik 'Commitment of Traders' (COT) raporundan
+    S&P 500 E-mini vadeli islemlerinde BUYUK SPEKULATORLERIN (hedge fund'lar
+    - 'noncommercial' pozisyonlar) net long/short yigilmasini okur. Asiri
+    tek yonlu yigilma (extreme net long VEYA net short), genelde bir
+    'crowded trade' / olasi ters donus riskini isaret eder (kontrarian
+    gosterge). Haftalik veri oldugu icin 12 saat cache'lenir."""
+    def _fetch():
+        r = requests.get(
+            "https://publicreporting.cftc.gov/resource/6dca-aqww.json",
+            params={
+                "$limit": 1,
+                "$order": "report_date_as_yyyy_mm_dd DESC",
+                "contract_market_name": "E-MINI S&P 500",
+            },
+            timeout=10,
+            headers={"User-Agent": "dfinans-live-backend/1.0"},
+        )
+        r.raise_for_status()
+        rows = r.json()
+        if not rows:
+            raise RuntimeError("CFTC COT verisi bos döndü.")
+        row = rows[0]
+        long_all = safe_float(row.get("noncomm_positions_long_all"))
+        short_all = safe_float(row.get("noncomm_positions_short_all"))
+        net = long_all - short_all
+        total = long_all + short_all
+        net_pct = (net / total * 100.0) if total else 0.0
+        if net_pct > 15:
+            status = "ASIRI_NET_LONG - buyuk spekulatorler asiri iyimser (crowded long, ters donus riski)"
+        elif net_pct < -15:
+            status = "ASIRI_NET_SHORT - buyuk spekulatorler asiri kotumser (crowded short, short squeeze riski)"
+        else:
+            status = "DENGELI"
+        return {
+            "contract": "E-MINI S&P 500",
+            "report_date": row.get("report_date_as_yyyy_mm_dd", "")[:10],
+            "large_speculator_long": int(long_all),
+            "large_speculator_short": int(short_all),
+            "net_long_pct_of_total": round(net_pct, 1),
+            "status": status,
+            "note": "CFTC'nin haftalik ucretsiz COT raporundan buyuk spekulator (hedge fund) net pozisyonlanmasi - asiri tek yonlu yigilma kontrarian bir ters donus riski tasir.",
+            "time": now_text(),
+        }
+    try:
+        return _cache_get_or_fetch("cot_positioning_signal", 43200, _fetch)
+    except Exception as exc:
+        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
+
+
+def get_institutional_signals_bias(action: str) -> Dict[str, Any]:
+    """Getiri egrisi + kredi spreadi + bakir/altin orani + reel faiz proxy'si +
+    CFTC COT buyuk spekulator pozisyonlanmasini TEK bir kucuk bias'ta
+    birlestirir - bunlarin hepsi kuresel/genel piyasa gostergeleridir (tek
+    bir sembole ozel degil), bu yuzden tum BUY/SELL kararlarina (kripto dahil)
+    uygulanir. Her biri kucuk (+-2/+-3) etki eder, toplamda asiri baskin
+    olmamasi icin +-8 ile sinirlanir; herhangi biri veri saglayamazsa
+    sessizce atlanir (fail-open)."""
+    if action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": []}
+    bias = 0
+    notes: List[str] = []
+    try:
+        yc = get_yield_curve_signal()
+        if not yc.get("error") and "TERS_DONMUS" in yc.get("status", ""):
+            if action == "BUY":
+                bias -= 3
+                notes.append(f"[Getiri Eğrisi] Ters dönmüş ({yc.get('spread_10y_minus_3m')} puan) - resesyon riski BUY için olumsuz.")
+            else:
+                bias += 2
+                notes.append(f"[Getiri Eğrisi] Ters dönmüş - resesyon riski SELL'i hafif destekler.")
+    except Exception:
+        pass
+    try:
+        cs = get_credit_spread_signal()
+        if not cs.get("error"):
+            if cs.get("status", "").startswith("GENISLIYOR"):
+                if action == "BUY":
+                    bias -= 2
+                    notes.append("[Kredi Spreadi] Genişliyor (HYG zayıflıyor) - kredi stresi BUY için olumsuz.")
+                else:
+                    bias += 1
+                    notes.append("[Kredi Spreadi] Genişliyor - risk-off SELL'i hafif destekler.")
+            elif cs.get("status", "").startswith("DARALIYOR") and action == "BUY":
+                bias += 1
+                notes.append("[Kredi Spreadi] Daralıyor - güçlü risk iştahı BUY'ı destekler.")
+    except Exception:
+        pass
+    try:
+        cg = get_copper_gold_ratio_signal()
+        if not cg.get("error"):
+            if "DUSUYOR" in cg.get("status", ""):
+                if action == "BUY":
+                    bias -= 2
+                    notes.append("[Bakır/Altın Oranı] Düşüyor - büyüme korkusu BUY için olumsuz.")
+                else:
+                    bias += 1
+                    notes.append("[Bakır/Altın Oranı] Düşüyor - resesyon sinyali SELL'i hafif destekler.")
+            elif "YUKSELIYOR" in cg.get("status", "") and action == "BUY":
+                bias += 1
+                notes.append("[Bakır/Altın Oranı] Yükseliyor - büyüme iyimserliği BUY'ı destekler.")
+    except Exception:
+        pass
+    try:
+        cot = get_cot_positioning_signal()
+        if not cot.get("error"):
+            if "ASIRI_NET_LONG" in cot.get("status", "") and action == "BUY":
+                bias -= 2
+                notes.append(f"[COT Pozisyonlanma] Büyük spekülatörler aşırı net long (%{cot.get('net_long_pct_of_total')}) - crowded trade riski, yeni BUY temkinli olmalı.")
+            elif "ASIRI_NET_SHORT" in cot.get("status", "") and action == "SELL":
+                bias -= 2
+                notes.append(f"[COT Pozisyonlanma] Büyük spekülatörler aşırı net short (%{cot.get('net_long_pct_of_total')}) - short squeeze riski, yeni SELL temkinli olmalı.")
+    except Exception:
+        pass
+    bias = max(-8, min(8, bias))
+    return {"bias": bias, "notes": notes}
 
 
 def get_macro_risk_bias(symbol: str, action: str) -> Dict[str, Any]:
@@ -9124,7 +9388,7 @@ def _auto_trader_run_symbol(
         # haber taramasindan Fed/Iran/petrol/banka/resesyon basliklarinin son
         # 3 gunluk haber tonu kucuk bir ek bias olarak eklenir (gurultulu
         # olabilecegi icin etkisi kasitli olarak kucuk tutulur).
-        geo_risk = get_geopolitical_risk_bias(action)
+        geo_risk = get_geo_news_topics_bias(action)
         if geo_risk["bias"] != 0:
             confidence = max(0, min(95, confidence + geo_risk["bias"]))
         if geo_risk["notes"]:
@@ -9139,6 +9403,19 @@ def _auto_trader_run_symbol(
             confidence = max(0, min(95, confidence + options_flow["bias"]))
         if options_flow["notes"]:
             reason = (reason + " " + " ".join(options_flow["notes"])).strip()
+
+        # Kullanicinin talebi: 'uluslararasi kuruluslar/buyuk yatirimcilar
+        # neye bakiyor' - getiri egrisi (yield curve), kredi spreadi
+        # (HYG/IEF), bakir/altin orani ("Dr. Copper"), reel faiz proxy'si
+        # (TIP) ve CFTC'nin haftalik ucretsiz COT raporundaki buyuk
+        # spekulator (hedge fund) net pozisyonlanmasini kucuk bir bias
+        # olarak ekler - hepsi kuresel/genel piyasa gostergesi oldugu icin
+        # tum sembollere (kripto dahil) uygulanir.
+        institutional = get_institutional_signals_bias(action)
+        if institutional["bias"] != 0:
+            confidence = max(0, min(95, confidence + institutional["bias"]))
+        if institutional["notes"]:
+            reason = (reason + " " + " ".join(institutional["notes"])).strip()
 
         # Kullanicinin talebi: genel piyasa dususlerinde nakitte beklemek yerine
         # guvenli limana (altin/petrol) yonelme veya dipten toparlanan
@@ -14823,8 +15100,13 @@ def global_market_report_endpoint():
     try:
         world = get_world_market_index()
         valuation = get_valuation_bubble_analysis()
-        geo = get_geopolitical_risk_signal()
+        geo = get_geo_news_topics_signal()
         sector_scenarios = get_sector_scenario_analysis()
+        yield_curve = get_yield_curve_signal()
+        credit_spread = get_credit_spread_signal()
+        copper_gold = get_copper_gold_ratio_signal()
+        real_yield = get_real_yield_proxy_signal()
+        cot = get_cot_positioning_signal()
 
         lines: List[str] = []
         lines.append("🌍 DÜNYA PİYASA ANALİZİ")
@@ -14868,11 +15150,24 @@ def global_market_report_endpoint():
                 lines.append(f"  - {t.get('topic')}: ton {t.get('avg_tone')} ({t.get('article_count')} haber)")
 
         lines.append("")
+        lines.append("• 📊 Kurumsal/Büyük Yatırımcı Göstergeleri:")
+        if not yield_curve.get("error"):
+            lines.append(f"  - Getiri Eğrisi (3ay-10yıl): {yield_curve.get('status')} (spread: {yield_curve.get('spread_10y_minus_3m')} puan)")
+        if not credit_spread.get("error"):
+            lines.append(f"  - Kredi Spreadi (HYG vs IEF): {credit_spread.get('status')} (göreceli %{credit_spread.get('relative_performance_pct')})")
+        if not copper_gold.get("error"):
+            lines.append(f"  - Bakır/Altın Oranı ('Dr. Copper'): {copper_gold.get('status')} (20g %{copper_gold.get('change_20d_pct')})")
+        if not real_yield.get("error"):
+            lines.append(f"  - Reel Faiz Proxy'si (TIP): {real_yield.get('status')} (20g %{real_yield.get('tip_etf_20d_change_pct')})")
+        if not cot.get("error"):
+            lines.append(f"  - CFTC COT (S&P500 büyük spekülatör pozisyonu, {cot.get('report_date')}): {cot.get('status')} (net long %{cot.get('net_long_pct_of_total')})")
+
+        lines.append("")
         lines.append(
             "Not: Bu, sayısal piyasa verisi (ülke endeksleri, VIX, altın/petrol/DXY, sektör "
-            "ETF'leri) ve ücretsiz halka açık haber taramasından (GDELT) otomatik üretilmiş bir "
-            "özet analizdir; yatırım tavsiyesi değildir. Sistem bu verileri otomatik alım-satım "
-            "kararlarına da (küçük bias'lar olarak) dahil eder."
+            "ETF'leri, getiri eğrisi, kredi spreadi, CFTC COT raporu) ve ücretsiz halka açık haber "
+            "taramasından (GDELT) otomatik üretilmiş bir özet analizdir; yatırım tavsiyesi değildir. "
+            "Sistem bu verileri otomatik alım-satım kararlarına da (küçük bias'lar olarak) dahil eder."
         )
 
         return jsonify({
@@ -14881,6 +15176,11 @@ def global_market_report_endpoint():
             "world_market_index": world,
             "valuation_bubble_analysis": valuation,
             "geopolitical_risk": geo,
+            "yield_curve": yield_curve,
+            "credit_spread": credit_spread,
+            "copper_gold_ratio": copper_gold,
+            "real_yield_proxy": real_yield,
+            "cot_positioning": cot,
             "active_scenarios": active_scenarios,
             "time": now_text(),
         })
