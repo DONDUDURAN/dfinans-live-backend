@@ -101,11 +101,7 @@ export const AIStyleScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#031210', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
-        <View style={styles.headerBadge}>
-          <View style={styles.headerBadgeDot} />
-          <Text style={styles.headerBadgeText}>SANAL İKİZ KABİNİ</Text>
-        </View>
+      <LinearGradient colors={['#050D08', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <Text style={styles.title}>Kabin</Text>
       </LinearGradient>
 
@@ -412,9 +408,11 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   sectionTitle: {
-    fontSize: Typography.md,
-    fontWeight: '700',
-    color: Colors.textPrimary,
+    fontSize: Typography.xs,
+    fontWeight: '600',
+    color: Colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1.5,
   },
   occRow: {
     gap: Spacing.sm,

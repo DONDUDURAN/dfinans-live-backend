@@ -61,7 +61,7 @@ export const RegistrationScreen: React.FC = () => {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <LinearGradient colors={['#041514', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.xl }]}>
+      <LinearGradient colors={['#050D08', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.xl }]}>
         <BrandMark size="lg" />
         <Text style={styles.subtitle}>Kişisel stil kabininiz</Text>
         <Text style={styles.trialTag}>7 gün ücretsiz · kart bilgisi saklanmaz</Text>
@@ -148,9 +148,10 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
   },
   subtitle: {
-    color: Colors.textPrimary,
+    color: Colors.textSecondary,
     fontSize: Typography.md,
-    fontWeight: '600',
+    fontWeight: '300',
+    letterSpacing: 0.2,
   },
   trialTag: {
     color: Colors.gold,

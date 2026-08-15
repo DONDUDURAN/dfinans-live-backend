@@ -31,11 +31,6 @@ export const HomeScreen: React.FC = () => {
   const fullName = useUserStore((s) => s.fullName);
 
   const topSuggestion = suggestions[0];
-  const today = new Date().toLocaleDateString('tr-TR', {
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-  });
 
   const stats = [
     { label: 'Parça', value: items.length, icon: 'shirt-outline' },
@@ -45,10 +40,9 @@ export const HomeScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#031210', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
+      <LinearGradient colors={['#050D08', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <BrandMark size="md" />
-        <Text style={styles.date}>{today}</Text>
-        <Text style={styles.greeting}>Merhaba {fullName.split(' ')[0] || 'stil sahibi'} ✦</Text>
+        <Text style={styles.greeting}>{fullName.split(' ')[0] || 'stil sahibi'}</Text>
         <Text style={styles.headline}>Bugün sanal ikizin{'\n'}ne giyiyor?</Text>
       </LinearGradient>
 
@@ -67,7 +61,7 @@ export const HomeScreen: React.FC = () => {
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleRow}>
               <Ionicons name="sparkles" size={16} color={Colors.gold} />
-              <Text style={styles.sectionTitle}>Günün STYLIA Seçimi</Text>
+            <Text style={styles.sectionTitle}>Günün Seçimi</Text>
             </View>
           </View>
           <StyleSuggestionCard suggestion={topSuggestion} />
@@ -153,24 +147,21 @@ const styles = StyleSheet.create({
   },
   header: {
     padding: Spacing.base,
-    paddingBottom: Spacing.xl,
-    gap: 6,
-  },
-  date: {
-    fontSize: Typography.xs,
-    color: Colors.textMuted,
-    textTransform: 'uppercase',
+    paddingBottom: Spacing['2xl'],
+    gap: 8,
   },
   greeting: {
     fontSize: Typography.sm,
-    color: Colors.gold,
-    fontWeight: '600',
+    color: Colors.goldLight,
+    fontWeight: '500',
+    letterSpacing: 0.5,
   },
   headline: {
     fontSize: Typography['2xl'],
-    fontWeight: '800',
+    fontWeight: '700',
     color: Colors.textPrimary,
-    lineHeight: 36,
+    lineHeight: 38,
+    letterSpacing: -0.5,
   },
   statsRow: {
     flexDirection: 'row',
@@ -214,9 +205,11 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   sectionTitle: {
-    color: Colors.textPrimary,
-    fontSize: Typography.md,
-    fontWeight: '700',
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1.5,
   },
   horizontalList: {
     gap: Spacing.md,

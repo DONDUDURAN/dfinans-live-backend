@@ -69,22 +69,6 @@ export const StyleSuggestionCard: React.FC<Props> = ({
       <View style={styles.content}>
         <Text style={styles.mood}>{suggestion.mood}</Text>
         <Text style={styles.title}>{suggestion.title}</Text>
-        {!compact && (
-          <Text style={styles.description} numberOfLines={2}>
-            {suggestion.description}
-          </Text>
-        )}
-
-        {!compact && (
-          <View style={styles.reasons}>
-            {suggestion.reasons.map((reason, idx) => (
-              <View key={idx} style={styles.reasonRow}>
-                <Ionicons name="checkmark-circle" size={12} color={Colors.gold} />
-                <Text style={styles.reasonText}>{reason}</Text>
-              </View>
-            ))}
-          </View>
-        )}
 
         <View style={styles.footer}>
           <View style={styles.outfitOccasion}>
@@ -172,20 +156,9 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     lineHeight: 20,
   },
-  reasons: {
-    gap: 4,
-    marginTop: Spacing.xs,
-  },
-  reasonRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  reasonText: {
-    fontSize: Typography.xs,
-    color: Colors.textSecondary,
-    flex: 1,
-  },
+  reasons: { gap: 4, marginTop: Spacing.xs },
+  reasonRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  reasonText: { fontSize: Typography.xs, color: Colors.textSecondary, flex: 1 },
   footer: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -24,6 +24,7 @@
     "update:production": "eas update --branch production"
   },
   "dependencies": {
+    "@expo-google-fonts/dancing-script": "^0.4.2",
     "@expo/vector-icons": "^14.0.2",
     "@react-native-async-storage/async-storage": "1.23.1",
     "@react-navigation/bottom-tabs": "^6.5.20",

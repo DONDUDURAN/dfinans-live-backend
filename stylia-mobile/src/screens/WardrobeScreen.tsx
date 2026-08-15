@@ -182,14 +182,17 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: Typography['2xl'],
-    fontWeight: '800',
+    fontWeight: '700',
     color: Colors.textPrimary,
     letterSpacing: -0.5,
   },
   subtitle: {
-    fontSize: Typography.sm,
-    color: Colors.textSecondary,
+    fontSize: Typography.xs,
+    color: Colors.textMuted,
     marginTop: 2,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    fontWeight: '500',
   },
   headerActions: {
     flexDirection: 'row',

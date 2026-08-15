@@ -81,7 +81,7 @@ export const ProfileScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#031210', Colors.background]} style={[styles.profileHeader, { paddingTop: insets.top + Spacing.base }]}>
+      <LinearGradient colors={['#050D08', Colors.background]} style={[styles.profileHeader, { paddingTop: insets.top + Spacing.base }]}>
         <BrandMark size="sm" />
         <Text style={styles.profileName}>{fullName || 'Üye Profil'}</Text>
         <Text style={styles.profileHandle}>{email || 'premium@stylia.app'}</Text>
@@ -155,12 +155,9 @@ export const ProfileScreen: React.FC = () => {
         <Text style={styles.sectionTitle}>Video notu</Text>
         <View style={styles.videoCard}>
           <Text style={styles.videoText}>20–45 sn ayna videosu</Text>
-          <Text style={styles.videoStatus}>
-            {videoNoteUri ? 'Video notu mevcut' : 'Henüz video notu yok'}
-          </Text>
           <TouchableOpacity style={styles.secondaryButton} onPress={recordVideoNote}>
-            <Ionicons name="videocam-outline" size={16} color={Colors.gold} />
-            <Text style={styles.secondaryButtonText}>Video notu çek</Text>
+            <Ionicons name={videoNoteUri ? 'checkmark-circle-outline' : 'videocam-outline'} size={16} color={videoNoteUri ? Colors.goldLight : Colors.gold} />
+            <Text style={styles.secondaryButtonText}>{videoNoteUri ? 'Yenile' : 'Video notu çek'}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -229,7 +226,13 @@ const styles = StyleSheet.create({
   statValue: { color: Colors.textPrimary, fontSize: Typography['2xl'], fontWeight: '800' },
   statLabel: { color: Colors.textSecondary, fontSize: Typography.xs },
   section: { paddingHorizontal: Spacing.base, marginTop: Spacing.xl, gap: Spacing.md },
-  sectionTitle: { color: Colors.textPrimary, fontSize: Typography.md, fontWeight: '700' },
+  sectionTitle: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1.5,
+  },
   stack: { gap: Spacing.md },
   planCard: {
     backgroundColor: Colors.surface,
