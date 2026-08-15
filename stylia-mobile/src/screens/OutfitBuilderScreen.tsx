@@ -16,6 +16,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { useStyleStore } from '../store/styleStore';
 import { ClothingCard } from '../components/ClothingCard';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 import { ClothingCategory } from '../types';
 import { trCategory } from '../utils/translations';
@@ -33,6 +34,7 @@ const SLOT_EMOJIS: Record<ClothingCategory, string> = {
 };
 
 export const OutfitBuilderScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const items = useWardrobeStore((s) => s.items);
   const getItemById = useWardrobeStore((s) => s.getItemById);
   const addOutfit = useWardrobeStore((s) => s.addOutfit);
@@ -65,7 +67,7 @@ export const OutfitBuilderScreen: React.FC = () => {
   return (
     <View style={styles.container}>
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <View>
           <Text style={styles.title}>Kombin Oluşturucu</Text>
           <Text style={styles.subtitle}>Parçaları eşleştir, görünümü tamamla</Text>
@@ -248,7 +250,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: Spacing.base,
-    paddingTop: Spacing.base,
     paddingBottom: Spacing.md,
   },
   title: {

@@ -2,6 +2,7 @@ import React from 'react';
 import { Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { RootStackParamList } from '../types';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { Colors, Radius, Spacing, Typography } from '../theme';
@@ -10,6 +11,7 @@ import { trCategory, trOccasion } from '../utils/translations';
 type DetailRoute = RouteProp<RootStackParamList, 'ItemDetail'>;
 
 export const ItemDetailScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const route = useRoute<DetailRoute>();
   const item = useWardrobeStore((s) => s.getItemById(route.params.itemId));
@@ -23,7 +25,7 @@ export const ItemDetailScreen: React.FC = () => {
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.container} contentContainerStyle={[styles.content, { paddingTop: insets.top + Spacing.base }]}>
       <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
         <Ionicons name="arrow-back" size={20} color={Colors.textPrimary} />
       </TouchableOpacity>
@@ -61,6 +63,7 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: Spacing.base,
+    paddingTop: Spacing.base,
     gap: Spacing.sm,
   },
   center: {

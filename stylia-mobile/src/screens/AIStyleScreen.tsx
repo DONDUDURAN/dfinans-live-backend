@@ -13,6 +13,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useStyleStore } from '../store/styleStore';
 import { StyleSuggestionCard } from '../components/StyleSuggestionCard';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
@@ -51,6 +52,7 @@ const MOODS = [
 ];
 
 export const AIStyleScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const suggestions = useStyleStore((s) => s.suggestions);
   const isGenerating = useStyleStore((s) => s.isGenerating);
   const generateSuggestions = useStyleStore((s) => s.generateSuggestions);
@@ -95,7 +97,7 @@ export const AIStyleScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#191203', Colors.background]} style={styles.header}>
+      <LinearGradient colors={['#191203', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <View style={styles.headerBadge}>
           <Ionicons name="sparkles" size={14} color={Colors.gold} />
           <Text style={styles.headerBadgeText}>KABİN AI</Text>
@@ -239,7 +241,6 @@ const styles = StyleSheet.create({
   },
   header: {
     padding: Spacing.base,
-    paddingTop: Spacing.xl,
     paddingBottom: Spacing.xl,
     gap: Spacing.sm,
   },

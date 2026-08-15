@@ -13,6 +13,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { useNavigation } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 import { ClothingCategory, ClothingItem, Color, Occasion, RootStackParamList, Season } from '../types';
@@ -54,6 +55,7 @@ const COLOR_HEX: Record<Color, string> = {
 };
 
 export const AddItemScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const navigation = useNavigation<Nav>();
   const addItem = useWardrobeStore((s) => s.addItem);
   const setProductLink = useUserStore((s) => s.setProductLink);
@@ -156,7 +158,7 @@ export const AddItemScreen: React.FC = () => {
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
           <Ionicons name="arrow-back" size={22} color={Colors.textPrimary} />
         </TouchableOpacity>
@@ -345,7 +347,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.base,
-    paddingTop: Spacing.base,
     paddingBottom: Spacing.md,
   },
   backBtn: {

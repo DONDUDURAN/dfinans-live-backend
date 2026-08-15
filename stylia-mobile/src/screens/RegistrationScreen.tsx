@@ -1,13 +1,17 @@
 import React, { useMemo, useState } from 'react';
 import {
   Alert,
+  KeyboardAvoidingView,
   Linking,
+  Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MEMBERSHIP_PLANS, MembershipPlanId, STRIPE_PAYMENT_LINKS } from '../config/paymentLinks';
@@ -17,6 +21,7 @@ import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 const PLAN_ORDER: MembershipPlanId[] = ['aylik', 'yillik'];
 
 export const RegistrationScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const register = useUserStore((s) => s.register);
 
   const [fullName, setFullName] = useState('');
@@ -51,8 +56,11 @@ export const RegistrationScreen: React.FC = () => {
   };
 
   return (
-    <View style={styles.container}>
-      <LinearGradient colors={['#1A1405', Colors.background]} style={styles.header}>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
+      <LinearGradient colors={['#1A1405', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.xl }]}>
         <View style={styles.brandWrap}>
           <Text style={styles.brand} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
           <View style={styles.brandRule} />
@@ -61,7 +69,7 @@ export const RegistrationScreen: React.FC = () => {
         <Text style={styles.trialTag}>7 gün ücretsiz deneme • Kart bilgisi uygulamada saklanmaz</Text>
       </LinearGradient>
 
-      <View style={styles.body}>
+      <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Hesap oluştur</Text>
           <TextInput
@@ -126,8 +134,8 @@ export const RegistrationScreen: React.FC = () => {
         >
           <Text style={styles.startButtonText}>7 günlük denemeyi başlat</Text>
         </TouchableOpacity>
-      </View>
-    </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 };
 
@@ -137,7 +145,6 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.background,
   },
   header: {
-    paddingTop: Spacing['3xl'],
     paddingBottom: Spacing.xl,
     paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
@@ -171,8 +178,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.7,
   },
   body: {
-    flex: 1,
     padding: Spacing.base,
+    paddingBottom: Spacing['3xl'],
     gap: Spacing.md,
   },
   card: {

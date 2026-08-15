@@ -14,6 +14,7 @@ import { StackNavigationProp } from '@react-navigation/stack';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { ClothingCard } from '../components/ClothingCard';
 import { CategoryFilter } from '../components/CategoryFilter';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, Radius, Spacing, Typography } from '../theme';
 import { RootStackParamList } from '../types';
 import { trCategory } from '../utils/translations';
@@ -25,6 +26,7 @@ const CARD_WIDTH = (width - Spacing.base * 2 - CARD_GAP) / 2;
 type Nav = StackNavigationProp<RootStackParamList>;
 
 export const WardrobeScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const navigation = useNavigation<Nav>();
   const selectedCategory = useWardrobeStore((s) => s.selectedCategory);
   const setCategory = useWardrobeStore((s) => s.setCategory);
@@ -40,7 +42,7 @@ export const WardrobeScreen: React.FC = () => {
   return (
     <View style={styles.container}>
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <View>
           <Text style={styles.title}>Gardırop</Text>
           <Text style={styles.subtitle}>{items.length} parça</Text>
@@ -176,7 +178,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: Spacing.base,
-    paddingTop: Spacing.base,
     paddingBottom: Spacing.md,
   },
   title: {

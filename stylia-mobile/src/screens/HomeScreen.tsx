@@ -16,11 +16,13 @@ import { useStyleStore } from '../store/styleStore';
 import { useUserStore } from '../store/userStore';
 import { StyleSuggestionCard } from '../components/StyleSuggestionCard';
 import { OutfitCard } from '../components/OutfitCard';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 
 const { width } = Dimensions.get('window');
 
 export const HomeScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
   const items = useWardrobeStore((s) => s.items);
   const outfits = useWardrobeStore((s) => s.outfits);
@@ -42,7 +44,7 @@ export const HomeScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#201809', Colors.background]} style={styles.header}>
+      <LinearGradient colors={['#201809', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <View style={styles.wordmarkWrap}>
           <Text style={styles.wordmark} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
           <View style={styles.wordmarkRule} />
@@ -156,7 +158,6 @@ const styles = StyleSheet.create({
   },
   header: {
     padding: Spacing.base,
-    paddingTop: Spacing['2xl'],
     paddingBottom: Spacing.xl,
     gap: 6,
   },

@@ -12,6 +12,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { useUserStore } from '../store/userStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
@@ -20,6 +21,7 @@ import { MEMBERSHIP_PLANS, MembershipPlanId, STRIPE_PAYMENT_LINKS } from '../con
 const PLAN_ORDER: MembershipPlanId[] = ['aylik', 'yillik'];
 
 export const ProfileScreen: React.FC = () => {
+  const insets = useSafeAreaInsets();
   const items = useWardrobeStore((s) => s.items);
   const outfits = useWardrobeStore((s) => s.outfits);
 
@@ -76,7 +78,7 @@ export const ProfileScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#171103', Colors.background]} style={styles.profileHeader}>
+      <LinearGradient colors={['#171103', Colors.background]} style={[styles.profileHeader, { paddingTop: insets.top + Spacing.base }]}>
         <View style={styles.wordmarkWrap}>
           <Text style={styles.wordmark} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
           <View style={styles.wordmarkRule} />
@@ -172,7 +174,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   content: { paddingBottom: Spacing['4xl'] },
   profileHeader: {
-    paddingTop: Spacing['2xl'],
     paddingBottom: Spacing.xl,
     paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
