@@ -4,7 +4,13 @@
     "appVersionSource": "remote"
   },
   "build": {
+    "base": {
+      "node": "20.0.0",
+      "buildArtifactPaths": ["ios/build", "android/app/build/outputs"],
+      "config": "eas-build-pre-install.sh"
+    },
     "development": {
+      "extends": "base",
       "developmentClient": true,
       "distribution": "internal",
       "ios": {
@@ -19,6 +25,7 @@
       }
     },
     "preview": {
+      "extends": "base",
       "distribution": "internal",
       "ios": {
         "simulator": false
@@ -32,6 +39,7 @@
       "channel": "preview"
     },
     "adhoc": {
+      "extends": "base",
       "distribution": "internal",
       "ios": {
         "credentialsSource": "auto"
@@ -45,12 +53,14 @@
       "channel": "preview"
     },
     "production": {
+      "extends": "base",
       "distribution": "store",
       "ios": {
         "credentialsSource": "auto"
       },
       "android": {
-        "buildType": "app-bundle"
+        "buildType": "app-bundle",
+        "credentialsSource": "auto"
       },
       "env": {
         "APP_ENV": "production"
