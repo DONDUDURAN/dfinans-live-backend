@@ -16,6 +16,7 @@ import { useStyleStore } from '../store/styleStore';
 import { useUserStore } from '../store/userStore';
 import { StyleSuggestionCard } from '../components/StyleSuggestionCard';
 import { OutfitCard } from '../components/OutfitCard';
+import { BrandMark } from '../components/BrandMark';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 
@@ -45,10 +46,7 @@ export const HomeScreen: React.FC = () => {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <LinearGradient colors={['#031210', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
-        <View style={styles.wordmarkWrap}>
-          <Text style={styles.wordmark} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
-          <View style={styles.wordmarkRule} />
-        </View>
+        <BrandMark size="md" />
         <Text style={styles.date}>{today}</Text>
         <Text style={styles.greeting}>Merhaba {fullName.split(' ')[0] || 'stil sahibi'} ✦</Text>
         <Text style={styles.headline}>Bugün sanal ikizin{'\n'}ne giyiyor?</Text>
@@ -160,23 +158,6 @@ const styles = StyleSheet.create({
     padding: Spacing.base,
     paddingBottom: Spacing.xl,
     gap: 6,
-  },
-  wordmarkWrap: {
-    alignSelf: 'flex-start',
-    marginBottom: 2,
-  },
-  wordmark: {
-    fontSize: 42,
-    letterSpacing: 12,
-    color: Colors.goldLight,
-    fontWeight: '100',
-  },
-  wordmarkRule: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: Colors.gold,
-    marginTop: 4,
-    width: '80%',
-    opacity: 0.65,
   },
   date: {
     fontSize: Typography.xs,

@@ -14,6 +14,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { BrandMark } from '../components/BrandMark';
 import { MEMBERSHIP_PLANS, MembershipPlanId, STRIPE_PAYMENT_LINKS } from '../config/paymentLinks';
 import { useUserStore } from '../store/userStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
@@ -61,10 +62,7 @@ export const RegistrationScreen: React.FC = () => {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <LinearGradient colors={['#041514', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.xl }]}>
-        <View style={styles.brandWrap}>
-          <Text style={styles.brand} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
-          <View style={styles.brandRule} />
-        </View>
+        <BrandMark size="lg" />
         <Text style={styles.subtitle}>Kişisel stil kabininize hoş geldiniz</Text>
         <Text style={styles.trialTag}>7 gün ücretsiz deneme • Kart bilgisi uygulamada saklanmaz</Text>
       </LinearGradient>
@@ -148,23 +146,6 @@ const styles = StyleSheet.create({
     paddingBottom: Spacing.xl,
     paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
-  },
-  brandWrap: {
-    alignSelf: 'flex-start',
-    marginBottom: 2,
-  },
-  brand: {
-    fontSize: 50,
-    letterSpacing: 14,
-    color: Colors.goldLight,
-    fontWeight: '100',
-  },
-  brandRule: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: Colors.gold,
-    marginTop: 5,
-    width: '80%',
-    opacity: 0.65,
   },
   subtitle: {
     color: Colors.textPrimary,

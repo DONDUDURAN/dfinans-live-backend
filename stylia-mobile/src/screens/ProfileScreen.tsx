@@ -13,6 +13,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { BrandMark } from '../components/BrandMark';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { useUserStore } from '../store/userStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
@@ -79,10 +80,7 @@ export const ProfileScreen: React.FC = () => {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <LinearGradient colors={['#031210', Colors.background]} style={[styles.profileHeader, { paddingTop: insets.top + Spacing.base }]}>
-        <View style={styles.wordmarkWrap}>
-          <Text style={styles.wordmark} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
-          <View style={styles.wordmarkRule} />
-        </View>
+        <BrandMark size="sm" />
         <Text style={styles.profileName}>{fullName || 'Üye Profil'}</Text>
         <Text style={styles.profileHandle}>{email || 'premium@stylia.app'}</Text>
         <View style={styles.planBadge}>
@@ -178,22 +176,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
   },
-  wordmarkWrap: {
-    alignSelf: 'flex-start',
-    marginBottom: 2,
-  },
   wordmark: {
-    color: Colors.goldLight,
-    letterSpacing: 12,
-    fontWeight: '100',
-    fontSize: 40,
+    // removed — replaced by BrandMark component
   },
   wordmarkRule: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: Colors.gold,
-    marginTop: 4,
-    width: '80%',
-    opacity: 0.65,
+    // removed — replaced by BrandMark component
   },
   profileName: { color: Colors.textPrimary, fontSize: Typography.xl, fontWeight: '800' },
   profileHandle: { color: Colors.textSecondary, fontSize: Typography.sm },
