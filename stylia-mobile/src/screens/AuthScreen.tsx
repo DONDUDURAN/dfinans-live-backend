@@ -230,7 +230,7 @@ export const AuthScreen: React.FC<Props> = ({ initialMode = 'register' }) => {
               <Text style={styles.ctaBtnText}>Denemeyi başlat</Text>
             </TouchableOpacity>
 
-            <Text style={styles.finePrint}>7 gün ücretsiz · kart bilgisi saklanmaz</Text>
+            <Text style={styles.finePrint}>7 gün ücretsiz deneme</Text>
 
             {hasAccount && (
               <TouchableOpacity onPress={() => switchMode('login')} activeOpacity={0.7}>

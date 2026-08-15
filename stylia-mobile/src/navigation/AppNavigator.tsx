@@ -24,7 +24,7 @@ const TAB_ICONS: Record<string, { active: keyof typeof Ionicons.glyphMap; inacti
   Home: { active: 'home', inactive: 'home-outline' },
   Wardrobe: { active: 'shirt', inactive: 'shirt-outline' },
   OutfitBuilder: { active: 'layers', inactive: 'layers-outline' },
-  AIStyle: { active: 'sparkles', inactive: 'sparkles-outline' },
+  AIStyle: { active: 'body', inactive: 'body-outline' },
   Profile: { active: 'person', inactive: 'person-outline' },
 };
 

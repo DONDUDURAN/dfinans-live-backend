@@ -135,7 +135,7 @@ export const RegistrationScreen: React.FC = () => {
           <Text style={styles.ctaBtnText}>Denemeyi başlat</Text>
         </TouchableOpacity>
 
-        <Text style={styles.finePrint}>7 gün ücretsiz · kart bilgisi saklanmaz</Text>
+        <Text style={styles.finePrint}>7 gün ücretsiz deneme</Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );

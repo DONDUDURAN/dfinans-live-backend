@@ -89,17 +89,7 @@ export const HomeScreen: React.FC = () => {
               <Ionicons name="body-outline" size={20} color={Colors.gold} />
             </View>
             <View style={styles.kabinText}>
-              <Text style={styles.kabinTitle}>Sanal ikizinde dene</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.kabinAction} onPress={() => navigation.navigate('AddItem', {})}>
-            <View style={[styles.kabinIconWrap, { backgroundColor: Colors.info + '22' }]}>
-              <Ionicons name="camera-outline" size={20} color={Colors.info} />
-            </View>
-            <View style={styles.kabinText}>
-              <Text style={styles.kabinTitle}>Parça ekle</Text>
+              <Text style={styles.kabinTitle}>Kabinde dene</Text>
             </View>
             <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
           </TouchableOpacity>
