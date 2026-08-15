@@ -78,7 +78,7 @@ export const ProfileScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#171103', Colors.background]} style={[styles.profileHeader, { paddingTop: insets.top + Spacing.base }]}>
+      <LinearGradient colors={['#031210', Colors.background]} style={[styles.profileHeader, { paddingTop: insets.top + Spacing.base }]}>
         <View style={styles.wordmarkWrap}>
           <Text style={styles.wordmark} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
           <View style={styles.wordmarkRule} />
@@ -96,7 +96,7 @@ export const ProfileScreen: React.FC = () => {
       <View style={styles.statsGrid}>
         {[
           { icon: 'shirt-outline', label: 'Parça', value: items.length },
-          { icon: 'layers-outline', label: 'Kombin', value: outfits.length },
+          { icon: 'layers-outline', label: 'Stil', value: outfits.length },
           { icon: 'repeat-outline', label: 'Kullanım', value: totalWorn },
           { icon: 'heart-outline', label: 'Favori', value: items.filter((i) => i.isFavorite).length },
         ].map((stat) => (

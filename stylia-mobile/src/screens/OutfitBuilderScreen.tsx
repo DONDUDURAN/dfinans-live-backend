@@ -53,7 +53,7 @@ export const OutfitBuilderScreen: React.FC = () => {
 
   const handleSave = () => {
     if (!outfitName.trim()) {
-      Alert.alert('İsim gerekli', 'Kombininize bir isim verin.');
+      Alert.alert('İsim gerekli', 'Stilinize bir isim verin.');
       return;
     }
     const outfit = saveBuilderAsOutfit(outfitName.trim());
@@ -61,7 +61,7 @@ export const OutfitBuilderScreen: React.FC = () => {
     clearBuilder();
     setOutfitName('');
     setShowSaveModal(false);
-    Alert.alert('✨ Kombin kaydedildi', `"${outfit.name}" koleksiyonuna eklendi.`);
+    Alert.alert('✦ Stil kaydedildi', `"${outfit.name}" koleksiyonuna eklendi.`);
   };
 
   return (
@@ -69,8 +69,8 @@ export const OutfitBuilderScreen: React.FC = () => {
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <View>
-          <Text style={styles.title}>Kombin Oluşturucu</Text>
-          <Text style={styles.subtitle}>Parçaları eşleştir, görünümü tamamla</Text>
+          <Text style={styles.title}>Stil Kur</Text>
+          <Text style={styles.subtitle}>Parçaları seç, sanal denemeye hazırla</Text>
         </View>
         {builderItems.length > 0 && (
           <View style={styles.headerActions}>
@@ -93,7 +93,7 @@ export const OutfitBuilderScreen: React.FC = () => {
         {builderItems.length === 0 ? (
           <View style={styles.canvasEmpty}>
             <Text style={styles.canvasEmptyEmoji}>✦</Text>
-            <Text style={styles.canvasEmptyText}>Aşağıdan parçaları seçerek kombinini oluştur</Text>
+            <Text style={styles.canvasEmptyText}>Aşağıdan parçaları seçerek sanal deneme setini oluştur</Text>
           </View>
         ) : (
           <ScrollView
@@ -212,10 +212,10 @@ export const OutfitBuilderScreen: React.FC = () => {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Kombin Adı</Text>
+            <Text style={styles.modalTitle}>Stil Adı</Text>
             <TextInput
               style={styles.modalInput}
-              placeholder="Örn. Pazartesi Güç Kombini"
+              placeholder="Örn. Pazartesi Güç Stili"
               placeholderTextColor={Colors.textMuted}
               value={outfitName}
               onChangeText={setOutfitName}
@@ -230,7 +230,7 @@ export const OutfitBuilderScreen: React.FC = () => {
               </TouchableOpacity>
               <TouchableOpacity style={styles.modalSave} onPress={handleSave}>
                 <Ionicons name="sparkles" size={16} color={Colors.background} />
-                <Text style={styles.modalSaveText}>Kombini Kaydet</Text>
+                <Text style={styles.modalSaveText}>Stili Kaydet</Text>
               </TouchableOpacity>
             </View>
           </View>

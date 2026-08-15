@@ -60,7 +60,7 @@ export const RegistrationScreen: React.FC = () => {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <LinearGradient colors={['#1A1405', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.xl }]}>
+      <LinearGradient colors={['#041514', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.xl }]}>
         <View style={styles.brandWrap}>
           <Text style={styles.brand} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
           <View style={styles.brandRule} />

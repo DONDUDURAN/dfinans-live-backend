@@ -19,6 +19,7 @@ import { StyleSuggestionCard } from '../components/StyleSuggestionCard';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 import { Occasion } from '../types';
 import { useUserStore } from '../store/userStore';
+import { useNavigation } from '@react-navigation/native';
 
 const OCCASIONS: Occasion[] = ['Casual', 'Work', 'Formal', 'Party', 'Date Night', 'Sport', 'Beach'];
 
@@ -53,6 +54,7 @@ const MOODS = [
 
 export const AIStyleScreen: React.FC = () => {
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
   const suggestions = useStyleStore((s) => s.suggestions);
   const isGenerating = useStyleStore((s) => s.isGenerating);
   const generateSuggestions = useStyleStore((s) => s.generateSuggestions);
@@ -61,6 +63,8 @@ export const AIStyleScreen: React.FC = () => {
 
   const productLink = useUserStore((s) => s.productLink);
   const setProductLink = useUserStore((s) => s.setProductLink);
+  const measurements = useUserStore((s) => s.measurements);
+  const videoNoteUri = useUserStore((s) => s.videoNoteUri);
 
   const [selectedMood, setSelectedMood] = useState<string | null>(null);
   const [cameraUri, setCameraUri] = useState<string | null>(null);
@@ -97,16 +101,103 @@ export const AIStyleScreen: React.FC = () => {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#191203', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
+      <LinearGradient colors={['#031210', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <View style={styles.headerBadge}>
-          <Ionicons name="sparkles" size={14} color={Colors.gold} />
-          <Text style={styles.headerBadgeText}>KABİN AI</Text>
+          <View style={styles.headerBadgeDot} />
+          <Text style={styles.headerBadgeText}>SANAL İKİZ KABİNİ</Text>
         </View>
-        <Text style={styles.title}>STYLIA Kabin Asistanı</Text>
-        <Text style={styles.subtitle}>Stiline, ölçüne ve moduna göre premium kombin önerileri.</Text>
+        <Text style={styles.title}>Kabin</Text>
+        <Text style={styles.subtitle}>İkizin üzerinde kıyafetleri gerçek zamanlı dene — aldatma payı yok.</Text>
       </LinearGradient>
 
+      {/* ADIM 1 — Sanal İkiz */}
       <View style={styles.section}>
+        <View style={styles.stepRow}>
+          <View style={styles.stepNum}><Text style={styles.stepNumText}>1</Text></View>
+          <Text style={styles.stepTitle}>Sanal İkizini Oluştur / Güncelle</Text>
+        </View>
+        <View style={[styles.stepCard, Shadow.sm]}>
+          <View style={styles.twinStatusRow}>
+            <View style={styles.twinStatusItem}>
+              <Ionicons
+                name={measurements.boyCm ? 'checkmark-circle' : 'ellipse-outline'}
+                size={16}
+                color={measurements.boyCm ? Colors.gold : Colors.textMuted}
+              />
+              <Text style={[styles.twinStatusLabel, !!measurements.boyCm && styles.twinStatusLabelDone]}>Ölçüler</Text>
+            </View>
+            <View style={styles.twinStatusItem}>
+              <Ionicons
+                name={videoNoteUri ? 'checkmark-circle' : 'ellipse-outline'}
+                size={16}
+                color={videoNoteUri ? Colors.gold : Colors.textMuted}
+              />
+              <Text style={[styles.twinStatusLabel, !!videoNoteUri && styles.twinStatusLabelDone]}>Video notu</Text>
+            </View>
+            <View style={styles.twinStatusItem}>
+              <Ionicons
+                name={cameraUri ? 'checkmark-circle' : 'ellipse-outline'}
+                size={16}
+                color={cameraUri ? Colors.gold : Colors.textMuted}
+              />
+              <Text style={[styles.twinStatusLabel, !!cameraUri && styles.twinStatusLabelDone]}>Kabin görseli</Text>
+            </View>
+          </View>
+          <TouchableOpacity style={styles.twinUpdateBtn} onPress={() => navigation.navigate('Profile')}>
+            <Ionicons name="person-outline" size={14} color={Colors.gold} />
+            <Text style={styles.twinUpdateText}>Profil'den güncelle</Text>
+            <Ionicons name="arrow-forward" size={12} color={Colors.gold} />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* ADIM 2 — Kıyafet / Link */}
+      <View style={styles.section}>
+        <View style={styles.stepRow}>
+          <View style={styles.stepNum}><Text style={styles.stepNumText}>2</Text></View>
+          <Text style={styles.stepTitle}>Kıyafet Yükle / Link Ekle</Text>
+        </View>
+        <View style={styles.kabinStack}>
+          <View style={[styles.kabinAction, Shadow.sm]}>
+            <View style={styles.kabinActionHeader}>
+              <Ionicons name="link-outline" size={18} color={Colors.gold} />
+              <Text style={styles.kabinActionTitle}>Ürün linki ekle</Text>
+            </View>
+            <TextInput
+              value={linkInput}
+              onChangeText={setLinkInput}
+              placeholder="https://marka.com/urun"
+              placeholderTextColor={Colors.textMuted}
+              autoCapitalize="none"
+              style={styles.linkInput}
+            />
+            <TouchableOpacity style={styles.inlineButton} onPress={handleSaveLink}>
+              <Text style={styles.inlineButtonText}>Linki kaydet</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={[styles.kabinAction, Shadow.sm]}>
+            <View style={styles.kabinActionHeader}>
+              <Ionicons name="camera-outline" size={18} color={Colors.gold} />
+              <Text style={styles.kabinActionTitle}>Kamera ile kabin görseli çek</Text>
+            </View>
+            {cameraUri
+              ? <Image source={{ uri: cameraUri }} style={styles.cameraPreview} />
+              : <Text style={styles.emptyNote}>İkiz referansı için ayna fotoğrafı çek.</Text>}
+            <TouchableOpacity style={styles.inlineButton} onPress={handleShoot}>
+              <Text style={styles.inlineButtonText}>{cameraUri ? 'Yenile' : 'Kamera aç'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+
+      {/* ADIM 3 — Kabin Dene */}
+      <View style={styles.section}>
+        <View style={styles.stepRow}>
+          <View style={styles.stepNum}><Text style={styles.stepNumText}>3</Text></View>
+          <Text style={styles.stepTitle}>Kabinde Dene</Text>
+        </View>
+
         <Text style={styles.sectionLabel}>Etkinlik</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.occRow}>
           <TouchableOpacity style={[styles.occChip, !selectedOccasion && styles.occChipActive]} onPress={() => setOccasion(null)}>
@@ -126,10 +217,8 @@ export const AIStyleScreen: React.FC = () => {
             </TouchableOpacity>
           ))}
         </ScrollView>
-      </View>
 
-      <View style={styles.section}>
-        <Text style={styles.sectionLabel}>Ruh hali</Text>
+        <Text style={[styles.sectionLabel, { marginTop: Spacing.sm }]}>Ruh hali</Text>
         <View style={styles.moodGrid}>
           {MOODS.map((mood) => (
             <TouchableOpacity
@@ -152,58 +241,26 @@ export const AIStyleScreen: React.FC = () => {
         </View>
       </View>
 
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Kabin aksiyonları</Text>
-        <View style={styles.kabinStack}>
-          <View style={styles.kabinAction}>
-            <View style={styles.kabinActionHeader}>
-              <Ionicons name="link-outline" size={18} color={Colors.gold} />
-              <Text style={styles.kabinActionTitle}>Ürün linki ekle</Text>
-            </View>
-            <TextInput
-              value={linkInput}
-              onChangeText={setLinkInput}
-              placeholder="https://marka.com/urun"
-              placeholderTextColor={Colors.textMuted}
-              autoCapitalize="none"
-              style={styles.linkInput}
-            />
-            <TouchableOpacity style={styles.inlineButton} onPress={handleSaveLink}>
-              <Text style={styles.inlineButtonText}>Linki kaydet</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.kabinAction}>
-            <View style={styles.kabinActionHeader}>
-              <Ionicons name="camera-outline" size={18} color={Colors.gold} />
-              <Text style={styles.kabinActionTitle}>Kamera ile görünüm çek</Text>
-            </View>
-            {cameraUri ? <Image source={{ uri: cameraUri }} style={styles.cameraPreview} /> : <Text style={styles.emptyNote}>Henüz görsel çekilmedi.</Text>}
-            <TouchableOpacity style={styles.inlineButton} onPress={handleShoot}>
-              <Text style={styles.inlineButtonText}>Kamera aç</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </View>
-
       <TouchableOpacity style={[styles.generateBtn, Shadow.gold, isGenerating && styles.generateBtnDisabled]} onPress={handleGenerate} disabled={isGenerating} activeOpacity={0.85}>
         <LinearGradient colors={[Colors.goldLight, Colors.gold, Colors.goldDark]} style={StyleSheet.absoluteFill} />
         {isGenerating ? (
           <>
             <ActivityIndicator size="small" color={Colors.background} />
-            <Text style={styles.generateBtnText}>Kabin analiz ediliyor...</Text>
+            <Text style={styles.generateBtnText}>İkiz analiz ediliyor...</Text>
           </>
         ) : (
           <>
-            <Ionicons name="sparkles" size={18} color={Colors.background} />
-            <Text style={styles.generateBtnText}>Öneri üret</Text>
+            <Ionicons name="body-outline" size={18} color={Colors.background} />
+            <Text style={styles.generateBtnText}>Kabinde Dene</Text>
           </>
         )}
       </TouchableOpacity>
 
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>{isGenerating ? 'Güncelleniyor...' : `${suggestions.length} kombin önerisi`}</Text>
+          <Text style={styles.sectionTitle}>
+            {isGenerating ? 'İkiz hazırlanıyor...' : `İkizin ${suggestions.length} görünümü`}
+          </Text>
         </View>
         {isGenerating ? (
           <View style={styles.generatingState}>
@@ -218,7 +275,7 @@ export const AIStyleScreen: React.FC = () => {
                 {idx === 0 && (
                   <View style={styles.topPickBadge}>
                     <Ionicons name="trophy" size={12} color={Colors.gold} />
-                    <Text style={styles.topPickText}>Öne çıkan seçim</Text>
+                    <Text style={styles.topPickText}>İkizine en çok yakışan</Text>
                   </View>
                 )}
                 <StyleSuggestionCard suggestion={s} />
@@ -247,7 +304,7 @@ const styles = StyleSheet.create({
   headerBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 6,
     backgroundColor: Colors.gold + '22',
     borderRadius: Radius.full,
     paddingHorizontal: 10,
@@ -255,6 +312,12 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     borderWidth: 1,
     borderColor: Colors.gold + '44',
+  },
+  headerBadgeDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: Colors.gold,
   },
   headerBadgeText: {
     fontSize: Typography.xs,
@@ -277,6 +340,72 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.base,
     marginBottom: Spacing.xl,
     gap: Spacing.md,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+  },
+  stepNum: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: Colors.gold,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepNumText: {
+    color: Colors.background,
+    fontSize: Typography.xs,
+    fontWeight: '800',
+  },
+  stepTitle: {
+    color: Colors.textPrimary,
+    fontSize: Typography.base,
+    fontWeight: '700',
+    flex: 1,
+  },
+  stepCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.base,
+    gap: Spacing.md,
+  },
+  twinStatusRow: {
+    flexDirection: 'row',
+    gap: Spacing.xl,
+  },
+  twinStatusItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  twinStatusLabel: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+  },
+  twinStatusLabelDone: {
+    color: Colors.gold,
+    fontWeight: '600',
+  },
+  twinUpdateBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: Colors.gold + '66',
+    borderRadius: Radius.full,
+    backgroundColor: Colors.gold + '1A',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 6,
+  },
+  twinUpdateText: {
+    color: Colors.gold,
+    fontSize: Typography.xs,
+    fontWeight: '700',
   },
   sectionLabel: {
     fontSize: Typography.sm,

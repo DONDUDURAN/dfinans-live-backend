@@ -11,10 +11,10 @@ export const Colors = {
   textSecondary: '#C6CBD7',
   textMuted: '#8B92A1',
 
-  // Accent
-  gold: '#C9A84C',
-  goldLight: '#E8C97A',
-  goldDark: '#9A7A30',
+  // Accent — premium teal / deep aqua (replaces amber gold)
+  gold: '#10A8A0',
+  goldLight: '#6CDDD6',
+  goldDark: '#0A7A74',
 
   // Status
   success: '#4CAF7D',
@@ -97,9 +97,9 @@ export const Shadow = {
     elevation: 12,
   },
   gold: {
-    shadowColor: '#C9A84C',
+    shadowColor: '#10A8A0',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
+    shadowOpacity: 0.25,
     shadowRadius: 12,
     elevation: 8,
   },

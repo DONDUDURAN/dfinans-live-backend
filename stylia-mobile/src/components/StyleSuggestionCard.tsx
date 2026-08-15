@@ -37,14 +37,14 @@ export const StyleSuggestionCard: React.FC<Props> = ({
       activeOpacity={0.88}
     >
       <LinearGradient
-        colors={['#1A1500', '#0D0D0D']}
+        colors={['#001412', '#0D0D0D']}
         style={StyleSheet.absoluteFill}
       />
 
       {/* Confidence arc */}
       <View style={styles.confidenceBadge}>
         <Text style={styles.confidenceValue}>{suggestion.confidence}%</Text>
-        <Text style={styles.confidenceLabel}>Uyum</Text>
+        <Text style={styles.confidenceLabel}>Eşleşme</Text>
       </View>
 
       {/* Item thumbnails */}
@@ -92,7 +92,7 @@ export const StyleSuggestionCard: React.FC<Props> = ({
             <Text style={styles.outfitOccasionText}>{trOccasion(suggestion.outfit.occasion)}</Text>
           </View>
           <TouchableOpacity style={styles.tryBtn} onPress={onPress}>
-            <Text style={styles.tryBtnText}>Deneyelim</Text>
+            <Text style={styles.tryBtnText}>Kabinde Dene</Text>
             <Ionicons name="arrow-forward" size={12} color={Colors.background} />
           </TouchableOpacity>
         </View>

@@ -38,20 +38,20 @@ export const HomeScreen: React.FC = () => {
 
   const stats = [
     { label: 'Parça', value: items.length, icon: 'shirt-outline' },
-    { label: 'Kombin', value: outfits.length, icon: 'layers-outline' },
+    { label: 'Stil', value: outfits.length, icon: 'layers-outline' },
     { label: 'Favori', value: items.filter((i) => i.isFavorite).length, icon: 'heart-outline' },
   ];
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <LinearGradient colors={['#201809', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
+      <LinearGradient colors={['#031210', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <View style={styles.wordmarkWrap}>
           <Text style={styles.wordmark} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
           <View style={styles.wordmarkRule} />
         </View>
         <Text style={styles.date}>{today}</Text>
         <Text style={styles.greeting}>Merhaba {fullName.split(' ')[0] || 'stil sahibi'} ✦</Text>
-        <Text style={styles.headline}>Bugün nasıl bir enerji{'\n'}taşımak istiyorsun?</Text>
+        <Text style={styles.headline}>Bugün sanal ikizin{'\n'}ne giyiyor?</Text>
       </LinearGradient>
 
       <View style={styles.statsRow}>
@@ -78,7 +78,7 @@ export const HomeScreen: React.FC = () => {
 
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Son Kombinler</Text>
+          <Text style={styles.sectionTitle}>Son Stiller</Text>
         </View>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalList}>
           {outfits.slice(0, 4).map((outfit) => (
@@ -90,15 +90,15 @@ export const HomeScreen: React.FC = () => {
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Kabin Aksiyonları</Text>
+        <Text style={styles.sectionTitle}>Sanal İkiz Kabini</Text>
         <View style={styles.kabinStack}>
           <TouchableOpacity style={[styles.kabinAction, Shadow.sm]} onPress={() => navigation.navigate('AIStyle')}>
             <View style={[styles.kabinIconWrap, { backgroundColor: Colors.gold + '22' }]}>
-              <Ionicons name="sparkles-outline" size={20} color={Colors.gold} />
+              <Ionicons name="body-outline" size={20} color={Colors.gold} />
             </View>
             <View style={styles.kabinText}>
-              <Text style={styles.kabinTitle}>AI stil önerisi al</Text>
-              <Text style={styles.kabinDesc}>Moduna ve planına göre öneri üret.</Text>
+              <Text style={styles.kabinTitle}>Sanal ikizinde dene</Text>
+              <Text style={styles.kabinDesc}>Kıyafeti bedenine ölçülü olarak yansıt.</Text>
             </View>
             <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
           </TouchableOpacity>
@@ -116,11 +116,11 @@ export const HomeScreen: React.FC = () => {
 
           <TouchableOpacity style={[styles.kabinAction, Shadow.sm]} onPress={() => navigation.navigate('Profile')}>
             <View style={[styles.kabinIconWrap, { backgroundColor: Colors.success + '22' }]}>
-              <Ionicons name="body-outline" size={20} color={Colors.success} />
+              <Ionicons name="person-outline" size={20} color={Colors.success} />
             </View>
             <View style={styles.kabinText}>
-              <Text style={styles.kabinTitle}>Ölçü ve video notu güncelle</Text>
-              <Text style={styles.kabinDesc}>Kişiselleştirilmiş önerilerin doğruluğunu artır.</Text>
+              <Text style={styles.kabinTitle}>Sanal ikizi güncelle</Text>
+              <Text style={styles.kabinDesc}>Ölçü ve video notu ile ikizin doğruluğunu artır.</Text>
             </View>
             <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
           </TouchableOpacity>
