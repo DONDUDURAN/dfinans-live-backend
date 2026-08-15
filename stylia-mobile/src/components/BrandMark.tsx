@@ -11,7 +11,7 @@ const HAT_GREEN  = '#0F9B5E';
 const HAT_BAND   = '#061510';   // very deep, near-black — crisp band detail
 
 // ─── Hat ─────────────────────────────────────────────────────────────────────
-// Top-hat silhouette: slightly tilted, refined crown/brim balance, crisp band.
+// Mini top-hat used as the "i" dot symbol.
 function HatIcon({ scale = 1 }: { scale?: number }) {
   const crownW  = Math.round(12.5 * scale);
   const crownH  = Math.round(10.5 * scale);
@@ -21,7 +21,7 @@ function HatIcon({ scale = 1 }: { scale?: number }) {
   const topR    = Math.round(4 * scale);
 
   return (
-    <View style={{ alignItems: 'center', transform: [{ rotate: '-8deg' }] }}>
+    <View style={{ alignItems: 'center', transform: [{ rotate: '-6deg' }] }}>
       {/* Crown with band inset at bottom */}
       <View style={{
         width: crownW,
@@ -57,11 +57,10 @@ export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
   const [fontsLoaded] = useFonts({ DancingScript_600SemiBold });
 
   const fontSize  = size === 'lg' ? 56 : size === 'sm' ? 36 : 48;
-  const hatScale  = size === 'lg' ? 1.24 : size === 'sm' ? 0.84 : 1.02;
+  const hatScale  = size === 'lg' ? 1.0 : size === 'sm' ? 0.66 : 0.82;
 
-  // 600SemiBold metric calibration for placing hat over trailing "a".
-  // Keep slight romantic overlap but avoid covering the terminal "a".
-  const hatSpacer = Math.round(fontSize * 1.62);
+  // Place symbol at the "i" dot position in "Stylia" while preserving full readability.
+  const hatSpacer = Math.round(fontSize * 1.28);
 
   return (
     <View style={[styles.wrap, size === 'sm' ? styles.wrapSm : size === 'lg' ? styles.wrapLg : styles.wrapMd]}>
@@ -77,7 +76,7 @@ export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
               fontSize,
               fontFamily: fontsLoaded ? 'DancingScript_600SemiBold' : undefined,
               fontStyle: fontsLoaded ? 'normal' : 'italic',
-              marginTop: Math.round(-(3 * hatScale)),
+              marginTop: Math.round(-(2 * hatScale)),
               paddingLeft: size === 'lg' ? Spacing.xs : 0,
             },
           ]}
@@ -98,18 +97,18 @@ const styles = StyleSheet.create({
     overflow: 'visible',
   },
   wrapSm: {
-    paddingRight: 10,
+    paddingRight: 8,
   },
   wrapMd: {
-    paddingRight: 14,
+    paddingRight: 10,
   },
   wrapLg: {
-    paddingRight: 18,
+    paddingRight: 12,
   },
   hatRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginBottom: 1,
+    marginBottom: 0,
   },
   wordmarkWrap: {
     overflow: 'visible',

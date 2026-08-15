@@ -13,7 +13,7 @@ import { AddItemScreen } from '../screens/AddItemScreen';
 import { AuthScreen } from '../screens/AuthScreen';
 import { ItemDetailScreen } from '../screens/ItemDetailScreen';
 
-import { Colors, Radius } from '../theme';
+import { Colors } from '../theme';
 import { RootStackParamList, TabParamList } from '../types';
 import { useUserStore } from '../store/userStore';
 
@@ -49,32 +49,23 @@ function MainTabs() {
         tabBarIcon: ({ focused, color }) => {
           const icons = TAB_ICONS[route.name];
           const iconName = focused ? icons.active : icons.inactive;
-          if (route.name === 'AIStyle') {
-            return (
-              <View style={[styles.aiTabIcon, focused && styles.aiTabIconActive]}>
-                <Ionicons name={iconName} size={20} color={focused ? Colors.background : Colors.textMuted} />
-              </View>
-            );
-          }
           return <Ionicons name={iconName} size={21} color={color} />;
         },
         tabBarLabel: ({ color }) =>
-          route.name === 'AIStyle' ? null : (
-            <Text
-              style={[styles.tabLabel, { color }]}
-              numberOfLines={1}
-              adjustsFontSizeToFit
-              minimumFontScale={0.88}
-            >
-              {TAB_LABELS[route.name]}
-            </Text>
-          ),
+          <Text
+            style={[styles.tabLabel, { color }]}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.88}
+          >
+            {TAB_LABELS[route.name]}
+          </Text>,
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
+      <Tab.Screen name="AIStyle" component={AIStyleScreen} />
       <Tab.Screen name="Wardrobe" component={WardrobeScreen} />
       <Tab.Screen name="OutfitBuilder" component={OutfitBuilderScreen} />
-      <Tab.Screen name="AIStyle" component={AIStyleScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>
   );
@@ -126,20 +117,5 @@ const styles = StyleSheet.create({
     textTransform: 'none',
     textAlign: 'center',
     includeFontPadding: false,
-  },
-  aiTabIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: Radius.full,
-    backgroundColor: Colors.surfaceElevated,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 2,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  aiTabIconActive: {
-    backgroundColor: Colors.gold,
-    borderColor: Colors.gold,
   },
 });
