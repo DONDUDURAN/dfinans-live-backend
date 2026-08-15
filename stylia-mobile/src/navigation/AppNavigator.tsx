@@ -42,6 +42,7 @@ function MainTabs() {
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarStyle: styles.tabBar,
+        tabBarItemStyle: styles.tabBarItem,
         tabBarBackground: () => <View style={styles.tabBarBg} />,
         tabBarActiveTintColor: Colors.goldLight,
         tabBarInactiveTintColor: Colors.textMuted,
@@ -58,7 +59,16 @@ function MainTabs() {
           return <Ionicons name={iconName} size={21} color={color} />;
         },
         tabBarLabel: ({ color }) =>
-          route.name === 'AIStyle' ? null : <Text style={[styles.tabLabel, { color }]}>{TAB_LABELS[route.name]}</Text>,
+          route.name === 'AIStyle' ? null : (
+            <Text
+              style={[styles.tabLabel, { color }]}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.88}
+            >
+              {TAB_LABELS[route.name]}
+            </Text>
+          ),
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
@@ -106,11 +116,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: Colors.surface,
   },
+  tabBarItem: {
+    paddingHorizontal: 2,
+  },
   tabLabel: {
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '600',
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
+    letterSpacing: 0.2,
+    textTransform: 'none',
+    textAlign: 'center',
+    includeFontPadding: false,
   },
   aiTabIcon: {
     width: 42,

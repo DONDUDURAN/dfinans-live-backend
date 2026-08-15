@@ -134,8 +134,8 @@ const styles = StyleSheet.create({
   },
   header: {
     padding: Spacing.base,
-    paddingBottom: Spacing['2xl'],
-    gap: 8,
+    paddingBottom: Spacing.xl,
+    gap: Spacing.sm,
   },
   greeting: {
     fontSize: Typography.sm,
@@ -147,16 +147,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
-    marginTop: -Spacing.sm,
-    marginBottom: Spacing.base,
+    marginTop: Spacing.sm,
+    marginBottom: Spacing.xl,
   },
   statCard: {
     flex: 1,
     backgroundColor: Colors.surface,
     borderRadius: Radius.lg,
-    padding: Spacing.md,
+    paddingVertical: Spacing.base,
+    paddingHorizontal: Spacing.md,
     alignItems: 'center',
-    gap: 2,
+    gap: 4,
   },
   statValue: {
     fontSize: Typography.xl,
@@ -169,8 +170,8 @@ const styles = StyleSheet.create({
   },
   section: {
     paddingHorizontal: Spacing.base,
-    marginBottom: Spacing.xl,
-    gap: Spacing.md,
+    marginBottom: Spacing['2xl'],
+    gap: Spacing.lg,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -192,6 +193,7 @@ const styles = StyleSheet.create({
   horizontalList: {
     gap: Spacing.md,
     paddingRight: Spacing.base,
+    paddingTop: 2,
   },
   kabinStack: {
     gap: Spacing.md,
@@ -202,7 +204,8 @@ const styles = StyleSheet.create({
     gap: Spacing.md,
     backgroundColor: Colors.surface,
     borderRadius: Radius.lg,
-    padding: Spacing.base,
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.base,
   },
   kabinIconWrap: {
     width: 42,

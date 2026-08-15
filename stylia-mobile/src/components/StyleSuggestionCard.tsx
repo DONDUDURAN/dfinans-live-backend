@@ -227,9 +227,7 @@ const styles = StyleSheet.create({
   reasonRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   reasonText: { fontSize: Typography.xs, color: Colors.textSecondary, flex: 1 },
   footer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: Spacing.sm,
     marginTop: Spacing.sm,
   },
   outfitOccasion: {
@@ -244,6 +242,8 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
     gap: Spacing.xs,
   },
   ghostBtn: {
@@ -254,7 +254,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: Colors.borderLight,
     paddingHorizontal: Spacing.sm,
-    paddingVertical: 6,
+    paddingVertical: 7,
   },
   ghostBtnText: {
     fontSize: 10,
@@ -267,7 +267,7 @@ const styles = StyleSheet.create({
     gap: 4,
     backgroundColor: Colors.gold,
     borderRadius: Radius.sm,
-    paddingHorizontal: 10,
+    paddingHorizontal: 11,
     paddingVertical: 7,
   },
   tryBtnText: {
