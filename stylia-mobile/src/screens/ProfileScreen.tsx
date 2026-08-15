@@ -36,6 +36,8 @@ export const ProfileScreen: React.FC = () => {
   const videoNoteUri = useUserStore((s) => s.videoNoteUri);
   const setVideoNoteUri = useUserStore((s) => s.setVideoNoteUri);
 
+  const logout = useUserStore((s) => s.logout);
+
   const [draft, setDraft] = useState(measurements);
 
   const totalWorn = items.reduce((acc, i) => acc + i.timesWorn, 0);
@@ -162,6 +164,18 @@ export const ProfileScreen: React.FC = () => {
           </TouchableOpacity>
         </View>
       </View>
+
+      <TouchableOpacity
+        style={styles.resetBtn}
+        onPress={() =>
+          Alert.alert('Hesabı Sıfırla', 'Tüm veriler silinir ve kayıt ekranına dönülür.', [
+            { text: 'Vazgeç', style: 'cancel' },
+            { text: 'Sıfırla', style: 'destructive', onPress: logout },
+          ])
+        }
+      >
+        <Text style={styles.resetText}>Hesabı sıfırla</Text>
+      </TouchableOpacity>
     </ScrollView>
   );
 };
@@ -296,4 +310,16 @@ const styles = StyleSheet.create({
   },
   videoText: { color: Colors.textSecondary, fontSize: Typography.sm, lineHeight: 20 },
   videoStatus: { color: Colors.textPrimary, fontSize: Typography.xs, fontWeight: '700' },
+  resetBtn: {
+    alignSelf: 'center',
+    paddingVertical: Spacing.md,
+    paddingHorizontal: Spacing.xl,
+    marginTop: Spacing.xl,
+    marginBottom: Spacing['3xl'],
+  },
+  resetText: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    letterSpacing: 0.3,
+  },
 });
