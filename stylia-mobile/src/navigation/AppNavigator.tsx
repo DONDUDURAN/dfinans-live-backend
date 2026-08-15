@@ -29,7 +29,7 @@ const TAB_ICONS: Record<string, { active: keyof typeof Ionicons.glyphMap; inacti
 };
 
 const TAB_LABELS: Record<string, string> = {
-  Home: 'Ana Sayfa',
+  Home: 'Sanal İkiz',
   Wardrobe: 'Gardırop',
   OutfitBuilder: 'Stil',
   AIStyle: 'Kabin',
