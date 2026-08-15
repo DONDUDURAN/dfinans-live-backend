@@ -99,7 +99,7 @@ export const AuthScreen: React.FC<Props> = ({ initialMode = 'register' }) => {
         style={[styles.header, { paddingTop: insets.top + Spacing['2xl'] }]}
       >
         <BrandMark size="lg" />
-        <Text style={styles.tagline}>Kişisel stil kabininiz</Text>
+        <Text style={styles.tagline}>Sanal İkiz Kabini</Text>
       </LinearGradient>
 
       {/* ── Mode tabs ───────────────────────────────────────────────────── */}

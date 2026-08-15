@@ -62,7 +62,7 @@ export const RegistrationScreen: React.FC = () => {
         style={[styles.header, { paddingTop: insets.top + Spacing['2xl'] }]}
       >
         <BrandMark size="lg" />
-        <Text style={styles.subtitle}>Kişisel stil kabininiz</Text>
+        <Text style={styles.subtitle}>Sanal İkiz Kabini</Text>
       </LinearGradient>
 
       <ScrollView

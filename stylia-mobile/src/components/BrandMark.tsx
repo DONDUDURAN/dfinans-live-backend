@@ -2,49 +2,46 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import {
   useFonts,
-  DancingScript_400Regular,
+  DancingScript_700Bold,
 } from '@expo-google-fonts/dancing-script';
 import { Spacing } from '../theme';
 
-// Warm ivory on dark — reads as premium/artisanal
 const WORDMARK_CREAM = '#EDE5D0';
-// Vivid emerald — richer and more distinct than prior #2C7A51
-const HAT_GREEN = '#0F9B5E';
-const HAT_BAND = '#07251A';   // near-black band — adds depth and elegance
+const HAT_GREEN  = '#0F9B5E';
+const HAT_BAND   = '#061510';   // very deep, near-black — crisp band detail
 
-// ─── Hat icon (top-hat silhouette with band detail) ──────────────────────────
+// ─── Hat ─────────────────────────────────────────────────────────────────────
+// Top-hat silhouette: narrower crown, wider brim, prominent band.
 function HatIcon({ scale = 1 }: { scale?: number }) {
-  const crownW = Math.round(12 * scale);
-  const crownH = Math.round(9 * scale);
-  const brimW  = Math.round(20 * scale);
-  const brimH  = Math.round(3  * scale);
-  const bandH  = Math.round(2.5 * scale);
-  const r      = Math.round(3 * scale);
+  const crownW  = Math.round(13 * scale);
+  const crownH  = Math.round(11 * scale);
+  const brimW   = Math.round(22 * scale);
+  const brimH   = Math.round(2.5 * scale);
+  const bandH   = Math.round(3 * scale);
+  const topR    = Math.round(4 * scale);
 
   return (
     <View style={{ alignItems: 'center' }}>
-      {/* Crown */}
+      {/* Crown with band inset at bottom */}
       <View style={{
         width: crownW,
         height: crownH,
-        borderTopLeftRadius: r + 2,
-        borderTopRightRadius: r + 2,
-        borderBottomLeftRadius: 1,
-        borderBottomRightRadius: 1,
+        borderTopLeftRadius: topR,
+        borderTopRightRadius: topR,
+        borderBottomLeftRadius: 0,
+        borderBottomRightRadius: 0,
         backgroundColor: HAT_GREEN,
         overflow: 'hidden',
         justifyContent: 'flex-end',
       }}>
-        {/* Band — sits at the base of the crown */}
         <View style={{ width: crownW, height: bandH, backgroundColor: HAT_BAND }} />
       </View>
-      {/* Brim */}
+      {/* Brim — slightly thicker on bottom */}
       <View style={{
         width: brimW,
         height: brimH,
-        borderRadius: Math.round(1.5 * scale),
+        borderRadius: 1,
         backgroundColor: HAT_GREEN,
-        marginTop: -0.5,
       }} />
     </View>
   );
@@ -56,33 +53,30 @@ interface BrandMarkProps {
 }
 
 export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
-  const [fontsLoaded] = useFonts({ DancingScript_400Regular });
+  const [fontsLoaded] = useFonts({ DancingScript_700Bold });
 
-  const fontSize = size === 'lg' ? 52 : size === 'sm' ? 34 : 44;
-  const hatScale = size === 'lg' ? 1.2 : size === 'sm' ? 0.8 : 1.0;
+  const fontSize  = size === 'lg' ? 54 : size === 'sm' ? 36 : 46;
+  const hatScale  = size === 'lg' ? 1.25 : size === 'sm' ? 0.85 : 1.05;
 
-  // Spacer approximates the x-position of the 'a' (last letter) in "Stylia"
-  // Dancing Script: S≈0.38 t≈0.26 y≈0.34 l≈0.24 i≈0.14 → cumulative ≈ 1.36 × fontSize
-  // Add slight overshoot so hat crown sits romantically over the 'a' centre
-  const hatSpacer = Math.round(fontSize * 1.48);
+  // 700Bold is wider than 400Regular; re-calibrate spacer for 'a' position.
+  // S≈0.42 t≈0.28 y≈0.37 l≈0.25 i≈0.16 → ~1.48 × fontSize to reach start of 'a'
+  // Centre of 'a' ≈ 1.48 + 0.18 = 1.66; aim for romantic overlap, pull back a touch.
+  const hatSpacer = Math.round(fontSize * 1.52);
 
   return (
     <View style={styles.wrap}>
-      {/* Hat floats above the 'a' */}
       <View style={styles.hatRow}>
         <View style={{ width: hatSpacer }} />
         <HatIcon scale={hatScale} />
       </View>
-
-      {/* Wordmark — tucked up under hat */}
       <Text
         style={[
           styles.wordmark,
           {
             fontSize,
-            fontFamily: fontsLoaded ? 'DancingScript_400Regular' : undefined,
+            fontFamily: fontsLoaded ? 'DancingScript_700Bold' : undefined,
             fontStyle: fontsLoaded ? 'normal' : 'italic',
-            marginTop: Math.round(-(5 * hatScale)),
+            marginTop: Math.round(-(6 * hatScale)),
             paddingLeft: size === 'lg' ? Spacing.xs : 0,
           },
         ]}
@@ -100,8 +94,8 @@ const styles = StyleSheet.create({
   hatRow: { flexDirection: 'row', alignItems: 'flex-end' },
   wordmark: {
     color: WORDMARK_CREAM,
-    letterSpacing: 0.5,
-    fontWeight: '400',
+    letterSpacing: 1,
+    fontWeight: '700',
   },
 });
 

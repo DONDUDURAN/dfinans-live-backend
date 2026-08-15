@@ -42,8 +42,7 @@ export const HomeScreen: React.FC = () => {
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <LinearGradient colors={['#050D08', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <BrandMark size="md" />
-        <Text style={styles.greeting}>{fullName.split(' ')[0] || 'stil sahibi'}</Text>
-        <Text style={styles.headline}>Bugün sanal ikizin{'\n'}ne giyiyor?</Text>
+        {fullName ? <Text style={styles.greeting}>{fullName.split(' ')[0]}</Text> : null}
       </LinearGradient>
 
       <View style={styles.statsRow}>
@@ -145,13 +144,6 @@ const styles = StyleSheet.create({
     color: Colors.goldLight,
     fontWeight: '500',
     letterSpacing: 0.5,
-  },
-  headline: {
-    fontSize: Typography['2xl'],
-    fontWeight: '700',
-    color: Colors.textPrimary,
-    lineHeight: 38,
-    letterSpacing: -0.5,
   },
   statsRow: {
     flexDirection: 'row',
