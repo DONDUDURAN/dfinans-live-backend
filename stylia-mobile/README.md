@@ -1,68 +1,51 @@
 # STYLIA — AI-Powered Wardrobe & Styling App
 
-A luxury mobile app prototype built with **React Native Expo** that transforms your wardrobe into a smart styling assistant.
-
-## ✦ Features
-
-### 👗 Wardrobe Management
-- Add clothing items with photos (camera or gallery)
-- Categorize by type, color, season, and occasion
-- Grid and list view with live search and filtering
-- Track how often each item is worn
-- Mark favorites
-
-### 🎨 Outfit Builder
-- Visual drag-and-drop style outfit assembly
-- Category-slot system (Tops, Bottoms, Shoes, etc.)
-- Save custom outfits with names
-- Preview your outfit on a canvas
-
-### ✨ AI Style Assistant
-- AI-powered outfit suggestions based on your wardrobe
-- Filter by occasion and mood
-- Confidence scores and personalized reasons
-- Style tips and fashion guidance
-
-### 📊 Profile & Insights
-- Wardrobe statistics (items, outfits, total wears)
-- Most-worn item tracking
-- Cost-per-wear calculation
-- Category breakdown visualization
-- Style persona
+> **Prototype handoff package** · React Native Expo · Dark luxury UI · AI styling features  
+> Branch: `donduduran-stylia-mobile-app` · PR: #150
 
 ---
 
-## 🚀 Quick Start
-
-### Prerequisites
-- Node.js 18+
-- Expo CLI: `npm install -g expo-cli`
-- Expo Go app on iOS/Android (for testing)
-
-### Installation
+## ⚡ Run in 60 Seconds
 
 ```bash
+# Prerequisites: Node 18+, Expo Go on your phone
+
 cd stylia-mobile
 npm install
+npm start        # Metro starts with --clear + LAN mode → scan QR with Expo Go
 ```
 
-### Run
+> Phone and Mac must be on the **same Wi-Fi**.  
+> `http://localhost:8081` will NOT open on a phone — use the QR code.  
+> If QR doesn't connect: `npm run start:tunnel`
 
-```bash
-# Start Expo dev server
-npm start
+---
 
-# Run on iOS simulator
-npm run ios
+## 📱 Screens
 
-# Run on Android emulator
-npm run android
+| Screen | What it does |
+|--------|-------------|
+| **Home** | Daily AI outfit pick, recent outfits carousel, wardrobe stats, quick actions |
+| **Wardrobe** | Full closet — grid/list toggle, live search, 7-category filter, favorites |
+| **Outfit Builder** | Slot-based canvas (Tops / Bottoms / Shoes / etc.), save outfits by name |
+| **AI Style** | Suggestions filtered by occasion & mood, confidence scores, style tips |
+| **Add Item** | 4-step guided flow: photo → name/category → color/season → occasions |
+| **Profile** | Most-worn item, cost-per-wear, category bar chart, settings |
 
-# Run in browser (web)
-npm run web
-```
+---
 
-Scan the QR code with **Expo Go** on your device for instant live preview.
+## 🏗 Tech Stack
+
+| Layer | Choice |
+|-------|--------|
+| Framework | React Native + Expo ~51 |
+| Navigation | React Navigation (bottom tabs + stack) |
+| State | Zustand |
+| UI | Custom design system — `#0D0D0D` bg, `#C9A84C` gold accent |
+| Icons | `@expo/vector-icons` (Ionicons) |
+| Gradients | `expo-linear-gradient` |
+| Camera/Gallery | `expo-image-picker` |
+| OTA updates | `expo-updates` |
 
 ---
 
@@ -70,92 +53,90 @@ Scan the QR code with **Expo Go** on your device for instant live preview.
 
 ```
 stylia-mobile/
-├── App.tsx                  # Entry point
-├── app.json                 # Expo configuration
-├── src/
-│   ├── navigation/
-│   │   └── AppNavigator.tsx # Bottom tabs + stack nav
-│   ├── screens/
-│   │   ├── HomeScreen.tsx       # Dashboard & daily AI pick
-│   │   ├── WardrobeScreen.tsx   # Full wardrobe grid/list
-│   │   ├── OutfitBuilderScreen.tsx  # Interactive outfit builder
-│   │   ├── AIStyleScreen.tsx    # AI suggestions & mood filter
-│   │   ├── AddItemScreen.tsx    # 4-step item onboarding
-│   │   └── ProfileScreen.tsx   # Stats, insights & settings
-│   ├── components/
-│   │   ├── ClothingCard.tsx
-│   │   ├── OutfitCard.tsx
-│   │   ├── StyleSuggestionCard.tsx
-│   │   └── CategoryFilter.tsx
-│   ├── store/
-│   │   ├── wardrobeStore.ts     # Zustand wardrobe state
-│   │   └── styleStore.ts        # AI style + outfit builder state
-│   ├── data/
-│   │   └── mockData.ts          # Seed clothing & outfit data
-│   ├── types/
-│   │   └── index.ts             # TypeScript types
-│   └── theme/
-│       └── index.ts             # Colors, Typography, Spacing
+├── App.tsx                        # Entry point
+├── app.json                       # Expo + EAS config
+├── eas.json                       # Build profiles (development/adhoc/preview/production)
+├── eas-build-pre-install.sh       # EAS pre-install hook (Node check, SDK licenses)
+├── DISTRIBUTION.md                # Full build & distribution guide
+├── .github/workflows/
+│   └── eas-build.yml              # CI: lint → EAS build → OTA update
+└── src/
+    ├── navigation/AppNavigator.tsx
+    ├── screens/          (HomeScreen, WardrobeScreen, OutfitBuilderScreen,
+    │                      AIStyleScreen, AddItemScreen, ProfileScreen)
+    ├── components/       (ClothingCard, OutfitCard, StyleSuggestionCard, CategoryFilter)
+    ├── store/            (wardrobeStore.ts, styleStore.ts — Zustand)
+    ├── data/mockData.ts  (12 clothing items, 4 outfits, 3 AI suggestions)
+    ├── types/index.ts
+    └── theme/index.ts    (Colors, Typography, Spacing, Radius, Shadow)
 ```
 
 ---
 
-## 🎨 Design System
+## 🚀 Distribution Decision Tree
 
-| Token | Value |
-|-------|-------|
-| Background | `#0D0D0D` — near black |
-| Surface | `#1A1A1A` |
-| Gold Accent | `#C9A84C` |
-| Text Primary | `#F5F5F0` |
-| Text Secondary | `#9E9E9E` |
+```
+Who needs to test?
+│
+├─ Just you (free, instant)
+│   └─ npm start  →  Expo Go on same Wi-Fi
+│
+├─ Small team / up to 100 devices  (iOS requires Apple Dev $99/yr)
+│   ├─ Android  →  npm run build:apk:android  →  sideload .apk
+│   └─ iOS      →  npm run build:adhoc:ios    →  install via Safari link
+│
+└─ Public / App Store
+    ├─ Android  →  npm run build:prod:android  →  npm run submit:android
+    └─ iOS      →  npm run build:prod:ios      →  npm run submit:ios
+```
 
-Typography uses system fonts with weights from 400–900.
+> See **DISTRIBUTION.md** for step-by-step instructions for every path.
+
+---
+
+## 🔑 Credentials Needed
+
+| Platform | What's needed | Where |
+|----------|--------------|-------|
+| Expo / EAS | Free account | expo.dev |
+| GitHub CI | `EXPO_TOKEN` secret | expo.dev → Account → Access Tokens |
+| iOS AdHoc/Store | Apple Developer ($99/yr) | developer.apple.com |
+| Android Store | Google Play ($25 one-time) | play.google.com/console |
+
+EAS manages signing keys and provisioning profiles automatically (`credentialsSource: auto`).
 
 ---
 
 ## 🔗 Backend Integration
 
-This prototype uses local mock data. To connect to the **dfinans-live-backend** (or a dedicated STYLIA backend):
+Prototype uses local mock data. To connect to **dfinans-live-backend**:
 
-1. Create a `.env` file:
-   ```
-   EXPO_PUBLIC_API_URL=https://your-backend.railway.app
-   ```
+```bash
+# stylia-mobile/.env
+EXPO_PUBLIC_API_URL=https://your-backend.railway.app
+```
 
-2. Replace mock data calls in `src/store/` with `fetch()` or `axios` requests.
+Replace calls in `src/store/wardrobeStore.ts` and `src/store/styleStore.ts`  
+with `fetch(process.env.EXPO_PUBLIC_API_URL + '/endpoint')`.
 
-3. Suggested endpoints:
-   - `GET /wardrobe/items` — fetch clothing items
-   - `POST /wardrobe/items` — add new item
-   - `GET /style/suggest` — AI outfit suggestions
-   - `POST /outfits` — save outfit
-
----
-
-## 📦 Key Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `expo` ~51 | React Native runtime |
-| `@react-navigation` | Tab + stack navigation |
-| `zustand` | Lightweight state management |
-| `expo-image-picker` | Camera & gallery access |
-| `expo-linear-gradient` | Gradient UI elements |
-| `@expo/vector-icons` | Ionicons icon set |
+Suggested endpoints:
+- `GET  /wardrobe/items` → clothing list
+- `POST /wardrobe/items` → add item
+- `GET  /style/suggest`  → AI suggestions
+- `POST /outfits`        → save outfit
 
 ---
 
-## 📸 Screens Overview
+## 🤖 CI/CD (GitHub Actions)
 
-| Screen | Description |
-|--------|-------------|
-| **Home** | Today's AI pick, recent outfits, quick stats |
-| **Wardrobe** | Full closet with search, filter & grid/list view |
-| **Outfit Builder** | Slot-based visual outfit assembly |
-| **AI Style** | Personalized suggestions by mood & occasion |
-| **Profile** | Wardrobe insights, stats & settings |
+| Trigger | Jobs |
+|---------|------|
+| Push to `main` (stylia-mobile/** changed) | lint → Android APK build → iOS AdHoc build* → OTA update |
+| Pull Request | TypeScript lint only |
+| Manual (`workflow_dispatch`) | Choose platform + profile |
+
+\* iOS AdHoc job is skipped if `APPLE_ID` secret is not set.
 
 ---
 
-Built with ❤️ by STYLIA
+Built with ❤️ for STYLIA
