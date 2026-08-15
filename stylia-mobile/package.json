@@ -4,8 +4,8 @@
   "main": "App.tsx",
   "scripts": {
     "start": "expo start",
-    "start:lan": "npx expo start --lan",
-    "start:tunnel": "npx expo start --tunnel",
+    "start:lan": "npx expo start --clear --lan",
+    "start:tunnel": "npx expo start --clear --tunnel",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",

@@ -5,14 +5,28 @@
 ```bash
 cd stylia-mobile
 npm install
-npx expo start        # LAN mode — phone and computer must be on same Wi-Fi
+npx expo start --clear --lan   # clears Metro cache + uses LAN IP
 ```
 Scan the QR code with **Expo Go** (iOS App Store / Google Play).
 
-> **Tip:** If your phone can't reach the LAN IP, add `--tunnel` (requires `@expo/ngrok`):
-> ```bash
-> npx expo start --tunnel
-> ```
+> **Phone and Mac must be on the same Wi-Fi network.**
+> `http://localhost:8081` will NOT work on a phone — that's normal.
+
+### Troubleshooting: QR not working?
+
+| Problem | Fix |
+|---------|-----|
+| Phone can't reach Mac IP | Use `--tunnel` (see below) |
+| Stale Metro cache | Always use `--clear` |
+| Wrong Wi-Fi network | Confirm both devices show same network |
+| Expo Go version mismatch | Update Expo Go from App Store / Play Store |
+| Mac firewall blocking | System Settings → Firewall → Allow Node |
+
+**Tunnel mode** (works on any network, including corporate/mobile hotspot):
+```bash
+npx expo start --clear --tunnel
+# first run: npx install -g @expo/ngrok
+```
 
 ---
 
