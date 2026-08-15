@@ -11,10 +11,10 @@ export const Colors = {
   textSecondary: '#8A8A99',
   textMuted: '#48485A',
 
-  // ── Accent — forest green: matches hat mark, premium and distinctive ──────
-  gold: '#2C7A51',
-  goldLight: '#4DAF7C',
-  goldDark: '#1A5538',
+  // ── Accent — vivid emerald: matches hat mark, premium and distinctive ────
+  gold: '#0F9B5E',
+  goldLight: '#2DC97E',
+  goldDark: '#0A6A3F',
 
   // ── Status ────────────────────────────────────────────────────────────────
   success: '#4CAF7D',
@@ -94,7 +94,7 @@ export const Shadow = {
     elevation: 12,
   },
   gold: {
-    shadowColor: '#2C7A51',
+    shadowColor: '#0F9B5E',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.28,
     shadowRadius: 14,

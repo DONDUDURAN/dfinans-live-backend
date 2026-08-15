@@ -12,7 +12,12 @@ interface BodyMeasurements {
 }
 
 interface UserState {
-  registered: boolean;
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  hasAccount: boolean;       // account ever created on this device
+  isAuthenticated: boolean;  // currently logged in
+  password: string;          // local mock credential
+
+  // ── Profile ───────────────────────────────────────────────────────────────
   fullName: string;
   email: string;
   selectedPlan: MembershipPlanId;
@@ -22,7 +27,9 @@ interface UserState {
   videoNoteUri?: string;
   measurements: BodyMeasurements;
 
-  register: (payload: { fullName: string; email: string; plan: MembershipPlanId }) => void;
+  // ── Actions ───────────────────────────────────────────────────────────────
+  register: (payload: { fullName: string; email: string; password: string; plan: MembershipPlanId }) => void;
+  login: (payload: { email: string; password: string }) => { ok: boolean; error?: string };
   switchPlan: (plan: MembershipPlanId) => void;
   setMeasurements: (measurements: BodyMeasurements) => void;
   setVideoNoteUri: (uri?: string) => void;
@@ -43,8 +50,10 @@ const addDaysIso = (days: number) => {
 
 export const useUserStore = create<UserState>()(
   persist(
-    (set) => ({
-      registered: false,
+    (set, get) => ({
+      hasAccount: false,
+      isAuthenticated: false,
+      password: '',
       fullName: '',
       email: '',
       selectedPlan: 'yillik' as MembershipPlanId,
@@ -54,9 +63,11 @@ export const useUserStore = create<UserState>()(
       videoNoteUri: undefined,
       measurements: { ...EMPTY_MEASUREMENTS },
 
-      register: ({ fullName, email, plan }) =>
+      register: ({ fullName, email, password, plan }) =>
         set({
-          registered: true,
+          hasAccount: true,
+          isAuthenticated: true,
+          password,
           fullName,
           email,
           selectedPlan: plan,
@@ -64,30 +75,35 @@ export const useUserStore = create<UserState>()(
           trialEndsAt: addDaysIso(7),
         }),
 
+      login: ({ email, password }) => {
+        const state = get();
+        if (!state.hasAccount) {
+          return { ok: false, error: 'Hesap bulunamadı.' };
+        }
+        if (email.trim().toLowerCase() !== state.email.toLowerCase()) {
+          return { ok: false, error: 'E-posta adresi eşleşmiyor.' };
+        }
+        if (password !== state.password) {
+          return { ok: false, error: 'Şifre hatalı.' };
+        }
+        set({ isAuthenticated: true });
+        return { ok: true };
+      },
+
       switchPlan: (plan) => set({ selectedPlan: plan }),
       setMeasurements: (measurements) => set({ measurements }),
       setVideoNoteUri: (uri) => set({ videoNoteUri: uri }),
       setProductLink: (link) => set({ productLink: link.trim() }),
 
-      logout: () =>
-        set({
-          registered: false,
-          fullName: '',
-          email: '',
-          selectedPlan: 'yillik',
-          trialStartedAt: undefined,
-          trialEndsAt: undefined,
-          productLink: '',
-          videoNoteUri: undefined,
-          measurements: { ...EMPTY_MEASUREMENTS },
-        }),
+      logout: () => set({ isAuthenticated: false }),
     }),
     {
       name: 'stylia-user-store',
       storage: createJSONStorage(() => AsyncStorage),
-      // Only persist data fields — not actions
       partialize: (state) => ({
-        registered: state.registered,
+        hasAccount: state.hasAccount,
+        isAuthenticated: state.isAuthenticated,
+        password: state.password,
         fullName: state.fullName,
         email: state.email,
         selectedPlan: state.selectedPlan,

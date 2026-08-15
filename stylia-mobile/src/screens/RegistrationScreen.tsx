@@ -48,7 +48,7 @@ export const RegistrationScreen: React.FC = () => {
       Alert.alert('Eksik bilgi', 'Lütfen ad-soyad ve geçerli e-posta girin.');
       return;
     }
-    register({ fullName: fullName.trim(), email: email.trim(), plan: selectedPlan });
+    register({ fullName: fullName.trim(), email: email.trim(), password: '', plan: selectedPlan });
   };
 
   return (

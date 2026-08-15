@@ -10,7 +10,7 @@ import { OutfitBuilderScreen } from '../screens/OutfitBuilderScreen';
 import { AIStyleScreen } from '../screens/AIStyleScreen';
 import { ProfileScreen } from '../screens/ProfileScreen';
 import { AddItemScreen } from '../screens/AddItemScreen';
-import { RegistrationScreen } from '../screens/RegistrationScreen';
+import { AuthScreen } from '../screens/AuthScreen';
 import { ItemDetailScreen } from '../screens/ItemDetailScreen';
 
 import { Colors, Radius } from '../theme';
@@ -71,7 +71,7 @@ function MainTabs() {
 }
 
 export function AppNavigator() {
-  const registered = useUserStore((s) => s.registered);
+  const isAuthenticated = useUserStore((s) => s.isAuthenticated);
 
   return (
     <Stack.Navigator
@@ -80,8 +80,8 @@ export function AppNavigator() {
         cardStyle: { backgroundColor: Colors.background },
       }}
     >
-      {!registered ? (
-        <Stack.Screen name="Registration" component={RegistrationScreen} />
+      {!isAuthenticated ? (
+        <Stack.Screen name="Auth" component={AuthScreen} />
       ) : (
         <>
           <Stack.Screen name="MainTabs" component={MainTabs} />

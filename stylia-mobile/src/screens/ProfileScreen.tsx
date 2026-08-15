@@ -165,13 +165,13 @@ export const ProfileScreen: React.FC = () => {
       <TouchableOpacity
         style={styles.resetBtn}
         onPress={() =>
-          Alert.alert('Hesabı Sıfırla', 'Tüm veriler silinir ve kayıt ekranına dönülür.', [
+          Alert.alert('Çıkış Yap', 'Oturumunuz kapatılacak.', [
             { text: 'Vazgeç', style: 'cancel' },
-            { text: 'Sıfırla', style: 'destructive', onPress: logout },
+            { text: 'Çıkış Yap', style: 'destructive', onPress: logout },
           ])
         }
       >
-        <Text style={styles.resetText}>Hesabı sıfırla</Text>
+        <Text style={styles.resetText}>Çıkış yap</Text>
       </TouchableOpacity>
     </ScrollView>
   );
