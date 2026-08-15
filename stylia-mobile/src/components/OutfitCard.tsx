@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Outfit } from '../types';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
+import { trOccasion } from '../utils/translations';
 
 interface Props {
   outfit: Outfit;
@@ -90,7 +91,7 @@ export const OutfitCard: React.FC<Props> = ({
 
         <View style={styles.tags}>
           <View style={styles.tag}>
-            <Text style={styles.tagText}>{outfit.occasion}</Text>
+            <Text style={styles.tagText}>{trOccasion(outfit.occasion)}</Text>
           </View>
           {outfit.tags.slice(0, 2).map((t) => (
             <View key={t} style={[styles.tag, styles.tagSecondary]}>

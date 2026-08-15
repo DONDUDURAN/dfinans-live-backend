@@ -1,166 +1,166 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
+  Alert,
+  Linking,
   ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
   TouchableOpacity,
-  Dimensions,
+  View,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useWardrobeStore } from '../store/wardrobeStore';
+import { useUserStore } from '../store/userStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
+import { MEMBERSHIP_PLANS, MembershipPlanId, STRIPE_PAYMENT_LINKS } from '../config/paymentLinks';
 
-const { width } = Dimensions.get('window');
-
-const STYLE_PERSONAS = [
-  { label: 'Minimalist', emoji: '◻', active: true },
-  { label: 'Classic', emoji: '🎩', active: false },
-  { label: 'Bohemian', emoji: '🌿', active: false },
-  { label: 'Streetwear', emoji: '🏙', active: false },
-];
+const PLAN_ORDER: MembershipPlanId[] = ['aylik', 'yillik'];
 
 export const ProfileScreen: React.FC = () => {
   const items = useWardrobeStore((s) => s.items);
   const outfits = useWardrobeStore((s) => s.outfits);
 
-  const totalWorn = items.reduce((acc, i) => acc + i.timesWorn, 0);
-  const topItem = [...items].sort((a, b) => b.timesWorn - a.timesWorn)[0];
-  const categories = [...new Set(items.map((i) => i.category))];
+  const fullName = useUserStore((s) => s.fullName);
+  const email = useUserStore((s) => s.email);
+  const selectedPlan = useUserStore((s) => s.selectedPlan);
+  const switchPlan = useUserStore((s) => s.switchPlan);
+  const trialEndsAt = useUserStore((s) => s.trialEndsAt);
+  const measurements = useUserStore((s) => s.measurements);
+  const setMeasurements = useUserStore((s) => s.setMeasurements);
+  const videoNoteUri = useUserStore((s) => s.videoNoteUri);
+  const setVideoNoteUri = useUserStore((s) => s.setVideoNoteUri);
 
-  const costPerWear = (items.length * 85) / Math.max(totalWorn, 1);
+  const [draft, setDraft] = useState(measurements);
+
+  const totalWorn = items.reduce((acc, i) => acc + i.timesWorn, 0);
+  const trialDaysLeft = useMemo(() => {
+    if (!trialEndsAt) return 0;
+    const diff = new Date(trialEndsAt).getTime() - Date.now();
+    return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+  }, [trialEndsAt]);
+
+  const openPlanPayment = async (planId: MembershipPlanId) => {
+    const url = STRIPE_PAYMENT_LINKS[planId];
+    if (!(await Linking.canOpenURL(url))) {
+      Alert.alert('Bağlantı açılamadı', 'Stripe ödeme bağlantısı şu an açılamıyor.');
+      return;
+    }
+    switchPlan(planId);
+    await Linking.openURL(url);
+  };
+
+  const saveMeasurements = () => {
+    setMeasurements(draft);
+    Alert.alert('Kaydedildi', 'Vücut ölçülerin güncellendi.');
+  };
+
+  const recordVideoNote = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('İzin gerekli', 'Video notu için kamera izni gereklidir.');
+      return;
+    }
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+      quality: 0.6,
+      videoMaxDuration: 45,
+    });
+    if (!result.canceled) {
+      setVideoNoteUri(result.assets[0].uri);
+      Alert.alert('Video notu eklendi', 'Stil danışmanı bu videoyu referans alacak.');
+    }
+  };
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      showsVerticalScrollIndicator={false}
-    >
-      {/* Profile Header */}
-      <LinearGradient colors={['#1A1200', '#0D0D0D']} style={styles.profileHeader}>
-        <View style={styles.avatarContainer}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>S</Text>
-          </View>
-          <View style={styles.avatarBadge}>
-            <Ionicons name="sparkles" size={10} color={Colors.background} />
-          </View>
-        </View>
-        <Text style={styles.profileName}>Style Maven</Text>
-        <Text style={styles.profileHandle}>@stylemaven</Text>
-        <View style={styles.personaRow}>
-          {STYLE_PERSONAS.filter((p) => p.active).map((p) => (
-            <View key={p.label} style={styles.personaBadge}>
-              <Text style={styles.personaEmoji}>{p.emoji}</Text>
-              <Text style={styles.personaLabel}>{p.label}</Text>
-            </View>
-          ))}
+    <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <LinearGradient colors={['#171103', Colors.background]} style={styles.profileHeader}>
+        <Text style={styles.wordmark}>STYLIA</Text>
+        <Text style={styles.profileName}>{fullName || 'Üye Profil'}</Text>
+        <Text style={styles.profileHandle}>{email || 'premium@stylia.app'}</Text>
+        <View style={styles.planBadge}>
+          <Ionicons name="diamond-outline" size={14} color={Colors.goldLight} />
+          <Text style={styles.planBadgeText}>
+            {MEMBERSHIP_PLANS[selectedPlan].title} • {trialDaysLeft} gün deneme
+          </Text>
         </View>
       </LinearGradient>
 
-      {/* Stats */}
       <View style={styles.statsGrid}>
         {[
-          { icon: 'shirt-outline', label: 'Items', value: items.length, color: Colors.tops },
-          { icon: 'layers-outline', label: 'Outfits', value: outfits.length, color: Colors.dresses },
-          { icon: 'repeat-outline', label: 'Total Wears', value: totalWorn, color: Colors.gold },
-          { icon: 'star-outline', label: 'Favorites', value: items.filter((i) => i.isFavorite).length, color: Colors.accessories },
+          { icon: 'shirt-outline', label: 'Parça', value: items.length },
+          { icon: 'layers-outline', label: 'Kombin', value: outfits.length },
+          { icon: 'repeat-outline', label: 'Kullanım', value: totalWorn },
+          { icon: 'heart-outline', label: 'Favori', value: items.filter((i) => i.isFavorite).length },
         ].map((stat) => (
           <View key={stat.label} style={[styles.statCard, Shadow.sm]}>
-            <View style={[styles.statIcon, { backgroundColor: stat.color + '22' }]}>
-              <Ionicons name={stat.icon as any} size={18} color={stat.color} />
-            </View>
+            <Ionicons name={stat.icon as any} size={18} color={Colors.gold} />
             <Text style={styles.statValue}>{stat.value}</Text>
             <Text style={styles.statLabel}>{stat.label}</Text>
           </View>
         ))}
       </View>
 
-      {/* Wardrobe Insights */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Wardrobe Insights</Text>
-        <View style={styles.insightsList}>
-          {topItem && (
-            <View style={[styles.insightCard, Shadow.sm]}>
-              <View style={[styles.insightIcon, { backgroundColor: Colors.gold + '22' }]}>
-                <Ionicons name="trophy" size={20} color={Colors.gold} />
-              </View>
-              <View style={styles.insightInfo}>
-                <Text style={styles.insightTitle}>Most Worn</Text>
-                <Text style={styles.insightValue}>{topItem.name}</Text>
-                <Text style={styles.insightSub}>Worn {topItem.timesWorn} times</Text>
-              </View>
-            </View>
-          )}
-
-          <View style={[styles.insightCard, Shadow.sm]}>
-            <View style={[styles.insightIcon, { backgroundColor: Colors.success + '22' }]}>
-              <Ionicons name="calculator-outline" size={20} color={Colors.success} />
-            </View>
-            <View style={styles.insightInfo}>
-              <Text style={styles.insightTitle}>Avg. Cost Per Wear</Text>
-              <Text style={styles.insightValue}>${costPerWear.toFixed(2)}</Text>
-              <Text style={styles.insightSub}>Based on average item price</Text>
-            </View>
-          </View>
-
-          <View style={[styles.insightCard, Shadow.sm]}>
-            <View style={[styles.insightIcon, { backgroundColor: Colors.info + '22' }]}>
-              <Ionicons name="leaf-outline" size={20} color={Colors.info} />
-            </View>
-            <View style={styles.insightInfo}>
-              <Text style={styles.insightTitle}>Style Diversity</Text>
-              <Text style={styles.insightValue}>{categories.length} Categories</Text>
-              <Text style={styles.insightSub}>{categories.join(', ')}</Text>
-            </View>
-          </View>
-        </View>
-      </View>
-
-      {/* Category Breakdown */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Category Breakdown</Text>
-        <View style={styles.breakdownList}>
-          {categories.map((cat) => {
-            const count = items.filter((i) => i.category === cat).length;
-            const pct = Math.round((count / items.length) * 100);
+        <Text style={styles.sectionTitle}>Üyelik planı</Text>
+        <View style={styles.stack}>
+          {PLAN_ORDER.map((planId) => {
+            const plan = MEMBERSHIP_PLANS[planId];
+            const active = selectedPlan === planId;
             return (
-              <View key={cat} style={styles.breakdownRow}>
-                <Text style={styles.breakdownLabel}>{cat}</Text>
-                <View style={styles.breakdownBar}>
-                  <View style={[styles.breakdownFill, { width: `${pct}%` }]} />
+              <View key={planId} style={[styles.planCard, active && styles.planCardActive]}>
+                <View style={styles.planRow}>
+                  <View>
+                    <Text style={styles.planTitle}>{plan.title}</Text>
+                    <Text style={styles.planSubtitle}>{plan.subtitle}</Text>
+                  </View>
+                  {active ? <Text style={styles.currentPlanTag}>Aktif Plan</Text> : null}
                 </View>
-                <Text style={styles.breakdownCount}>{count}</Text>
+                <Text style={styles.planPrice}>{plan.price}</Text>
+                <Text style={styles.planHint}>{plan.trial}</Text>
+                <TouchableOpacity style={styles.paymentButton} onPress={() => openPlanPayment(planId)}>
+                  <Ionicons name="card-outline" size={16} color={Colors.background} />
+                  <Text style={styles.paymentButtonText}>Stripe Payment Link ile öde</Text>
+                </TouchableOpacity>
               </View>
             );
           })}
         </View>
       </View>
 
-      {/* Settings */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Settings</Text>
-        <View style={styles.settingsList}>
-          {[
-            { icon: 'person-outline', label: 'Edit Profile', color: Colors.textSecondary },
-            { icon: 'color-palette-outline', label: 'Style Preferences', color: Colors.textSecondary },
-            { icon: 'notifications-outline', label: 'Notifications', color: Colors.textSecondary },
-            { icon: 'cloud-upload-outline', label: 'Sync & Backup', color: Colors.textSecondary },
-            { icon: 'share-social-outline', label: 'Share Wardrobe', color: Colors.gold },
-          ].map((item) => (
-            <TouchableOpacity key={item.label} style={[styles.settingRow, Shadow.sm]} activeOpacity={0.8}>
-              <View style={[styles.settingIcon, { backgroundColor: item.color + '22' }]}>
-                <Ionicons name={item.icon as any} size={18} color={item.color} />
-              </View>
-              <Text style={styles.settingLabel}>{item.label}</Text>
-              <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
-            </TouchableOpacity>
-          ))}
+        <Text style={styles.sectionTitle}>Vücut ölçüleri</Text>
+        <View style={styles.measurementsCard}>
+          <View style={styles.measureGrid}>
+            <TextInput style={styles.measureInput} placeholder="Boy (cm)" placeholderTextColor={Colors.textMuted} value={draft.boyCm} onChangeText={(v) => setDraft((p) => ({ ...p, boyCm: v }))} keyboardType="numeric" />
+            <TextInput style={styles.measureInput} placeholder="Kilo (kg)" placeholderTextColor={Colors.textMuted} value={draft.kiloKg} onChangeText={(v) => setDraft((p) => ({ ...p, kiloKg: v }))} keyboardType="numeric" />
+            <TextInput style={styles.measureInput} placeholder="Göğüs (cm)" placeholderTextColor={Colors.textMuted} value={draft.gogusCm} onChangeText={(v) => setDraft((p) => ({ ...p, gogusCm: v }))} keyboardType="numeric" />
+            <TextInput style={styles.measureInput} placeholder="Bel (cm)" placeholderTextColor={Colors.textMuted} value={draft.belCm} onChangeText={(v) => setDraft((p) => ({ ...p, belCm: v }))} keyboardType="numeric" />
+            <TextInput style={styles.measureInput} placeholder="Kalça (cm)" placeholderTextColor={Colors.textMuted} value={draft.kalcaCm} onChangeText={(v) => setDraft((p) => ({ ...p, kalcaCm: v }))} keyboardType="numeric" />
+          </View>
+          <TouchableOpacity style={styles.secondaryButton} onPress={saveMeasurements}>
+            <Text style={styles.secondaryButtonText}>Ölçüleri kaydet</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
-      <View style={{ height: Spacing['3xl'] }} />
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Video notu akışı</Text>
+        <View style={styles.videoCard}>
+          <Text style={styles.videoText}>
+            Stil danışmanı için 20-45 saniyelik kısa bir ayna videosu kaydet.
+          </Text>
+          <Text style={styles.videoStatus}>
+            {videoNoteUri ? 'Video notu mevcut' : 'Henüz video notu yok'}
+          </Text>
+          <TouchableOpacity style={styles.secondaryButton} onPress={recordVideoNote}>
+            <Ionicons name="videocam-outline" size={16} color={Colors.gold} />
+            <Text style={styles.secondaryButtonText}>Video notu çek</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
     </ScrollView>
   );
 };
@@ -169,72 +169,131 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   content: { paddingBottom: Spacing['4xl'] },
   profileHeader: {
-    alignItems: 'center',
-    paddingTop: Spacing.xl,
-    paddingBottom: Spacing['2xl'],
+    paddingTop: Spacing['2xl'],
+    paddingBottom: Spacing.xl,
+    paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
   },
-  avatarContainer: { position: 'relative' },
-  avatar: {
-    width: 80, height: 80, borderRadius: 40,
-    backgroundColor: Colors.gold, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 3, borderColor: Colors.goldDark,
+  wordmark: {
+    color: Colors.goldLight,
+    letterSpacing: 4,
+    fontWeight: '300',
+    fontSize: 32,
   },
-  avatarText: { fontSize: Typography['3xl'], fontWeight: '900', color: Colors.background },
-  avatarBadge: {
-    position: 'absolute', bottom: 0, right: 0,
-    width: 22, height: 22, borderRadius: 11, backgroundColor: Colors.gold,
-    alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: Colors.background,
+  profileName: { color: Colors.textPrimary, fontSize: Typography.xl, fontWeight: '800' },
+  profileHandle: { color: Colors.textSecondary, fontSize: Typography.sm },
+  planBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: Colors.gold + '66',
+    backgroundColor: Colors.gold + '1F',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 6,
   },
-  profileName: { fontSize: Typography.xl, fontWeight: '800', color: Colors.textPrimary },
-  profileHandle: { fontSize: Typography.sm, color: Colors.textSecondary },
-  personaRow: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.xs },
-  personaBadge: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    backgroundColor: Colors.gold + '22', borderRadius: Radius.full,
-    paddingHorizontal: 12, paddingVertical: 5, borderWidth: 1, borderColor: Colors.gold + '44',
-  },
-  personaEmoji: { fontSize: 12 },
-  personaLabel: { fontSize: Typography.xs, color: Colors.gold, fontWeight: '700' },
+  planBadgeText: { color: Colors.goldLight, fontSize: Typography.xs, fontWeight: '700' },
   statsGrid: {
-    flexDirection: 'row', flexWrap: 'wrap',
-    paddingHorizontal: Spacing.base, gap: Spacing.md,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: Spacing.base,
+    gap: Spacing.md,
     marginTop: Spacing.base,
   },
   statCard: {
-    width: (width - Spacing.base * 2 - Spacing.md) / 2 - Spacing.sm,
-    backgroundColor: Colors.surface, borderRadius: Radius.lg,
-    padding: Spacing.base, alignItems: 'center', gap: Spacing.sm,
-    borderWidth: 1, borderColor: Colors.border,
+    width: '47%',
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    padding: Spacing.base,
+    alignItems: 'center',
+    gap: Spacing.xs,
+    borderWidth: 1,
+    borderColor: Colors.border,
   },
-  statIcon: { width: 40, height: 40, borderRadius: Radius.md, alignItems: 'center', justifyContent: 'center' },
-  statValue: { fontSize: Typography['2xl'], fontWeight: '800', color: Colors.textPrimary },
-  statLabel: { fontSize: Typography.xs, color: Colors.textSecondary },
+  statValue: { color: Colors.textPrimary, fontSize: Typography['2xl'], fontWeight: '800' },
+  statLabel: { color: Colors.textSecondary, fontSize: Typography.xs },
   section: { paddingHorizontal: Spacing.base, marginTop: Spacing.xl, gap: Spacing.md },
-  sectionTitle: { fontSize: Typography.md, fontWeight: '700', color: Colors.textPrimary },
-  insightsList: { gap: Spacing.md },
-  insightCard: {
-    flexDirection: 'row', alignItems: 'center', gap: Spacing.md,
-    backgroundColor: Colors.surface, borderRadius: Radius.lg,
-    padding: Spacing.base, borderWidth: 1, borderColor: Colors.border,
+  sectionTitle: { color: Colors.textPrimary, fontSize: Typography.md, fontWeight: '700' },
+  stack: { gap: Spacing.md },
+  planCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.base,
+    gap: Spacing.xs,
   },
-  insightIcon: { width: 44, height: 44, borderRadius: Radius.md, alignItems: 'center', justifyContent: 'center' },
-  insightInfo: { flex: 1, gap: 2 },
-  insightTitle: { fontSize: Typography.xs, color: Colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
-  insightValue: { fontSize: Typography.base, fontWeight: '700', color: Colors.textPrimary },
-  insightSub: { fontSize: Typography.xs, color: Colors.textSecondary },
-  breakdownList: { gap: Spacing.md },
-  breakdownRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
-  breakdownLabel: { width: 90, fontSize: Typography.sm, color: Colors.textSecondary, fontWeight: '600' },
-  breakdownBar: { flex: 1, height: 6, backgroundColor: Colors.border, borderRadius: 3, overflow: 'hidden' },
-  breakdownFill: { height: '100%', backgroundColor: Colors.gold, borderRadius: 3 },
-  breakdownCount: { width: 24, fontSize: Typography.sm, color: Colors.textMuted, textAlign: 'right' },
-  settingsList: { gap: Spacing.sm },
-  settingRow: {
-    flexDirection: 'row', alignItems: 'center', gap: Spacing.md,
-    backgroundColor: Colors.surface, borderRadius: Radius.lg,
-    padding: Spacing.base, borderWidth: 1, borderColor: Colors.border,
+  planCardActive: { borderColor: Colors.gold, ...Shadow.gold },
+  planRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  planTitle: { color: Colors.textPrimary, fontWeight: '700', fontSize: Typography.base },
+  planSubtitle: { color: Colors.textSecondary, fontSize: Typography.xs },
+  currentPlanTag: {
+    color: Colors.goldLight,
+    borderWidth: 1,
+    borderColor: Colors.gold + '66',
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 3,
+    fontSize: 10,
+    fontWeight: '700',
   },
-  settingIcon: { width: 36, height: 36, borderRadius: Radius.sm, alignItems: 'center', justifyContent: 'center' },
-  settingLabel: { flex: 1, fontSize: Typography.base, color: Colors.textPrimary, fontWeight: '600' },
+  planPrice: { color: Colors.gold, fontWeight: '800', fontSize: Typography.lg },
+  planHint: { color: Colors.textSecondary, fontSize: Typography.xs },
+  paymentButton: {
+    marginTop: Spacing.xs,
+    backgroundColor: Colors.gold,
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  paymentButtonText: { color: Colors.background, fontWeight: '700', fontSize: Typography.xs },
+  measurementsCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.base,
+    gap: Spacing.md,
+  },
+  measureGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm },
+  measureInput: {
+    width: '47%',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.borderLight,
+    backgroundColor: Colors.surfaceElevated,
+    color: Colors.textPrimary,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.sm,
+    fontSize: Typography.sm,
+  },
+  secondaryButton: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: Colors.gold,
+    backgroundColor: Colors.gold + '1D',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  secondaryButtonText: { color: Colors.gold, fontWeight: '700', fontSize: Typography.xs },
+  videoCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    padding: Spacing.base,
+    gap: Spacing.sm,
+  },
+  videoText: { color: Colors.textSecondary, fontSize: Typography.sm, lineHeight: 20 },
+  videoStatus: { color: Colors.textPrimary, fontSize: Typography.xs, fontWeight: '700' },
 });

@@ -2,7 +2,7 @@ import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createStackNavigator } from '@react-navigation/stack';
 import { Ionicons } from '@expo/vector-icons';
-import { View, Text, StyleSheet } from 'react-native';
+import { Text, View, StyleSheet } from 'react-native';
 
 import { HomeScreen } from '../screens/HomeScreen';
 import { WardrobeScreen } from '../screens/WardrobeScreen';
@@ -10,14 +10,17 @@ import { OutfitBuilderScreen } from '../screens/OutfitBuilderScreen';
 import { AIStyleScreen } from '../screens/AIStyleScreen';
 import { ProfileScreen } from '../screens/ProfileScreen';
 import { AddItemScreen } from '../screens/AddItemScreen';
+import { RegistrationScreen } from '../screens/RegistrationScreen';
+import { ItemDetailScreen } from '../screens/ItemDetailScreen';
 
-import { Colors, Radius, Typography } from '../theme';
+import { Colors, Radius } from '../theme';
 import { RootStackParamList, TabParamList } from '../types';
+import { useUserStore } from '../store/userStore';
 
 const Tab = createBottomTabNavigator<TabParamList>();
 const Stack = createStackNavigator<RootStackParamList>();
 
-const TAB_ICONS: Record<string, { active: string; inactive: string }> = {
+const TAB_ICONS: Record<string, { active: keyof typeof Ionicons.glyphMap; inactive: keyof typeof Ionicons.glyphMap }> = {
   Home: { active: 'home', inactive: 'home-outline' },
   Wardrobe: { active: 'shirt', inactive: 'shirt-outline' },
   OutfitBuilder: { active: 'layers', inactive: 'layers-outline' },
@@ -26,11 +29,11 @@ const TAB_ICONS: Record<string, { active: string; inactive: string }> = {
 };
 
 const TAB_LABELS: Record<string, string> = {
-  Home: 'Home',
-  Wardrobe: 'Wardrobe',
-  OutfitBuilder: 'Builder',
-  AIStyle: 'AI Style',
-  Profile: 'Profile',
+  Home: 'Ana Sayfa',
+  Wardrobe: 'Gardırop',
+  OutfitBuilder: 'Kombin',
+  AIStyle: 'Kabin',
+  Profile: 'Profil',
 };
 
 function MainTabs() {
@@ -40,29 +43,22 @@ function MainTabs() {
         headerShown: false,
         tabBarStyle: styles.tabBar,
         tabBarBackground: () => <View style={styles.tabBarBg} />,
-        tabBarShowLabel: true,
-        tabBarActiveTintColor: Colors.gold,
+        tabBarActiveTintColor: Colors.goldLight,
         tabBarInactiveTintColor: Colors.textMuted,
-        tabBarLabelStyle: styles.tabLabel,
-        tabBarIcon: ({ focused, color, size }) => {
+        tabBarIcon: ({ focused, color }) => {
           const icons = TAB_ICONS[route.name];
           const iconName = focused ? icons.active : icons.inactive;
-
           if (route.name === 'AIStyle') {
             return (
               <View style={[styles.aiTabIcon, focused && styles.aiTabIconActive]}>
-                <Ionicons name={iconName as any} size={20} color={focused ? Colors.background : Colors.textMuted} />
+                <Ionicons name={iconName} size={20} color={focused ? Colors.background : Colors.textMuted} />
               </View>
             );
           }
-
-          return <Ionicons name={iconName as any} size={22} color={color} />;
+          return <Ionicons name={iconName} size={21} color={color} />;
         },
-        tabBarLabel: ({ focused, color }) => {
-          const label = TAB_LABELS[route.name];
-          if (route.name === 'AIStyle') return null;
-          return <Text style={[styles.tabLabel, { color }]}>{label}</Text>;
-        },
+        tabBarLabel: ({ color }) =>
+          route.name === 'AIStyle' ? null : <Text style={[styles.tabLabel, { color }]}>{TAB_LABELS[route.name]}</Text>,
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
@@ -75,6 +71,8 @@ function MainTabs() {
 }
 
 export function AppNavigator() {
+  const registered = useUserStore((s) => s.registered);
+
   return (
     <Stack.Navigator
       screenOptions={{
@@ -82,12 +80,15 @@ export function AppNavigator() {
         cardStyle: { backgroundColor: Colors.background },
       }}
     >
-      <Stack.Screen name="MainTabs" component={MainTabs} />
-      <Stack.Screen
-        name="AddItem"
-        component={AddItemScreen}
-        options={{ presentation: 'modal' }}
-      />
+      {!registered ? (
+        <Stack.Screen name="Registration" component={RegistrationScreen} />
+      ) : (
+        <>
+          <Stack.Screen name="MainTabs" component={MainTabs} />
+          <Stack.Screen name="AddItem" component={AddItemScreen} options={{ presentation: 'modal' }} />
+          <Stack.Screen name="ItemDetail" component={ItemDetailScreen} options={{ presentation: 'card' }} />
+        </>
+      )}
     </Stack.Navigator>
   );
 }
@@ -107,7 +108,7 @@ const styles = StyleSheet.create({
   },
   tabLabel: {
     fontSize: 10,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   aiTabIcon: {
     width: 44,

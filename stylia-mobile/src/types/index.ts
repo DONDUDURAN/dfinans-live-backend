@@ -87,6 +87,7 @@ export interface UserProfile {
 }
 
 export type RootStackParamList = {
+  Registration: undefined;
   MainTabs: undefined;
   AddItem: { category?: ClothingCategory };
   ItemDetail: { itemId: string };

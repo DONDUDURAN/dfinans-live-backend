@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { StyleSuggestion } from '../types';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
+import { trOccasion } from '../utils/translations';
 
 interface Props {
   suggestion: StyleSuggestion;
@@ -43,7 +44,7 @@ export const StyleSuggestionCard: React.FC<Props> = ({
       {/* Confidence arc */}
       <View style={styles.confidenceBadge}>
         <Text style={styles.confidenceValue}>{suggestion.confidence}%</Text>
-        <Text style={styles.confidenceLabel}>Match</Text>
+        <Text style={styles.confidenceLabel}>Uyum</Text>
       </View>
 
       {/* Item thumbnails */}
@@ -88,10 +89,10 @@ export const StyleSuggestionCard: React.FC<Props> = ({
         <View style={styles.footer}>
           <View style={styles.outfitOccasion}>
             <Ionicons name="calendar-outline" size={12} color={Colors.textSecondary} />
-            <Text style={styles.outfitOccasionText}>{suggestion.outfit.occasion}</Text>
+            <Text style={styles.outfitOccasionText}>{trOccasion(suggestion.outfit.occasion)}</Text>
           </View>
           <TouchableOpacity style={styles.tryBtn} onPress={onPress}>
-            <Text style={styles.tryBtnText}>Try This</Text>
+            <Text style={styles.tryBtnText}>Deneyelim</Text>
             <Ionicons name="arrow-forward" size={12} color={Colors.background} />
           </TouchableOpacity>
         </View>

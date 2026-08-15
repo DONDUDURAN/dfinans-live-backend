@@ -16,6 +16,7 @@ import { ClothingCard } from '../components/ClothingCard';
 import { CategoryFilter } from '../components/CategoryFilter';
 import { Colors, Radius, Spacing, Typography } from '../theme';
 import { RootStackParamList } from '../types';
+import { trCategory } from '../utils/translations';
 
 const { width } = Dimensions.get('window');
 const CARD_GAP = Spacing.md;
@@ -41,8 +42,8 @@ export const WardrobeScreen: React.FC = () => {
       {/* Header */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>Wardrobe</Text>
-          <Text style={styles.subtitle}>{items.length} items</Text>
+          <Text style={styles.title}>Gardırop</Text>
+          <Text style={styles.subtitle}>{items.length} parça</Text>
         </View>
         <View style={styles.headerActions}>
           <TouchableOpacity
@@ -69,7 +70,7 @@ export const WardrobeScreen: React.FC = () => {
         <Ionicons name="search" size={18} color={Colors.textMuted} />
         <TextInput
           style={styles.searchInput}
-          placeholder="Search by name, brand, tag..."
+          placeholder="Ürün, marka veya etiket ara..."
           placeholderTextColor={Colors.textMuted}
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -88,16 +89,16 @@ export const WardrobeScreen: React.FC = () => {
       {items.length === 0 ? (
         <View style={styles.empty}>
           <Text style={styles.emptyEmoji}>🧺</Text>
-          <Text style={styles.emptyTitle}>No items found</Text>
+          <Text style={styles.emptyTitle}>Parça bulunamadı</Text>
           <Text style={styles.emptySubtitle}>
-            {searchQuery ? 'Try a different search term' : 'Add your first clothing item'}
+            {searchQuery ? 'Farklı bir arama deneyin' : 'İlk parçanızı ekleyin'}
           </Text>
           <TouchableOpacity
             style={styles.emptyBtn}
             onPress={() => navigation.navigate('AddItem', {})}
           >
             <Ionicons name="add" size={16} color={Colors.background} />
-            <Text style={styles.emptyBtnText}>Add Item</Text>
+            <Text style={styles.emptyBtnText}>Parça Ekle</Text>
           </TouchableOpacity>
         </View>
       ) : viewMode === 'grid' ? (
@@ -136,8 +137,8 @@ export const WardrobeScreen: React.FC = () => {
                   <Text style={styles.listItemBrand}>{item.brand}</Text>
                 )}
                 <View style={styles.listItemMeta}>
-                  <Text style={styles.listItemCategory}>{item.category}</Text>
-                  <Text style={styles.listItemWorn}>Worn {item.timesWorn}×</Text>
+                  <Text style={styles.listItemCategory}>{trCategory(item.category)}</Text>
+                  <Text style={styles.listItemWorn}>{item.timesWorn} kez giyildi</Text>
                 </View>
                 <View style={styles.listItemTags}>
                   {item.tags.slice(0, 3).map((tag) => (

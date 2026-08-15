@@ -1,15 +1,15 @@
 export const Colors = {
   // Core brand palette — luxury monochrome with gold accent
-  background: '#0D0D0D',
-  surface: '#1A1A1A',
-  surfaceElevated: '#242424',
-  border: '#2E2E2E',
-  borderLight: '#3A3A3A',
+  background: '#08080A',
+  surface: '#111217',
+  surfaceElevated: '#1A1D24',
+  border: '#2B2F3A',
+  borderLight: '#3B4050',
 
   // Text
-  textPrimary: '#F5F5F0',
-  textSecondary: '#9E9E9E',
-  textMuted: '#5C5C5C',
+  textPrimary: '#F8F8FA',
+  textSecondary: '#C6CBD7',
+  textMuted: '#8B92A1',
 
   // Accent
   gold: '#C9A84C',

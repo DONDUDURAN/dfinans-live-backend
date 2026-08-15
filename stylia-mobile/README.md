@@ -1,6 +1,6 @@
-# STYLIA — AI-Powered Wardrobe & Styling App
+# STYLIA — Premium AI Wardrobe & Kabin (Dijital Kabin) App
 
-> **Prototype handoff package** · React Native Expo · Dark luxury UI · AI styling features  
+> **Prototype handoff package** · React Native Expo · Dark luxe UI · Türkçe arayüz · Üyelik + Stripe ödeme
 > Branch: `donduduran-stylia-mobile-app` · PR: #150
 
 ---
@@ -15,8 +15,8 @@ npm install
 npm start        # Metro starts with --clear + LAN mode → scan QR with Expo Go
 ```
 
-> Phone and Mac must be on the **same Wi-Fi**.  
-> `http://localhost:8081` will NOT open on a phone — use the QR code.  
+> Phone and Mac must be on the **same Wi-Fi**.
+> `http://localhost:8081` will NOT open on a phone — use the QR code.
 > If QR doesn't connect: `npm run start:tunnel`
 
 ---
@@ -25,12 +25,23 @@ npm start        # Metro starts with --clear + LAN mode → scan QR with Expo Go
 
 | Screen | What it does |
 |--------|-------------|
-| **Home** | Daily AI outfit pick, recent outfits carousel, wardrobe stats, quick actions |
-| **Wardrobe** | Full closet — grid/list toggle, live search, 7-category filter, favorites |
-| **Outfit Builder** | Slot-based canvas (Tops / Bottoms / Shoes / etc.), save outfits by name |
-| **AI Style** | Suggestions filtered by occasion & mood, confidence scores, style tips |
-| **Add Item** | 4-step guided flow: photo → name/category → color/season → occasions |
-| **Profile** | Most-worn item, cost-per-wear, category bar chart, settings |
+| **Kayıt (Registration)** | Ad/e-posta ile hesap oluşturma, üyelik biçimi (Aylık/Yıllık) seçimi, 7 gün ücretsiz deneme, Stripe Payment Link ile ödeme |
+| **Ana Sayfa (Home)** | Günün STYLIA seçimi, son kombinler, gardırop istatistikleri, Kabin aksiyonları (dikey sıralı) |
+| **Gardırop (Wardrobe)** | Grid/list toggle, canlı arama, kategori filtresi, favoriler |
+| **Kombin (Outfit Builder)** | Slot tabanlı canvas (Üst/Alt/Ayakkabı vb.), isimlendirip kaydetme |
+| **Kabin (AI Style)** | Ürün linki ekleme + kamera ile görsel çekme (dikey sıralı aksiyonlar), etkinlik/ruh hali filtreli AI kombin önerileri |
+| **Parça Ekle (Add Item)** | 4 adımlı akış: ürün linki/foto → isim/kategori → renk/sezon → kullanım amacı |
+| **Profil (Profile)** | Aktif üyelik planı gösterimi + Stripe ile plan değiştirme, vücut ölçüleri formu, video-notu ile ölçü güncelleme, Style DNA |
+
+---
+
+## 💳 Üyelik & Ödeme
+
+- Kayıt sırasında **Aylık STYLIA Plus** veya **Yıllık STYLIA Elite** seçilir (yıllık plan aylığa göre daha ucuz — %40 tasarruf).
+- Her plana 7 gün ücretsiz deneme dahildir.
+- Ödeme, uygulama içinde kart bilgisi **saklanmadan**, harici **Stripe Payment Link** açılarak alınır (`src/config/paymentLinks.ts`).
+- Profil ekranından kullanıcı istediği zaman planını değiştirip yeniden Stripe linkini açabilir.
+- Gerçek ortamda `STRIPE_PAYMENT_LINKS` değerlerini kendi Stripe Payment Link URL'lerinizle değiştirin.
 
 ---
 
@@ -40,11 +51,13 @@ npm start        # Metro starts with --clear + LAN mode → scan QR with Expo Go
 |-------|--------|
 | Framework | React Native + Expo ~51 |
 | Navigation | React Navigation (bottom tabs + stack) |
-| State | Zustand |
-| UI | Custom design system — `#0D0D0D` bg, `#C9A84C` gold accent |
+| State | Zustand (`wardrobeStore`, `styleStore`, `userStore`) |
+| UI | Custom design system — dark luxe (`#08080A` bg, `#C9A84C` gold accent), high-contrast text |
+| i18n | Türkçe arayüz (`src/utils/translations.ts` + inline Turkish copy) |
 | Icons | `@expo/vector-icons` (Ionicons) |
 | Gradients | `expo-linear-gradient` |
-| Camera/Gallery | `expo-image-picker` |
+| Camera/Gallery | `expo-image-picker` (ürün fotoğrafı, Kabin görseli, video-notu ölçüm akışı) |
+| Payments | Stripe Payment Links via `Linking.openURL` (no in-app card fields) |
 | OTA updates | `expo-updates` |
 
 ---
@@ -53,7 +66,7 @@ npm start        # Metro starts with --clear + LAN mode → scan QR with Expo Go
 
 ```
 stylia-mobile/
-├── App.tsx                        # Entry point
+├── App.tsx                        # Entry point (NavigationContainer + AppNavigator)
 ├── app.json                       # Expo + EAS config
 ├── eas.json                       # Build profiles (development/adhoc/preview/production)
 ├── eas-build-pre-install.sh       # EAS pre-install hook (Node check, SDK licenses)
@@ -61,17 +74,20 @@ stylia-mobile/
 ├── .github/workflows/
 │   └── eas-build.yml              # CI: lint → EAS build → OTA update
 └── src/
-    ├── navigation/AppNavigator.tsx
-    ├── screens/          (HomeScreen, WardrobeScreen, OutfitBuilderScreen,
-    │                      AIStyleScreen, AddItemScreen, ProfileScreen)
+    ├── navigation/AppNavigator.tsx        (Registration gate → MainTabs/AddItem/ItemDetail)
+    ├── screens/          (RegistrationScreen, HomeScreen, WardrobeScreen, OutfitBuilderScreen,
+    │                      AIStyleScreen "Kabin", AddItemScreen, ItemDetailScreen, ProfileScreen)
     ├── components/       (ClothingCard, OutfitCard, StyleSuggestionCard, CategoryFilter)
-    ├── store/            (wardrobeStore.ts, styleStore.ts — Zustand)
+    ├── store/            (wardrobeStore.ts, styleStore.ts, userStore.ts — Zustand)
+    ├── config/paymentLinks.ts   (Stripe Payment Links + membership plan copy)
+    ├── utils/translations.ts    (category/occasion → Turkish label helpers)
     ├── data/mockData.ts  (12 clothing items, 4 outfits, 3 AI suggestions)
     ├── types/index.ts
     └── theme/index.ts    (Colors, Typography, Spacing, Radius, Shadow)
 ```
 
 ---
+
 
 ## 🚀 Distribution Decision Tree
 

@@ -9,6 +9,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { ClothingItem } from '../types';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
+import { trCategory } from '../utils/translations';
 
 interface Props {
   item: ClothingItem;
@@ -84,7 +85,7 @@ export const ClothingCard: React.FC<Props> = ({
           )}
           <View style={styles.meta}>
             <View style={[styles.categoryDot, { backgroundColor: getCategoryColor(item.category) }]} />
-            <Text style={styles.category}>{item.category}</Text>
+            <Text style={styles.category}>{trCategory(item.category)}</Text>
           </View>
         </View>
       )}

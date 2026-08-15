@@ -16,9 +16,9 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { useStyleStore } from '../store/styleStore';
 import { ClothingCard } from '../components/ClothingCard';
-import { CategoryFilter } from '../components/CategoryFilter';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 import { ClothingCategory } from '../types';
+import { trCategory } from '../utils/translations';
 
 const SLOT_CATEGORIES: ClothingCategory[] = ['Tops', 'Bottoms', 'Dresses', 'Outerwear', 'Shoes', 'Accessories'];
 
@@ -51,7 +51,7 @@ export const OutfitBuilderScreen: React.FC = () => {
 
   const handleSave = () => {
     if (!outfitName.trim()) {
-      Alert.alert('Name required', 'Please give your outfit a name.');
+      Alert.alert('İsim gerekli', 'Kombininize bir isim verin.');
       return;
     }
     const outfit = saveBuilderAsOutfit(outfitName.trim());
@@ -59,7 +59,7 @@ export const OutfitBuilderScreen: React.FC = () => {
     clearBuilder();
     setOutfitName('');
     setShowSaveModal(false);
-    Alert.alert('✨ Outfit Saved!', `"${outfit.name}" has been added to your collection.`);
+    Alert.alert('✨ Kombin kaydedildi', `"${outfit.name}" koleksiyonuna eklendi.`);
   };
 
   return (
@@ -67,8 +67,8 @@ export const OutfitBuilderScreen: React.FC = () => {
       {/* Header */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>Outfit Builder</Text>
-          <Text style={styles.subtitle}>Mix & match your wardrobe</Text>
+          <Text style={styles.title}>Kombin Oluşturucu</Text>
+          <Text style={styles.subtitle}>Parçaları eşleştir, görünümü tamamla</Text>
         </View>
         {builderItems.length > 0 && (
           <View style={styles.headerActions}>
@@ -80,7 +80,7 @@ export const OutfitBuilderScreen: React.FC = () => {
               onPress={() => setShowSaveModal(true)}
             >
               <Ionicons name="save-outline" size={16} color={Colors.background} />
-              <Text style={styles.saveBtnText}>Save</Text>
+              <Text style={styles.saveBtnText}>Kaydet</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -91,7 +91,7 @@ export const OutfitBuilderScreen: React.FC = () => {
         {builderItems.length === 0 ? (
           <View style={styles.canvasEmpty}>
             <Text style={styles.canvasEmptyEmoji}>✦</Text>
-            <Text style={styles.canvasEmptyText}>Start building your outfit below</Text>
+            <Text style={styles.canvasEmptyText}>Aşağıdan parçaları seçerek kombinini oluştur</Text>
           </View>
         ) : (
           <ScrollView
@@ -150,7 +150,7 @@ export const OutfitBuilderScreen: React.FC = () => {
       {/* Category selector */}
       <View style={styles.categorySection}>
         <Text style={styles.categoryTitle}>
-          {SLOT_EMOJIS[activeCategory]} {activeCategory}
+          {SLOT_EMOJIS[activeCategory]} {trCategory(activeCategory)}
         </Text>
         <ScrollView
           horizontal
@@ -165,7 +165,7 @@ export const OutfitBuilderScreen: React.FC = () => {
             >
               <Text style={styles.catBtnEmoji}>{SLOT_EMOJIS[cat]}</Text>
               <Text style={[styles.catBtnText, activeCategory === cat && styles.catBtnTextActive]}>
-                {cat}
+                {trCategory(cat)}
               </Text>
             </TouchableOpacity>
           ))}
@@ -175,7 +175,7 @@ export const OutfitBuilderScreen: React.FC = () => {
       {/* Items to pick from */}
       {categoryItems.length === 0 ? (
         <View style={styles.noItems}>
-          <Text style={styles.noItemsText}>No {activeCategory} in your wardrobe yet</Text>
+          <Text style={styles.noItemsText}>Gardırobunda henüz {trCategory(activeCategory)} yok</Text>
         </View>
       ) : (
         <FlatList
@@ -210,10 +210,10 @@ export const OutfitBuilderScreen: React.FC = () => {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Name Your Outfit</Text>
+            <Text style={styles.modalTitle}>Kombin Adı</Text>
             <TextInput
               style={styles.modalInput}
-              placeholder="e.g. Monday Power Look"
+              placeholder="Örn. Pazartesi Güç Kombini"
               placeholderTextColor={Colors.textMuted}
               value={outfitName}
               onChangeText={setOutfitName}
@@ -224,11 +224,11 @@ export const OutfitBuilderScreen: React.FC = () => {
                 style={styles.modalCancel}
                 onPress={() => setShowSaveModal(false)}
               >
-                <Text style={styles.modalCancelText}>Cancel</Text>
+                <Text style={styles.modalCancelText}>Vazgeç</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.modalSave} onPress={handleSave}>
                 <Ionicons name="sparkles" size={16} color={Colors.background} />
-                <Text style={styles.modalSaveText}>Save Outfit</Text>
+                <Text style={styles.modalSaveText}>Kombini Kaydet</Text>
               </TouchableOpacity>
             </View>
           </View>

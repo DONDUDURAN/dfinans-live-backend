@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
 import { ClothingCategory } from '../types';
 import { Colors, Radius, Spacing, Typography } from '../theme';
+import { trCategory } from '../utils/translations';
 
 const CATEGORIES: (ClothingCategory | 'All')[] = [
   'All',
@@ -46,7 +47,7 @@ export const CategoryFilter: React.FC<Props> = ({ selected, onSelect }) => {
         >
           <Text style={styles.emoji}>{CATEGORY_EMOJIS[cat]}</Text>
           <Text style={[styles.label, selected === cat && styles.labelActive]}>
-            {cat}
+            {trCategory(cat)}
           </Text>
         </TouchableOpacity>
       ))}
