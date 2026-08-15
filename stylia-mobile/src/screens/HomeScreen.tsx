@@ -43,7 +43,10 @@ export const HomeScreen: React.FC = () => {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <LinearGradient colors={['#201809', Colors.background]} style={styles.header}>
-        <Text style={styles.wordmark}>STYLIA</Text>
+        <View style={styles.wordmarkWrap}>
+          <Text style={styles.wordmark} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
+          <View style={styles.wordmarkRule} />
+        </View>
         <Text style={styles.date}>{today}</Text>
         <Text style={styles.greeting}>Merhaba {fullName.split(' ')[0] || 'stil sahibi'} ✦</Text>
         <Text style={styles.headline}>Bugün nasıl bir enerji{'\n'}taşımak istiyorsun?</Text>
@@ -157,11 +160,22 @@ const styles = StyleSheet.create({
     paddingBottom: Spacing.xl,
     gap: 6,
   },
+  wordmarkWrap: {
+    alignSelf: 'flex-start',
+    marginBottom: 2,
+  },
   wordmark: {
-    fontSize: 36,
-    letterSpacing: 5,
+    fontSize: 42,
+    letterSpacing: 12,
     color: Colors.goldLight,
-    fontWeight: '300',
+    fontWeight: '100',
+  },
+  wordmarkRule: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: Colors.gold,
+    marginTop: 4,
+    width: '80%',
+    opacity: 0.65,
   },
   date: {
     fontSize: Typography.xs,

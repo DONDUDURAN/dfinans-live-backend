@@ -77,7 +77,10 @@ export const ProfileScreen: React.FC = () => {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <LinearGradient colors={['#171103', Colors.background]} style={styles.profileHeader}>
-        <Text style={styles.wordmark}>STYLIA</Text>
+        <View style={styles.wordmarkWrap}>
+          <Text style={styles.wordmark} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
+          <View style={styles.wordmarkRule} />
+        </View>
         <Text style={styles.profileName}>{fullName || 'Üye Profil'}</Text>
         <Text style={styles.profileHandle}>{email || 'premium@stylia.app'}</Text>
         <View style={styles.planBadge}>
@@ -174,11 +177,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
   },
+  wordmarkWrap: {
+    alignSelf: 'flex-start',
+    marginBottom: 2,
+  },
   wordmark: {
     color: Colors.goldLight,
-    letterSpacing: 4,
-    fontWeight: '300',
-    fontSize: 32,
+    letterSpacing: 12,
+    fontWeight: '100',
+    fontSize: 40,
+  },
+  wordmarkRule: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: Colors.gold,
+    marginTop: 4,
+    width: '80%',
+    opacity: 0.65,
   },
   profileName: { color: Colors.textPrimary, fontSize: Typography.xl, fontWeight: '800' },
   profileHandle: { color: Colors.textSecondary, fontSize: Typography.sm },

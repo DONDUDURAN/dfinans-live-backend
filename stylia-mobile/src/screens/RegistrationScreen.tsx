@@ -53,7 +53,10 @@ export const RegistrationScreen: React.FC = () => {
   return (
     <View style={styles.container}>
       <LinearGradient colors={['#1A1405', Colors.background]} style={styles.header}>
-        <Text style={styles.brand}>STYLIA</Text>
+        <View style={styles.brandWrap}>
+          <Text style={styles.brand} numberOfLines={1} adjustsFontSizeToFit>STYLIA</Text>
+          <View style={styles.brandRule} />
+        </View>
         <Text style={styles.subtitle}>Kişisel stil kabininize hoş geldiniz</Text>
         <Text style={styles.trialTag}>7 gün ücretsiz deneme • Kart bilgisi uygulamada saklanmaz</Text>
       </LinearGradient>
@@ -139,11 +142,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.base,
     gap: Spacing.sm,
   },
+  brandWrap: {
+    alignSelf: 'flex-start',
+    marginBottom: 2,
+  },
   brand: {
-    fontSize: 44,
-    letterSpacing: 6,
+    fontSize: 50,
+    letterSpacing: 14,
     color: Colors.goldLight,
-    fontWeight: '300',
+    fontWeight: '100',
+  },
+  brandRule: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: Colors.gold,
+    marginTop: 5,
+    width: '80%',
+    opacity: 0.65,
   },
   subtitle: {
     color: Colors.textPrimary,
