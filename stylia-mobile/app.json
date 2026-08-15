@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "STYLIA",
+    "slug": "stylia-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#0D0D0D"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.stylia.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0D0D0D"
+      },
+      "package": "com.stylia.app"
+    },
+    "web": {
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow STYLIA to access your photos to add items to your wardrobe.",
+          "cameraPermission": "Allow STYLIA to use your camera to photograph your clothing."
+        }
+      ]
+    ]
+  }
+}
