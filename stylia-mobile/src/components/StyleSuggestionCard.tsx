@@ -1,5 +1,7 @@
 import React from 'react';
 import {
+  Alert,
+  Share,
   View,
   Text,
   TouchableOpacity,
@@ -10,6 +12,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSuggestion } from '../types';
 import { useWardrobeStore } from '../store/wardrobeStore';
+import { useSocialStore } from '../store/socialStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 import { trOccasion } from '../utils/translations';
 
@@ -25,10 +28,64 @@ export const StyleSuggestionCard: React.FC<Props> = ({
   compact = false,
 }) => {
   const getItemById = useWardrobeStore((s) => s.getItemById);
+  const friends = useSocialStore((s) => s.friends);
+  const shareLookToFriends = useSocialStore((s) => s.shareLookToFriends);
   const items = suggestion.outfit.items
     .slice(0, 3)
     .map((id) => getItemById(id))
     .filter(Boolean);
+  const previewImageUri = items[0]?.imageUri;
+
+  const shareText = `${suggestion.title}\n${trOccasion(suggestion.outfit.occasion)} · ${suggestion.mood}\n#STYLIA`;
+
+  const handleShare = async () => {
+    try {
+      const payload: { message: string; url?: string } = { message: shareText };
+      if (previewImageUri) payload.url = previewImageUri;
+      await Share.share(payload);
+    } catch {
+      Alert.alert('Paylaşım açılamadı');
+    }
+  };
+
+  const handleSendToFriend = () => {
+    if (friends.length === 0) {
+      Alert.alert('Arkadaş yok', 'Önce profilde arkadaş ekleyin.');
+      return;
+    }
+
+    Alert.alert(
+      'Arkadaşa gönder',
+      'Kime gönderilsin?',
+      [
+        {
+          text: 'Tüm arkadaşlar',
+          onPress: () => {
+            shareLookToFriends({
+              recipientIds: friends.map((f) => f.id),
+              lookTitle: suggestion.title,
+              previewImageUri,
+              note: `${trOccasion(suggestion.outfit.occasion)} · ${suggestion.mood}`,
+            });
+            Alert.alert('Gönderildi', 'Tüm arkadaşlara paylaşıldı.');
+          },
+        },
+        ...friends.slice(0, 8).map((friend) => ({
+          text: `${friend.name} (${friend.username})`,
+          onPress: () => {
+            shareLookToFriends({
+              recipientIds: [friend.id],
+              lookTitle: suggestion.title,
+              previewImageUri,
+              note: `${trOccasion(suggestion.outfit.occasion)} · ${suggestion.mood}`,
+            });
+            Alert.alert('Gönderildi', `${friend.name} için paylaşıldı.`);
+          },
+        })),
+        { text: 'Vazgeç', style: 'cancel' as const },
+      ]
+    );
+  };
 
   return (
     <TouchableOpacity
@@ -75,10 +132,20 @@ export const StyleSuggestionCard: React.FC<Props> = ({
             <Ionicons name="calendar-outline" size={12} color={Colors.textSecondary} />
             <Text style={styles.outfitOccasionText}>{trOccasion(suggestion.outfit.occasion)}</Text>
           </View>
-          <TouchableOpacity style={styles.tryBtn} onPress={onPress}>
-            <Text style={styles.tryBtnText}>Kabinde Dene</Text>
-            <Ionicons name="arrow-forward" size={12} color={Colors.background} />
-          </TouchableOpacity>
+          <View style={styles.actionRow}>
+            <TouchableOpacity style={styles.ghostBtn} onPress={handleShare}>
+              <Ionicons name="share-social-outline" size={13} color={Colors.gold} />
+              <Text style={styles.ghostBtnText}>Paylaş</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.ghostBtn} onPress={handleSendToFriend}>
+              <Ionicons name="paper-plane-outline" size={13} color={Colors.gold} />
+              <Text style={styles.ghostBtnText}>Arkadaşa gönder</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.tryBtn} onPress={onPress}>
+              <Text style={styles.tryBtnText}>Kabinde Dene</Text>
+              <Ionicons name="arrow-forward" size={12} color={Colors.background} />
+            </TouchableOpacity>
+          </View>
         </View>
       </View>
     </TouchableOpacity>
@@ -174,13 +241,33 @@ const styles = StyleSheet.create({
     fontSize: Typography.xs,
     color: Colors.textSecondary,
   },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  ghostBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: Radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Colors.borderLight,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 6,
+  },
+  ghostBtnText: {
+    fontSize: 10,
+    color: Colors.gold,
+    fontWeight: '500',
+  },
   tryBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
     backgroundColor: Colors.gold,
-    borderRadius: Radius.full,
-    paddingHorizontal: 14,
+    borderRadius: Radius.sm,
+    paddingHorizontal: 10,
     paddingVertical: 7,
   },
   tryBtnText: {

@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Alert,
+  Image,
   Linking,
   ScrollView,
   StyleSheet,
@@ -16,6 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BrandMark } from '../components/BrandMark';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { useUserStore } from '../store/userStore';
+import { useSocialStore } from '../store/socialStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 import { MEMBERSHIP_PLANS, MembershipPlanId, STRIPE_PAYMENT_LINKS } from '../config/paymentLinks';
 
@@ -37,8 +39,14 @@ export const ProfileScreen: React.FC = () => {
   const setVideoNoteUri = useUserStore((s) => s.setVideoNoteUri);
 
   const logout = useUserStore((s) => s.logout);
+  const friends = useSocialStore((s) => s.friends);
+  const messages = useSocialStore((s) => s.messages);
+  const addFriend = useSocialStore((s) => s.addFriend);
 
   const [draft, setDraft] = useState(measurements);
+  const [showFriendForm, setShowFriendForm] = useState(false);
+  const [friendName, setFriendName] = useState('');
+  const [friendUsername, setFriendUsername] = useState('');
 
   const totalWorn = items.reduce((acc, i) => acc + i.timesWorn, 0);
   const trialDaysLeft = useMemo(() => {
@@ -46,6 +54,7 @@ export const ProfileScreen: React.FC = () => {
     const diff = new Date(trialEndsAt).getTime() - Date.now();
     return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
   }, [trialEndsAt]);
+  const latestShares = useMemo(() => messages.slice(0, 8), [messages]);
 
   const openPlanPayment = async (planId: MembershipPlanId) => {
     const url = STRIPE_PAYMENT_LINKS[planId];
@@ -78,6 +87,21 @@ export const ProfileScreen: React.FC = () => {
       Alert.alert('Video notu eklendi');
     }
   };
+
+  const handleAddFriend = () => {
+    const result = addFriend({ name: friendName, username: friendUsername });
+    if (!result.ok) {
+      Alert.alert('Eklenemedi', result.error ?? 'Tekrar deneyin.');
+      return;
+    }
+    setFriendName('');
+    setFriendUsername('');
+    setShowFriendForm(false);
+    Alert.alert('Arkadaş eklendi');
+  };
+
+  const formatShareTime = (iso: string) =>
+    new Date(iso).toLocaleDateString('tr-TR', { day: '2-digit', month: 'short' });
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
@@ -162,6 +186,82 @@ export const ProfileScreen: React.FC = () => {
         </View>
       </View>
 
+      <View style={styles.section}>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>Arkadaşlar</Text>
+          <TouchableOpacity style={styles.sectionActionBtn} onPress={() => setShowFriendForm((v) => !v)}>
+            <Ionicons name="person-add-outline" size={14} color={Colors.gold} />
+            <Text style={styles.sectionActionText}>Arkadaş ekle</Text>
+          </TouchableOpacity>
+        </View>
+
+        {showFriendForm && (
+          <View style={styles.friendFormCard}>
+            <TextInput
+              style={styles.friendInput}
+              placeholder="İsim"
+              placeholderTextColor={Colors.textMuted}
+              value={friendName}
+              onChangeText={setFriendName}
+            />
+            <TextInput
+              style={styles.friendInput}
+              placeholder="@kullaniciAdi"
+              placeholderTextColor={Colors.textMuted}
+              value={friendUsername}
+              onChangeText={setFriendUsername}
+              autoCapitalize="none"
+            />
+            <TouchableOpacity style={styles.sectionActionBtn} onPress={handleAddFriend}>
+              <Text style={styles.sectionActionText}>Ekle</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        <View style={styles.stack}>
+          {friends.length === 0 ? (
+            <Text style={styles.emptyText}>Henüz arkadaş yok</Text>
+          ) : (
+            friends.slice(0, 8).map((friend) => (
+              <View key={friend.id} style={styles.friendRow}>
+                <View style={[styles.friendAvatar, { backgroundColor: friend.avatarColor }]}>
+                  <Text style={styles.friendAvatarText}>{friend.name.charAt(0).toUpperCase()}</Text>
+                </View>
+                <View style={styles.friendInfo}>
+                  <Text style={styles.friendName}>{friend.name}</Text>
+                  <Text style={styles.friendUsername}>{friend.username}</Text>
+                </View>
+              </View>
+            ))
+          )}
+        </View>
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Paylaşılanlar</Text>
+        <View style={styles.stack}>
+          {latestShares.length === 0 ? (
+            <Text style={styles.emptyText}>Henüz paylaşım yok</Text>
+          ) : (
+            latestShares.map((share) => (
+              <View key={share.id} style={styles.shareRow}>
+                {share.previewImageUri ? (
+                  <Image source={{ uri: share.previewImageUri }} style={styles.sharePreview} />
+                ) : (
+                  <View style={styles.sharePreviewFallback}>
+                    <Ionicons name="images-outline" size={14} color={Colors.textMuted} />
+                  </View>
+                )}
+                <View style={styles.shareContent}>
+                  <Text style={styles.shareTitle}>{share.lookTitle}</Text>
+                  <Text style={styles.shareMeta}>→ {share.recipientUsername} · {formatShareTime(share.timestamp)}</Text>
+                </View>
+              </View>
+            ))
+          )}
+        </View>
+      </View>
+
       <TouchableOpacity
         style={styles.resetBtn}
         onPress={() =>
@@ -218,6 +318,11 @@ const styles = StyleSheet.create({
   statValue: { color: Colors.textPrimary, fontSize: Typography['2xl'], fontWeight: '700' },
   statLabel: { color: Colors.textSecondary, fontSize: Typography.xs },
   section: { paddingHorizontal: Spacing.base, marginTop: Spacing.xl, gap: Spacing.md },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   sectionTitle: {
     color: Colors.textMuted,
     fontSize: Typography.xs,
@@ -292,6 +397,85 @@ const styles = StyleSheet.create({
   },
   videoText: { color: Colors.textSecondary, fontSize: Typography.sm, lineHeight: 20 },
   videoStatus: { color: Colors.textPrimary, fontSize: Typography.xs, fontWeight: '700' },
+  sectionActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderRadius: Radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Colors.borderLight,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 6,
+  },
+  sectionActionText: {
+    color: Colors.gold,
+    fontSize: Typography.xs,
+    fontWeight: '500',
+  },
+  friendFormCard: {
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    padding: Spacing.base,
+    gap: Spacing.sm,
+  },
+  friendInput: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: Colors.borderLight,
+    color: Colors.textPrimary,
+    paddingVertical: Spacing.sm,
+    fontSize: Typography.sm,
+  },
+  friendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    padding: Spacing.sm,
+  },
+  friendAvatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  friendAvatarText: {
+    color: Colors.background,
+    fontWeight: '700',
+    fontSize: Typography.xs,
+  },
+  friendInfo: { gap: 1 },
+  friendName: { color: Colors.textPrimary, fontSize: Typography.sm, fontWeight: '500' },
+  friendUsername: { color: Colors.textSecondary, fontSize: Typography.xs },
+  emptyText: {
+    color: Colors.textSecondary,
+    fontSize: Typography.sm,
+  },
+  shareRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    backgroundColor: Colors.surface,
+    borderRadius: Radius.md,
+    padding: Spacing.sm,
+  },
+  sharePreview: {
+    width: 42,
+    height: 42,
+    borderRadius: Radius.sm,
+  },
+  sharePreviewFallback: {
+    width: 42,
+    height: 42,
+    borderRadius: Radius.sm,
+    backgroundColor: Colors.surfaceElevated,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  shareContent: { flex: 1, gap: 2 },
+  shareTitle: { color: Colors.textPrimary, fontSize: Typography.sm, fontWeight: '500' },
+  shareMeta: { color: Colors.textSecondary, fontSize: Typography.xs },
   resetBtn: {
     alignSelf: 'center',
     paddingVertical: Spacing.md,

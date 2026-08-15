@@ -1,16 +1,18 @@
 import React from 'react';
 import {
+  Alert,
+  Share,
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
-  ScrollView,
   Image,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { Outfit } from '../types';
 import { useWardrobeStore } from '../store/wardrobeStore';
+import { useSocialStore } from '../store/socialStore';
 import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
 import { trOccasion } from '../utils/translations';
 
@@ -28,7 +30,60 @@ export const OutfitCard: React.FC<Props> = ({
   showActions = true,
 }) => {
   const getItemById = useWardrobeStore((s) => s.getItemById);
+  const friends = useSocialStore((s) => s.friends);
+  const shareLookToFriends = useSocialStore((s) => s.shareLookToFriends);
   const items = outfit.items.slice(0, 4).map((id) => getItemById(id)).filter(Boolean);
+  const previewImageUri = items[0]?.imageUri;
+
+  const handleShare = async () => {
+    try {
+      const payload: { message: string; url?: string } = {
+        message: `${outfit.name}\n${trOccasion(outfit.occasion)}\n#STYLIA`,
+      };
+      if (previewImageUri) payload.url = previewImageUri;
+      await Share.share(payload);
+    } catch {
+      Alert.alert('Paylaşım açılamadı');
+    }
+  };
+
+  const handleSendToFriend = () => {
+    if (friends.length === 0) {
+      Alert.alert('Arkadaş yok', 'Önce profilde arkadaş ekleyin.');
+      return;
+    }
+    Alert.alert(
+      'Arkadaşa gönder',
+      'Kime gönderilsin?',
+      [
+        {
+          text: 'Tüm arkadaşlar',
+          onPress: () => {
+            shareLookToFriends({
+              recipientIds: friends.map((f) => f.id),
+              lookTitle: outfit.name,
+              previewImageUri,
+              note: trOccasion(outfit.occasion),
+            });
+            Alert.alert('Gönderildi', 'Tüm arkadaşlara paylaşıldı.');
+          },
+        },
+        ...friends.slice(0, 8).map((friend) => ({
+          text: `${friend.name} (${friend.username})`,
+          onPress: () => {
+            shareLookToFriends({
+              recipientIds: [friend.id],
+              lookTitle: outfit.name,
+              previewImageUri,
+              note: trOccasion(outfit.occasion),
+            });
+            Alert.alert('Gönderildi', `${friend.name} için paylaşıldı.`);
+          },
+        })),
+        { text: 'Vazgeç', style: 'cancel' as const },
+      ]
+    );
+  };
 
   return (
     <TouchableOpacity
@@ -99,6 +154,18 @@ export const OutfitCard: React.FC<Props> = ({
             </View>
           ))}
         </View>
+        {showActions && (
+          <View style={styles.shareRow}>
+            <TouchableOpacity style={styles.shareBtn} onPress={handleShare}>
+              <Ionicons name="share-social-outline" size={13} color={Colors.gold} />
+              <Text style={styles.shareBtnText}>Paylaş</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.shareBtn} onPress={handleSendToFriend}>
+              <Ionicons name="paper-plane-outline" size={13} color={Colors.gold} />
+              <Text style={styles.shareBtnText}>Arkadaşa gönder</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
     </TouchableOpacity>
   );
@@ -225,5 +292,26 @@ const styles = StyleSheet.create({
   },
   tagTextSecondary: {
     color: Colors.textSecondary,
+  },
+  shareRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+    marginTop: 2,
+  },
+  shareBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: Radius.sm,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Colors.borderLight,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 6,
+  },
+  shareBtnText: {
+    fontSize: Typography.xs,
+    color: Colors.gold,
+    fontWeight: '500',
   },
 });
