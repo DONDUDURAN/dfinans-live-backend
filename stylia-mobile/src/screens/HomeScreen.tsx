@@ -48,7 +48,7 @@ export const HomeScreen: React.FC = () => {
 
       <View style={styles.statsRow}>
         {stats.map((stat) => (
-          <View key={stat.label} style={[styles.statCard, Shadow.sm]}>
+          <View key={stat.label} style={styles.statCard}>
             <Ionicons name={stat.icon as any} size={18} color={Colors.gold} />
             <Text style={styles.statValue}>{stat.value}</Text>
             <Text style={styles.statLabel}>{stat.label}</Text>
@@ -84,7 +84,7 @@ export const HomeScreen: React.FC = () => {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Sanal İkiz Kabini</Text>
         <View style={styles.kabinStack}>
-          <TouchableOpacity style={[styles.kabinAction, Shadow.sm]} onPress={() => navigation.navigate('AIStyle')}>
+          <TouchableOpacity style={styles.kabinAction} onPress={() => navigation.navigate('AIStyle')}>
             <View style={[styles.kabinIconWrap, { backgroundColor: Colors.gold + '22' }]}>
               <Ionicons name="body-outline" size={20} color={Colors.gold} />
             </View>
@@ -94,7 +94,7 @@ export const HomeScreen: React.FC = () => {
             <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
           </TouchableOpacity>
 
-          <TouchableOpacity style={[styles.kabinAction, Shadow.sm]} onPress={() => navigation.navigate('AddItem', {})}>
+          <TouchableOpacity style={styles.kabinAction} onPress={() => navigation.navigate('AddItem', {})}>
             <View style={[styles.kabinIconWrap, { backgroundColor: Colors.info + '22' }]}>
               <Ionicons name="camera-outline" size={20} color={Colors.info} />
             </View>
@@ -104,7 +104,7 @@ export const HomeScreen: React.FC = () => {
             <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
           </TouchableOpacity>
 
-          <TouchableOpacity style={[styles.kabinAction, Shadow.sm]} onPress={() => navigation.navigate('Profile')}>
+          <TouchableOpacity style={styles.kabinAction} onPress={() => navigation.navigate('Profile')}>
             <View style={[styles.kabinIconWrap, { backgroundColor: Colors.success + '22' }]}>
               <Ionicons name="person-outline" size={20} color={Colors.success} />
             </View>
@@ -176,8 +176,6 @@ const styles = StyleSheet.create({
     borderRadius: Radius.lg,
     padding: Spacing.md,
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Colors.border,
     gap: 2,
   },
   statValue: {
@@ -223,8 +221,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: Spacing.md,
     backgroundColor: Colors.surface,
-    borderWidth: 1,
-    borderColor: Colors.border,
     borderRadius: Radius.lg,
     padding: Spacing.base,
   },

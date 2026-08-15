@@ -111,7 +111,7 @@ export const AIStyleScreen: React.FC = () => {
           <View style={styles.stepNum}><Text style={styles.stepNumText}>1</Text></View>
           <Text style={styles.stepTitle}>İkiz Durumu</Text>
         </View>
-        <View style={[styles.stepCard, Shadow.sm]}>
+        <View style={styles.stepCard}>
           <View style={styles.twinStatusRow}>
             <View style={styles.twinStatusItem}>
               <Ionicons
@@ -153,7 +153,7 @@ export const AIStyleScreen: React.FC = () => {
           <Text style={styles.stepTitle}>Kıyafet / Link</Text>
         </View>
         <View style={styles.kabinStack}>
-          <View style={[styles.kabinAction, Shadow.sm]}>
+          <View style={styles.kabinAction}>
             <View style={styles.kabinActionHeader}>
               <Ionicons name="link-outline" size={18} color={Colors.gold} />
               <Text style={styles.kabinActionTitle}>Ürün linki</Text>
@@ -171,7 +171,7 @@ export const AIStyleScreen: React.FC = () => {
             </TouchableOpacity>
           </View>
 
-          <View style={[styles.kabinAction, Shadow.sm]}>
+          <View style={styles.kabinAction}>
             <View style={styles.kabinActionHeader}>
               <Ionicons name="camera-outline" size={18} color={Colors.gold} />
               <Text style={styles.kabinActionTitle}>Kabin görseli</Text>
@@ -236,7 +236,7 @@ export const AIStyleScreen: React.FC = () => {
         </View>
       </View>
 
-      <TouchableOpacity style={[styles.generateBtn, Shadow.gold, isGenerating && styles.generateBtnDisabled]} onPress={handleGenerate} disabled={isGenerating} activeOpacity={0.85}>
+      <TouchableOpacity style={[styles.generateBtn, isGenerating && styles.generateBtnDisabled]} onPress={handleGenerate} disabled={isGenerating} activeOpacity={0.85}>
         <LinearGradient colors={[Colors.goldLight, Colors.gold, Colors.goldDark]} style={StyleSheet.absoluteFill} />
         {isGenerating
           ? <ActivityIndicator size="small" color={Colors.background} />
@@ -356,8 +356,6 @@ const styles = StyleSheet.create({
   stepCard: {
     backgroundColor: Colors.surface,
     borderRadius: Radius.lg,
-    borderWidth: 1,
-    borderColor: Colors.border,
     padding: Spacing.base,
     gap: Spacing.md,
   },
@@ -383,17 +381,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 5,
     alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: Colors.gold + '66',
-    borderRadius: Radius.full,
-    backgroundColor: Colors.gold + '1A',
-    paddingHorizontal: Spacing.md,
     paddingVertical: 6,
   },
   twinUpdateText: {
     color: Colors.gold,
     fontSize: Typography.xs,
-    fontWeight: '700',
+    fontWeight: '500',
   },
   sectionLabel: {
     fontSize: Typography.sm,
@@ -474,8 +467,6 @@ const styles = StyleSheet.create({
   kabinAction: {
     backgroundColor: Colors.surface,
     borderRadius: Radius.lg,
-    borderWidth: 1,
-    borderColor: Colors.border,
     padding: Spacing.base,
     gap: Spacing.sm,
   },
@@ -490,26 +481,20 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   linkInput: {
-    borderWidth: 1,
-    borderColor: Colors.borderLight,
-    backgroundColor: Colors.surfaceElevated,
-    borderRadius: Radius.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: Colors.borderLight,
+    backgroundColor: 'transparent',
     color: Colors.textPrimary,
-    paddingHorizontal: Spacing.base,
+    paddingHorizontal: 0,
     paddingVertical: Spacing.sm,
   },
   inlineButton: {
     alignSelf: 'flex-start',
-    backgroundColor: Colors.gold + '22',
-    borderColor: Colors.gold,
-    borderWidth: 1,
-    borderRadius: Radius.full,
-    paddingHorizontal: Spacing.md,
     paddingVertical: 6,
   },
   inlineButtonText: {
     color: Colors.gold,
-    fontWeight: '700',
+    fontWeight: '500',
     fontSize: Typography.xs,
   },
   emptyNote: {
@@ -528,10 +513,11 @@ const styles = StyleSheet.create({
     gap: 8,
     marginHorizontal: Spacing.base,
     marginBottom: Spacing.xl,
-    borderRadius: Radius.full,
-    paddingVertical: Spacing.base,
+    borderRadius: Radius.md,
+    paddingVertical: 14,
     overflow: 'hidden',
     position: 'relative',
+    backgroundColor: Colors.goldDark,
   },
   generateBtnDisabled: {
     opacity: 0.7,
@@ -549,8 +535,6 @@ const styles = StyleSheet.create({
     height: 200,
     borderRadius: Radius.xl,
     backgroundColor: Colors.surface,
-    borderWidth: 1,
-    borderColor: Colors.border,
   },
   suggestionsList: {
     gap: Spacing.md,

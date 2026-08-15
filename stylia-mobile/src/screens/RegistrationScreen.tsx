@@ -12,12 +12,11 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BrandMark } from '../components/BrandMark';
 import { MEMBERSHIP_PLANS, MembershipPlanId, STRIPE_PAYMENT_LINKS } from '../config/paymentLinks';
 import { useUserStore } from '../store/userStore';
-import { Colors, Radius, Shadow, Spacing, Typography } from '../theme';
+import { Colors, Radius, Spacing, Typography } from '../theme';
 
 const PLAN_ORDER: MembershipPlanId[] = ['aylik', 'yillik'];
 
@@ -49,11 +48,7 @@ export const RegistrationScreen: React.FC = () => {
       Alert.alert('Eksik bilgi', 'Lütfen ad-soyad ve geçerli e-posta girin.');
       return;
     }
-    register({
-      fullName: fullName.trim(),
-      email: email.trim(),
-      plan: selectedPlan,
-    });
+    register({ fullName: fullName.trim(), email: email.trim(), plan: selectedPlan });
   };
 
   return (
@@ -61,22 +56,30 @@ export const RegistrationScreen: React.FC = () => {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <LinearGradient colors={['#050D08', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.xl }]}>
+      {/* ── Brand header ── */}
+      <LinearGradient
+        colors={['#050D08', Colors.background]}
+        style={[styles.header, { paddingTop: insets.top + Spacing['2xl'] }]}
+      >
         <BrandMark size="lg" />
         <Text style={styles.subtitle}>Kişisel stil kabininiz</Text>
-        <Text style={styles.trialTag}>7 gün ücretsiz · kart bilgisi saklanmaz</Text>
       </LinearGradient>
 
-      <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Hesap oluştur</Text>
+      <ScrollView
+        contentContainerStyle={styles.body}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* ── Account fields ── */}
+        <View style={styles.fieldGroup}>
           <TextInput
             value={fullName}
             onChangeText={setFullName}
             placeholder="Ad Soyad"
             placeholderTextColor={Colors.textMuted}
-            style={styles.input}
+            style={styles.field}
           />
+          <View style={styles.fieldDivider} />
           <TextInput
             value={email}
             onChangeText={setEmail}
@@ -84,54 +87,55 @@ export const RegistrationScreen: React.FC = () => {
             placeholderTextColor={Colors.textMuted}
             keyboardType="email-address"
             autoCapitalize="none"
-            style={styles.input}
+            style={styles.field}
           />
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Üyelik seçimi</Text>
+        {/* ── Membership rows ── */}
+        <View style={styles.planGroup}>
+          <Text style={styles.planGroupLabel}>ÜYELİK</Text>
           {PLAN_ORDER.map((planId) => {
             const plan = MEMBERSHIP_PLANS[planId];
             const selected = selectedPlan === planId;
             return (
               <TouchableOpacity
                 key={planId}
-                style={[styles.planCard, selected && styles.planCardSelected]}
+                style={styles.planRow}
                 onPress={() => setSelectedPlan(planId)}
-                activeOpacity={0.88}
+                activeOpacity={0.7}
               >
-                <View style={styles.planHeader}>
-                  <View>
-                    <Text style={styles.planTitle}>{plan.title}</Text>
-                    <Text style={styles.planSubtitle}>{plan.subtitle}</Text>
-                  </View>
-                  <Ionicons
-                    name={selected ? 'radio-button-on' : 'radio-button-off'}
-                    size={20}
-                    color={selected ? Colors.gold : Colors.textMuted}
-                  />
+                <View style={[styles.planDot, selected && styles.planDotActive]} />
+                <View style={styles.planInfo}>
+                  <Text style={[styles.planTitle, selected && styles.planTitleActive]}>
+                    {plan.title}
+                  </Text>
                 </View>
-                <Text style={styles.planPrice}>{plan.price}</Text>
-                <Text style={styles.planTrial}>{plan.trial}</Text>
+                <Text style={[styles.planPrice, selected && styles.planPriceActive]}>
+                  {plan.price}
+                </Text>
                 <TouchableOpacity
-                  style={styles.paymentButton}
+                  style={styles.payBtn}
                   onPress={() => openPaymentLink(planId)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 >
-                  <Ionicons name="card-outline" size={16} color={Colors.background} />
-                  <Text style={styles.paymentButtonText}>Öde</Text>
+                  <Text style={styles.payBtnText}>Öde</Text>
                 </TouchableOpacity>
               </TouchableOpacity>
             );
           })}
         </View>
 
+        {/* ── CTA ── */}
         <TouchableOpacity
-          style={[styles.startButton, !canStart && styles.startButtonDisabled]}
+          style={[styles.ctaBtn, !canStart && styles.ctaBtnDisabled]}
           onPress={handleStartTrial}
           disabled={!canStart}
+          activeOpacity={0.85}
         >
-          <Text style={styles.startButtonText}>Denemeyi başlat</Text>
+          <Text style={styles.ctaBtnText}>Denemeyi başlat</Text>
         </TouchableOpacity>
+
+        <Text style={styles.finePrint}>7 gün ücretsiz · kart bilgisi saklanmaz</Text>
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -143,115 +147,123 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.background,
   },
   header: {
-    paddingBottom: Spacing.xl,
+    paddingBottom: Spacing['2xl'],
     paddingHorizontal: Spacing.base,
-    gap: Spacing.sm,
+    gap: Spacing.md,
   },
   subtitle: {
     color: Colors.textSecondary,
-    fontSize: Typography.md,
+    fontSize: Typography.base,
     fontWeight: '300',
-    letterSpacing: 0.2,
-  },
-  trialTag: {
-    color: Colors.gold,
-    fontSize: Typography.xs,
-    textTransform: 'uppercase',
-    letterSpacing: 0.7,
+    letterSpacing: 0.5,
   },
   body: {
-    padding: Spacing.base,
+    paddingHorizontal: Spacing.base,
+    paddingTop: Spacing.lg,
     paddingBottom: Spacing['3xl'],
-    gap: Spacing.md,
+    gap: Spacing['2xl'],
   },
-  card: {
-    backgroundColor: Colors.surface,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: Radius.lg,
-    padding: Spacing.base,
-    gap: Spacing.md,
+  // ── Fields ────────────────────────────────────────────────────────────────
+  fieldGroup: {
+    gap: 0,
   },
-  cardTitle: {
+  field: {
     color: Colors.textPrimary,
-    fontSize: Typography.md,
-    fontWeight: '700',
+    fontSize: Typography.base,
+    paddingVertical: Spacing.base,
+    letterSpacing: 0.2,
   },
-  input: {
+  fieldDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: Colors.border,
+  },
+  // ── Plan rows ─────────────────────────────────────────────────────────────
+  planGroup: {
+    gap: 0,
+  },
+  planGroupLabel: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    fontWeight: '600',
+    letterSpacing: 1.5,
+    marginBottom: Spacing.md,
+  },
+  planRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: Colors.border,
+  },
+  planDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
     backgroundColor: Colors.surfaceElevated,
     borderWidth: 1,
     borderColor: Colors.borderLight,
-    borderRadius: Radius.md,
-    color: Colors.textPrimary,
-    paddingHorizontal: Spacing.base,
-    paddingVertical: Spacing.md,
-    fontSize: Typography.base,
   },
-  planCard: {
-    backgroundColor: Colors.surfaceElevated,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: Radius.lg,
-    padding: Spacing.md,
-    gap: Spacing.sm,
-  },
-  planCardSelected: {
+  planDotActive: {
+    backgroundColor: Colors.gold,
     borderColor: Colors.gold,
-    ...Shadow.gold,
   },
-  planHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  planInfo: {
+    flex: 1,
   },
   planTitle: {
-    color: Colors.textPrimary,
-    fontSize: Typography.base,
-    fontWeight: '700',
-  },
-  planSubtitle: {
     color: Colors.textSecondary,
-    fontSize: Typography.xs,
+    fontSize: Typography.base,
+    fontWeight: '400',
+  },
+  planTitleActive: {
+    color: Colors.textPrimary,
+    fontWeight: '500',
   },
   planPrice: {
-    color: Colors.gold,
-    fontWeight: '800',
-    fontSize: Typography.lg,
+    color: Colors.textMuted,
+    fontSize: Typography.sm,
+    fontWeight: '400',
   },
-  planTrial: {
+  planPriceActive: {
+    color: Colors.goldLight,
+    fontWeight: '500',
+  },
+  payBtn: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 5,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: Colors.borderLight,
+    borderRadius: Radius.sm,
+  },
+  payBtnText: {
     color: Colors.textSecondary,
     fontSize: Typography.xs,
+    fontWeight: '500',
+    letterSpacing: 0.5,
   },
-  paymentButton: {
-    marginTop: Spacing.xs,
-    backgroundColor: Colors.gold,
-    paddingVertical: Spacing.sm,
-    paddingHorizontal: Spacing.md,
-    borderRadius: Radius.full,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-  },
-  paymentButtonText: {
-    color: Colors.background,
-    fontWeight: '700',
-    fontSize: Typography.sm,
-  },
-  startButton: {
+  // ── CTA ───────────────────────────────────────────────────────────────────
+  ctaBtn: {
     backgroundColor: Colors.goldDark,
-    borderRadius: Radius.full,
-    paddingVertical: Spacing.base,
+    borderRadius: Radius.md,
+    paddingVertical: 14,
     alignItems: 'center',
-    marginTop: Spacing.sm,
   },
-  startButtonDisabled: {
-    opacity: 0.45,
+  ctaBtnDisabled: {
+    opacity: 0.38,
   },
-  startButtonText: {
+  ctaBtnText: {
     color: Colors.textPrimary,
     fontSize: Typography.base,
-    fontWeight: '800',
-    letterSpacing: 0.2,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+  },
+  finePrint: {
+    color: Colors.textMuted,
+    fontSize: Typography.xs,
+    textAlign: 'center',
+    letterSpacing: 0.5,
+    marginTop: -Spacing.base,
   },
 });
+
