@@ -9,7 +9,6 @@ import { Spacing } from '../theme';
 const WORDMARK_CREAM = '#EDE5D0';
 const HAT_GREEN  = '#0F9B5E';
 const HAT_BAND   = '#061510';   // very deep, near-black — crisp band detail
-const WORDMARK_DEPTH = 'rgba(0,0,0,0.42)';
 
 // ─── Hat ─────────────────────────────────────────────────────────────────────
 // Top-hat silhouette: slightly tilted, refined crown/brim balance, crisp band.
@@ -61,10 +60,11 @@ export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
   const hatScale  = size === 'lg' ? 1.24 : size === 'sm' ? 0.84 : 1.02;
 
   // 600SemiBold metric calibration for placing hat over trailing "a".
-  const hatSpacer = Math.round(fontSize * 1.54);
+  // Keep slight romantic overlap but avoid covering the terminal "a".
+  const hatSpacer = Math.round(fontSize * 1.62);
 
   return (
-    <View style={styles.wrap}>
+    <View style={[styles.wrap, size === 'sm' ? styles.wrapSm : size === 'lg' ? styles.wrapLg : styles.wrapMd]}>
       <View style={styles.hatRow}>
         <View style={{ width: hatSpacer }} />
         <HatIcon scale={hatScale} />
@@ -72,29 +72,12 @@ export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
       <View style={styles.wordmarkWrap}>
         <Text
           style={[
-            styles.wordmarkDepth,
-            {
-              fontSize,
-              fontFamily: fontsLoaded ? 'DancingScript_600SemiBold' : undefined,
-              fontStyle: fontsLoaded ? 'normal' : 'italic',
-              marginTop: Math.round(-(5 * hatScale)),
-              paddingLeft: size === 'lg' ? Spacing.xs : 0,
-            },
-          ]}
-          numberOfLines={1}
-          adjustsFontSizeToFit
-        >
-          Stylia
-        </Text>
-        <Text
-          style={[
             styles.wordmark,
             {
               fontSize,
               fontFamily: fontsLoaded ? 'DancingScript_600SemiBold' : undefined,
               fontStyle: fontsLoaded ? 'normal' : 'italic',
-              marginTop: Math.round(-(6 * hatScale)),
-              marginLeft: -0.5,
+              marginTop: Math.round(-(3 * hatScale)),
               paddingLeft: size === 'lg' ? Spacing.xs : 0,
             },
           ]}
@@ -112,25 +95,31 @@ const styles = StyleSheet.create({
   wrap: {
     alignSelf: 'flex-start',
     paddingTop: 2,
+    overflow: 'visible',
+  },
+  wrapSm: {
+    paddingRight: 10,
+  },
+  wrapMd: {
+    paddingRight: 14,
+  },
+  wrapLg: {
+    paddingRight: 18,
   },
   hatRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginBottom: -1,
+    marginBottom: 1,
   },
   wordmarkWrap: {
-    position: 'relative',
-  },
-  wordmarkDepth: {
-    position: 'absolute',
-    color: WORDMARK_DEPTH,
-    letterSpacing: 0.7,
-    fontWeight: '600',
-    transform: [{ translateX: 0.8 }, { translateY: 0.8 }],
+    overflow: 'visible',
   },
   wordmark: {
     color: WORDMARK_CREAM,
     letterSpacing: 0.7,
     fontWeight: '600',
+    textShadowColor: 'rgba(0,0,0,0.35)',
+    textShadowOffset: { width: 0.6, height: 0.6 },
+    textShadowRadius: 1.2,
   },
 });
