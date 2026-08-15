@@ -63,8 +63,8 @@ export const RegistrationScreen: React.FC = () => {
     >
       <LinearGradient colors={['#041514', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.xl }]}>
         <BrandMark size="lg" />
-        <Text style={styles.subtitle}>Kişisel stil kabininize hoş geldiniz</Text>
-        <Text style={styles.trialTag}>7 gün ücretsiz deneme • Kart bilgisi uygulamada saklanmaz</Text>
+        <Text style={styles.subtitle}>Kişisel stil kabininiz</Text>
+        <Text style={styles.trialTag}>7 gün ücretsiz · kart bilgisi saklanmaz</Text>
       </LinearGradient>
 
       <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
@@ -118,7 +118,7 @@ export const RegistrationScreen: React.FC = () => {
                   onPress={() => openPaymentLink(planId)}
                 >
                   <Ionicons name="card-outline" size={16} color={Colors.background} />
-                  <Text style={styles.paymentButtonText}>Stripe ile öde</Text>
+                  <Text style={styles.paymentButtonText}>Öde</Text>
                 </TouchableOpacity>
               </TouchableOpacity>
             );
@@ -130,7 +130,7 @@ export const RegistrationScreen: React.FC = () => {
           onPress={handleStartTrial}
           disabled={!canStart}
         >
-          <Text style={styles.startButtonText}>7 günlük denemeyi başlat</Text>
+          <Text style={styles.startButtonText}>Denemeyi başlat</Text>
         </TouchableOpacity>
       </ScrollView>
     </KeyboardAvoidingView>

@@ -72,7 +72,7 @@ export const WardrobeScreen: React.FC = () => {
         <Ionicons name="search" size={18} color={Colors.textMuted} />
         <TextInput
           style={styles.searchInput}
-          placeholder="Ürün, marka veya etiket ara..."
+          placeholder="Ara..."
           placeholderTextColor={Colors.textMuted}
           value={searchQuery}
           onChangeText={setSearchQuery}
@@ -93,7 +93,7 @@ export const WardrobeScreen: React.FC = () => {
           <Text style={styles.emptyEmoji}>🧺</Text>
           <Text style={styles.emptyTitle}>Parça bulunamadı</Text>
           <Text style={styles.emptySubtitle}>
-            {searchQuery ? 'Farklı bir arama deneyin' : 'İlk parçanızı ekleyin'}
+            {searchQuery ? 'Farklı arama dene' : 'İlk parçanı ekle'}
           </Text>
           <TouchableOpacity
             style={styles.emptyBtn}
@@ -140,7 +140,7 @@ export const WardrobeScreen: React.FC = () => {
                 )}
                 <View style={styles.listItemMeta}>
                   <Text style={styles.listItemCategory}>{trCategory(item.category)}</Text>
-                  <Text style={styles.listItemWorn}>{item.timesWorn} kez giyildi</Text>
+                  <Text style={styles.listItemWorn}>{item.timesWorn}×</Text>
                 </View>
                 <View style={styles.listItemTags}>
                   {item.tags.slice(0, 3).map((tag) => (

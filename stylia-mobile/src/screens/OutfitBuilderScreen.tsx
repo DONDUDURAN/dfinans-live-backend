@@ -70,7 +70,6 @@ export const OutfitBuilderScreen: React.FC = () => {
       <View style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <View>
           <Text style={styles.title}>Stil Kur</Text>
-          <Text style={styles.subtitle}>Parçaları seç, sanal denemeye hazırla</Text>
         </View>
         {builderItems.length > 0 && (
           <View style={styles.headerActions}>
@@ -93,7 +92,7 @@ export const OutfitBuilderScreen: React.FC = () => {
         {builderItems.length === 0 ? (
           <View style={styles.canvasEmpty}>
             <Text style={styles.canvasEmptyEmoji}>✦</Text>
-            <Text style={styles.canvasEmptyText}>Aşağıdan parçaları seçerek sanal deneme setini oluştur</Text>
+            <Text style={styles.canvasEmptyText}>Parça seçerek başla</Text>
           </View>
         ) : (
           <ScrollView
@@ -177,7 +176,7 @@ export const OutfitBuilderScreen: React.FC = () => {
       {/* Items to pick from */}
       {categoryItems.length === 0 ? (
         <View style={styles.noItems}>
-          <Text style={styles.noItemsText}>Gardırobunda henüz {trCategory(activeCategory)} yok</Text>
+          <Text style={styles.noItemsText}>{trCategory(activeCategory)} yok</Text>
         </View>
       ) : (
         <FlatList

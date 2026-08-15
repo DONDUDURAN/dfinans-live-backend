@@ -73,7 +73,7 @@ export const ProfileScreen: React.FC = () => {
     });
     if (!result.canceled) {
       setVideoNoteUri(result.assets[0].uri);
-      Alert.alert('Video notu eklendi', 'Stil danışmanı bu videoyu referans alacak.');
+      Alert.alert('Video notu eklendi');
     }
   };
 
@@ -125,7 +125,7 @@ export const ProfileScreen: React.FC = () => {
                 <Text style={styles.planHint}>{plan.trial}</Text>
                 <TouchableOpacity style={styles.paymentButton} onPress={() => openPlanPayment(planId)}>
                   <Ionicons name="card-outline" size={16} color={Colors.background} />
-                  <Text style={styles.paymentButtonText}>Stripe Payment Link ile öde</Text>
+                  <Text style={styles.paymentButtonText}>Öde</Text>
                 </TouchableOpacity>
               </View>
             );
@@ -150,11 +150,9 @@ export const ProfileScreen: React.FC = () => {
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Video notu akışı</Text>
+        <Text style={styles.sectionTitle}>Video notu</Text>
         <View style={styles.videoCard}>
-          <Text style={styles.videoText}>
-            Stil danışmanı için 20-45 saniyelik kısa bir ayna videosu kaydet.
-          </Text>
+          <Text style={styles.videoText}>20–45 sn ayna videosu</Text>
           <Text style={styles.videoStatus}>
             {videoNoteUri ? 'Video notu mevcut' : 'Henüz video notu yok'}
           </Text>

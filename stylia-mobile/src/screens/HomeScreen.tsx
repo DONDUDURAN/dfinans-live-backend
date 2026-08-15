@@ -96,7 +96,6 @@ export const HomeScreen: React.FC = () => {
             </View>
             <View style={styles.kabinText}>
               <Text style={styles.kabinTitle}>Sanal ikizinde dene</Text>
-              <Text style={styles.kabinDesc}>Kıyafeti bedenine ölçülü olarak yansıt.</Text>
             </View>
             <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
           </TouchableOpacity>
@@ -106,8 +105,7 @@ export const HomeScreen: React.FC = () => {
               <Ionicons name="camera-outline" size={20} color={Colors.info} />
             </View>
             <View style={styles.kabinText}>
-              <Text style={styles.kabinTitle}>Kamera ile yeni parça ekle</Text>
-              <Text style={styles.kabinDesc}>Anında çek, etiketle, gardıroba işle.</Text>
+              <Text style={styles.kabinTitle}>Parça ekle</Text>
             </View>
             <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
           </TouchableOpacity>
@@ -117,8 +115,7 @@ export const HomeScreen: React.FC = () => {
               <Ionicons name="person-outline" size={20} color={Colors.success} />
             </View>
             <View style={styles.kabinText}>
-              <Text style={styles.kabinTitle}>Sanal ikizi güncelle</Text>
-              <Text style={styles.kabinDesc}>Ölçü ve video notu ile ikizin doğruluğunu artır.</Text>
+              <Text style={styles.kabinTitle}>İkizi güncelle</Text>
             </View>
             <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
           </TouchableOpacity>

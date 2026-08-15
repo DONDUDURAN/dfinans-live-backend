@@ -107,14 +107,13 @@ export const AIStyleScreen: React.FC = () => {
           <Text style={styles.headerBadgeText}>SANAL İKİZ KABİNİ</Text>
         </View>
         <Text style={styles.title}>Kabin</Text>
-        <Text style={styles.subtitle}>İkizin üzerinde kıyafetleri gerçek zamanlı dene — aldatma payı yok.</Text>
       </LinearGradient>
 
       {/* ADIM 1 — Sanal İkiz */}
       <View style={styles.section}>
         <View style={styles.stepRow}>
           <View style={styles.stepNum}><Text style={styles.stepNumText}>1</Text></View>
-          <Text style={styles.stepTitle}>Sanal İkizini Oluştur / Güncelle</Text>
+          <Text style={styles.stepTitle}>İkiz Durumu</Text>
         </View>
         <View style={[styles.stepCard, Shadow.sm]}>
           <View style={styles.twinStatusRow}>
@@ -145,7 +144,7 @@ export const AIStyleScreen: React.FC = () => {
           </View>
           <TouchableOpacity style={styles.twinUpdateBtn} onPress={() => navigation.navigate('Profile')}>
             <Ionicons name="person-outline" size={14} color={Colors.gold} />
-            <Text style={styles.twinUpdateText}>Profil'den güncelle</Text>
+            <Text style={styles.twinUpdateText}>Profili güncelle</Text>
             <Ionicons name="arrow-forward" size={12} color={Colors.gold} />
           </TouchableOpacity>
         </View>
@@ -155,13 +154,13 @@ export const AIStyleScreen: React.FC = () => {
       <View style={styles.section}>
         <View style={styles.stepRow}>
           <View style={styles.stepNum}><Text style={styles.stepNumText}>2</Text></View>
-          <Text style={styles.stepTitle}>Kıyafet Yükle / Link Ekle</Text>
+          <Text style={styles.stepTitle}>Kıyafet / Link</Text>
         </View>
         <View style={styles.kabinStack}>
           <View style={[styles.kabinAction, Shadow.sm]}>
             <View style={styles.kabinActionHeader}>
               <Ionicons name="link-outline" size={18} color={Colors.gold} />
-              <Text style={styles.kabinActionTitle}>Ürün linki ekle</Text>
+              <Text style={styles.kabinActionTitle}>Ürün linki</Text>
             </View>
             <TextInput
               value={linkInput}
@@ -172,18 +171,18 @@ export const AIStyleScreen: React.FC = () => {
               style={styles.linkInput}
             />
             <TouchableOpacity style={styles.inlineButton} onPress={handleSaveLink}>
-              <Text style={styles.inlineButtonText}>Linki kaydet</Text>
+              <Text style={styles.inlineButtonText}>Kaydet</Text>
             </TouchableOpacity>
           </View>
 
           <View style={[styles.kabinAction, Shadow.sm]}>
             <View style={styles.kabinActionHeader}>
               <Ionicons name="camera-outline" size={18} color={Colors.gold} />
-              <Text style={styles.kabinActionTitle}>Kamera ile kabin görseli çek</Text>
+              <Text style={styles.kabinActionTitle}>Kabin görseli</Text>
             </View>
             {cameraUri
               ? <Image source={{ uri: cameraUri }} style={styles.cameraPreview} />
-              : <Text style={styles.emptyNote}>İkiz referansı için ayna fotoğrafı çek.</Text>}
+              : null}
             <TouchableOpacity style={styles.inlineButton} onPress={handleShoot}>
               <Text style={styles.inlineButtonText}>{cameraUri ? 'Yenile' : 'Kamera aç'}</Text>
             </TouchableOpacity>
@@ -243,23 +242,16 @@ export const AIStyleScreen: React.FC = () => {
 
       <TouchableOpacity style={[styles.generateBtn, Shadow.gold, isGenerating && styles.generateBtnDisabled]} onPress={handleGenerate} disabled={isGenerating} activeOpacity={0.85}>
         <LinearGradient colors={[Colors.goldLight, Colors.gold, Colors.goldDark]} style={StyleSheet.absoluteFill} />
-        {isGenerating ? (
-          <>
-            <ActivityIndicator size="small" color={Colors.background} />
-            <Text style={styles.generateBtnText}>İkiz analiz ediliyor...</Text>
-          </>
-        ) : (
-          <>
-            <Ionicons name="body-outline" size={18} color={Colors.background} />
-            <Text style={styles.generateBtnText}>Kabinde Dene</Text>
-          </>
-        )}
+        {isGenerating
+          ? <ActivityIndicator size="small" color={Colors.background} />
+          : <Ionicons name="body-outline" size={18} color={Colors.background} />}
+        <Text style={styles.generateBtnText}>{isGenerating ? 'Analiz ediliyor...' : 'Kabinde Dene'}</Text>
       </TouchableOpacity>
 
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>
-            {isGenerating ? 'İkiz hazırlanıyor...' : `İkizin ${suggestions.length} görünümü`}
+            {isGenerating ? 'Analiz ediliyor...' : `${suggestions.length} görünüm`}
           </Text>
         </View>
         {isGenerating ? (
@@ -275,7 +267,7 @@ export const AIStyleScreen: React.FC = () => {
                 {idx === 0 && (
                   <View style={styles.topPickBadge}>
                     <Ionicons name="trophy" size={12} color={Colors.gold} />
-                    <Text style={styles.topPickText}>İkizine en çok yakışan</Text>
+                    <Text style={styles.topPickText}>En yakışan</Text>
                   </View>
                 )}
                 <StyleSuggestionCard suggestion={s} />

@@ -174,10 +174,9 @@ export const AddItemScreen: React.FC = () => {
         {step === 1 && (
           <View style={styles.stepContent}>
             <Text style={styles.stepTitle}>Kaynak seçimi</Text>
-            <Text style={styles.stepSubtitle}>Ürünü kamera, galeri veya ürün linki ile ekleyin.</Text>
 
             <View style={styles.formGroup}>
-              <Text style={styles.label}>Ürün bağlantısı (opsiyonel)</Text>
+              <Text style={styles.label}>Ürün linki</Text>
               <TextInput
                 value={productLink}
                 onChangeText={setLocalProductLink}
@@ -197,7 +196,7 @@ export const AddItemScreen: React.FC = () => {
               ) : (
                 <View style={styles.photoPlaceholder}>
                   <Ionicons name="image-outline" size={48} color={Colors.textMuted} />
-                  <Text style={styles.photoPlaceholderText}>Görsel seçmek için dokunun</Text>
+                  <Text style={styles.photoPlaceholderText}>Görsel ekle</Text>
                 </View>
               )}
             </TouchableOpacity>
@@ -218,10 +217,9 @@ export const AddItemScreen: React.FC = () => {
         {step === 2 && (
           <View style={styles.stepContent}>
             <Text style={styles.stepTitle}>Ürün bilgileri</Text>
-            <Text style={styles.stepSubtitle}>Ürünün adını ve kategorisini belirleyin.</Text>
 
             <View style={styles.formGroup}>
-              <Text style={styles.label}>Ürün adı *</Text>
+              <Text style={styles.label}>İsim</Text>
               <TextInput
                 value={name}
                 onChangeText={setName}
@@ -232,7 +230,7 @@ export const AddItemScreen: React.FC = () => {
             </View>
 
             <View style={styles.formGroup}>
-              <Text style={styles.label}>Marka (opsiyonel)</Text>
+              <Text style={styles.label}>Marka</Text>
               <TextInput
                 value={brand}
                 onChangeText={setBrand}
@@ -243,7 +241,7 @@ export const AddItemScreen: React.FC = () => {
             </View>
 
             <View style={styles.formGroup}>
-              <Text style={styles.label}>Kategori *</Text>
+              <Text style={styles.label}>Kategori</Text>
               <View style={styles.optionGrid}>
                 {CATEGORIES.map((cat) => (
                   <TouchableOpacity key={cat} style={[styles.option, category === cat && styles.optionActive]} onPress={() => setCategory(cat)}>
@@ -258,10 +256,9 @@ export const AddItemScreen: React.FC = () => {
         {step === 3 && (
           <View style={styles.stepContent}>
             <Text style={styles.stepTitle}>Renk ve sezon</Text>
-            <Text style={styles.stepSubtitle}>Bu parçayı hangi dönemde kullanıyorsunuz?</Text>
 
             <View style={styles.formGroup}>
-              <Text style={styles.label}>Ana renk *</Text>
+              <Text style={styles.label}>Renk</Text>
               <View style={styles.colorGrid}>
                 {COLORS.map((c) => (
                   <TouchableOpacity
@@ -282,7 +279,7 @@ export const AddItemScreen: React.FC = () => {
             </View>
 
             <View style={styles.formGroup}>
-              <Text style={styles.label}>Sezon *</Text>
+              <Text style={styles.label}>Sezon</Text>
               <View style={styles.optionRow}>
                 {SEASONS.map((s) => (
                   <TouchableOpacity key={s} style={[styles.option, seasons.includes(s) && styles.optionActive]} onPress={() => toggleSeason(s)}>
@@ -297,7 +294,6 @@ export const AddItemScreen: React.FC = () => {
         {step === 4 && (
           <View style={styles.stepContent}>
             <Text style={styles.stepTitle}>Kullanım alanı</Text>
-            <Text style={styles.stepSubtitle}>Bu parçayı en çok hangi durumlarda giyiyorsunuz?</Text>
 
             <View style={styles.optionGrid}>
               {OCCASIONS.map((occ) => (
