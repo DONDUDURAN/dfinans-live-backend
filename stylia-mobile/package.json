@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "App.tsx",
   "scripts": {
-    "start": "expo start",
+    "start": "npx expo start --clear",
     "start:lan": "npx expo start --clear --lan",
     "start:tunnel": "npx expo start --clear --tunnel",
     "android": "expo start --android",
