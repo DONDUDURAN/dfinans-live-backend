@@ -4,10 +4,23 @@
   "main": "App.tsx",
   "scripts": {
     "start": "expo start",
+    "start:local": "npx expo start --localhost",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "eslint . --ext .ts,.tsx"
+    "lint": "eslint . --ext .ts,.tsx",
+    "build:dev:ios": "eas build --profile development --platform ios",
+    "build:dev:android": "eas build --profile development --platform android",
+    "build:adhoc:ios": "eas build --profile adhoc --platform ios",
+    "build:apk:android": "eas build --profile preview --platform android",
+    "build:prod:ios": "eas build --profile production --platform ios",
+    "build:prod:android": "eas build --profile production --platform android",
+    "build:prod:all": "eas build --profile production --platform all",
+    "submit:ios": "eas submit --platform ios",
+    "submit:android": "eas submit --platform android",
+    "update": "eas update --auto",
+    "update:preview": "eas update --branch preview",
+    "update:production": "eas update --branch production"
   },
   "dependencies": {
     "expo": "~51.0.0",
@@ -16,6 +29,7 @@
     "expo-linear-gradient": "~13.0.2",
     "expo-blur": "~13.0.2",
     "expo-haptics": "~13.0.1",
+    "expo-updates": "~0.25.20",
     "react": "18.2.0",
     "react-native": "0.74.2",
     "@react-navigation/native": "^6.1.17",

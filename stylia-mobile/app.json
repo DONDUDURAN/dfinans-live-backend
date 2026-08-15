@@ -3,21 +3,38 @@
     "name": "STYLIA",
     "slug": "stylia-mobile",
     "version": "1.0.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "splash": {
-      "backgroundColor": "#0D0D0D"
+      "backgroundColor": "#0D0D0D",
+      "resizeMode": "contain"
     },
+    "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.stylia.app"
+      "bundleIdentifier": "com.stylia.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Allow STYLIA to access your photos to add items to your wardrobe.",
+        "NSCameraUsageDescription": "Allow STYLIA to use your camera to photograph your clothing.",
+        "NSPhotoLibraryAddUsageDescription": "Allow STYLIA to save outfit photos to your library."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#0D0D0D"
       },
-      "package": "com.stylia.app"
+      "package": "com.stylia.app",
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
     },
     "web": {
       "favicon": "./assets/images/favicon.png"
@@ -30,6 +47,17 @@
           "cameraPermission": "Allow STYLIA to use your camera to photograph your clothing."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "YOUR_EAS_PROJECT_ID"
+      }
+    },
+    "updates": {
+      "url": "https://u.expo.dev/YOUR_EAS_PROJECT_ID",
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    }
   }
 }
