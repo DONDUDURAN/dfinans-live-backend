@@ -57,18 +57,19 @@ export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
   const [fontsLoaded] = useFonts({ DancingScript_600SemiBold });
 
   const fontSize  = size === 'lg' ? 56 : size === 'sm' ? 36 : 48;
-  const hatScale  = size === 'lg' ? 1.0 : size === 'sm' ? 0.66 : 0.82;
-
-  // Place symbol at the "i" dot position in "Stylia" while preserving full readability.
-  const hatSpacer = Math.round(fontSize * 1.28);
+  const hatScale  = size === 'lg' ? 0.56 : size === 'sm' ? 0.38 : 0.48;
+  const joinShift = size === 'lg' ? -3 : size === 'sm' ? -2 : -2.5;
+  const iStemWidth = Math.round(fontSize * 0.18);
+  const hatTop = -Math.round(fontSize * 0.52);
 
   return (
     <View style={[styles.wrap, size === 'sm' ? styles.wrapSm : size === 'lg' ? styles.wrapLg : styles.wrapMd]}>
-      <View style={styles.hatRow}>
-        <View style={{ width: hatSpacer }} />
-        <HatIcon scale={hatScale} />
-      </View>
-      <View style={styles.wordmarkWrap}>
+      <View
+        style={[
+          styles.wordRow,
+          { paddingLeft: size === 'lg' ? Spacing.xs : 0 },
+        ]}
+      >
         <Text
           style={[
             styles.wordmark,
@@ -76,14 +77,47 @@ export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
               fontSize,
               fontFamily: fontsLoaded ? 'DancingScript_600SemiBold' : undefined,
               fontStyle: fontsLoaded ? 'normal' : 'italic',
-              marginTop: Math.round(-(2 * hatScale)),
-              paddingLeft: size === 'lg' ? Spacing.xs : 0,
             },
           ]}
           numberOfLines={1}
           adjustsFontSizeToFit
         >
-          Stylia
+          Styl
+        </Text>
+
+        {/* Dotless ı removes the default dot; mini hat becomes the i-dot symbol */}
+        <View style={[styles.iStemWrap, { width: iStemWidth, marginLeft: joinShift, marginRight: joinShift }]}>
+          <Text
+            style={[
+              styles.wordmark,
+              styles.iStem,
+              {
+                fontSize,
+                fontFamily: fontsLoaded ? 'DancingScript_600SemiBold' : undefined,
+                fontStyle: fontsLoaded ? 'normal' : 'italic',
+              },
+            ]}
+          >
+            ı
+          </Text>
+          <View style={[styles.iDotSymbol, { top: hatTop }]}>
+            <HatIcon scale={hatScale} />
+          </View>
+        </View>
+
+        <Text
+          style={[
+            styles.wordmark,
+            {
+              fontSize,
+              fontFamily: fontsLoaded ? 'DancingScript_600SemiBold' : undefined,
+              fontStyle: fontsLoaded ? 'normal' : 'italic',
+            },
+          ]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+        >
+          a
         </Text>
       </View>
     </View>
@@ -105,17 +139,29 @@ const styles = StyleSheet.create({
   wrapLg: {
     paddingRight: 12,
   },
-  hatRow: {
+  wordRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginBottom: 0,
-  },
-  wordmarkWrap: {
     overflow: 'visible',
+  },
+  iStemWrap: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    overflow: 'visible',
+  },
+  iStem: {
+    textAlign: 'center',
+  },
+  iDotSymbol: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
   },
   wordmark: {
     color: WORDMARK_CREAM,
-    letterSpacing: 0.7,
+    letterSpacing: 0.4,
     fontWeight: '600',
     textShadowColor: 'rgba(0,0,0,0.35)',
     textShadowOffset: { width: 0.6, height: 0.6 },
