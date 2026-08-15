@@ -13,7 +13,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useWardrobeStore } from '../store/wardrobeStore';
 import { useStyleStore } from '../store/styleStore';
-import { useUserStore } from '../store/userStore';
 import { StyleSuggestionCard } from '../components/StyleSuggestionCard';
 import { OutfitCard } from '../components/OutfitCard';
 import { BrandMark } from '../components/BrandMark';
@@ -28,7 +27,6 @@ export const HomeScreen: React.FC = () => {
   const items = useWardrobeStore((s) => s.items);
   const outfits = useWardrobeStore((s) => s.outfits);
   const suggestions = useStyleStore((s) => s.suggestions);
-  const fullName = useUserStore((s) => s.fullName);
 
   const topSuggestion = suggestions[0];
 
@@ -42,7 +40,7 @@ export const HomeScreen: React.FC = () => {
     <ScrollView style={styles.container} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <LinearGradient colors={['#050D08', Colors.background]} style={[styles.header, { paddingTop: insets.top + Spacing.base }]}>
         <BrandMark size="md" />
-        {fullName ? <Text style={styles.greeting}>{fullName.split(' ')[0]}</Text> : null}
+        <Text style={styles.greeting}>Kabin</Text>
       </LinearGradient>
 
       <View style={styles.statsRow}>

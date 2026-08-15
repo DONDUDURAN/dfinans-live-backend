@@ -2,26 +2,27 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import {
   useFonts,
-  DancingScript_700Bold,
+  DancingScript_600SemiBold,
 } from '@expo-google-fonts/dancing-script';
 import { Spacing } from '../theme';
 
 const WORDMARK_CREAM = '#EDE5D0';
 const HAT_GREEN  = '#0F9B5E';
 const HAT_BAND   = '#061510';   // very deep, near-black — crisp band detail
+const WORDMARK_DEPTH = 'rgba(0,0,0,0.42)';
 
 // ─── Hat ─────────────────────────────────────────────────────────────────────
-// Top-hat silhouette: narrower crown, wider brim, prominent band.
+// Top-hat silhouette: slightly tilted, refined crown/brim balance, crisp band.
 function HatIcon({ scale = 1 }: { scale?: number }) {
-  const crownW  = Math.round(13 * scale);
-  const crownH  = Math.round(11 * scale);
-  const brimW   = Math.round(22 * scale);
-  const brimH   = Math.round(2.5 * scale);
-  const bandH   = Math.round(3 * scale);
+  const crownW  = Math.round(12.5 * scale);
+  const crownH  = Math.round(10.5 * scale);
+  const brimW   = Math.round(24 * scale);
+  const brimH   = Math.round(2.6 * scale);
+  const bandH   = Math.round(2.8 * scale);
   const topR    = Math.round(4 * scale);
 
   return (
-    <View style={{ alignItems: 'center' }}>
+    <View style={{ alignItems: 'center', transform: [{ rotate: '-8deg' }] }}>
       {/* Crown with band inset at bottom */}
       <View style={{
         width: crownW,
@@ -40,8 +41,9 @@ function HatIcon({ scale = 1 }: { scale?: number }) {
       <View style={{
         width: brimW,
         height: brimH,
-        borderRadius: 1,
+        borderRadius: 2,
         backgroundColor: HAT_GREEN,
+        marginTop: -0.5,
       }} />
     </View>
   );
@@ -53,15 +55,13 @@ interface BrandMarkProps {
 }
 
 export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
-  const [fontsLoaded] = useFonts({ DancingScript_700Bold });
+  const [fontsLoaded] = useFonts({ DancingScript_600SemiBold });
 
-  const fontSize  = size === 'lg' ? 54 : size === 'sm' ? 36 : 46;
-  const hatScale  = size === 'lg' ? 1.25 : size === 'sm' ? 0.85 : 1.05;
+  const fontSize  = size === 'lg' ? 56 : size === 'sm' ? 36 : 48;
+  const hatScale  = size === 'lg' ? 1.24 : size === 'sm' ? 0.84 : 1.02;
 
-  // 700Bold is wider than 400Regular; re-calibrate spacer for 'a' position.
-  // S≈0.42 t≈0.28 y≈0.37 l≈0.25 i≈0.16 → ~1.48 × fontSize to reach start of 'a'
-  // Centre of 'a' ≈ 1.48 + 0.18 = 1.66; aim for romantic overlap, pull back a touch.
-  const hatSpacer = Math.round(fontSize * 1.52);
+  // 600SemiBold metric calibration for placing hat over trailing "a".
+  const hatSpacer = Math.round(fontSize * 1.54);
 
   return (
     <View style={styles.wrap}>
@@ -69,33 +69,68 @@ export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
         <View style={{ width: hatSpacer }} />
         <HatIcon scale={hatScale} />
       </View>
-      <Text
-        style={[
-          styles.wordmark,
-          {
-            fontSize,
-            fontFamily: fontsLoaded ? 'DancingScript_700Bold' : undefined,
-            fontStyle: fontsLoaded ? 'normal' : 'italic',
-            marginTop: Math.round(-(6 * hatScale)),
-            paddingLeft: size === 'lg' ? Spacing.xs : 0,
-          },
-        ]}
-        numberOfLines={1}
-        adjustsFontSizeToFit
-      >
-        Stylia
-      </Text>
+      <View style={styles.wordmarkWrap}>
+        <Text
+          style={[
+            styles.wordmarkDepth,
+            {
+              fontSize,
+              fontFamily: fontsLoaded ? 'DancingScript_600SemiBold' : undefined,
+              fontStyle: fontsLoaded ? 'normal' : 'italic',
+              marginTop: Math.round(-(5 * hatScale)),
+              paddingLeft: size === 'lg' ? Spacing.xs : 0,
+            },
+          ]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+        >
+          Stylia
+        </Text>
+        <Text
+          style={[
+            styles.wordmark,
+            {
+              fontSize,
+              fontFamily: fontsLoaded ? 'DancingScript_600SemiBold' : undefined,
+              fontStyle: fontsLoaded ? 'normal' : 'italic',
+              marginTop: Math.round(-(6 * hatScale)),
+              marginLeft: -0.5,
+              paddingLeft: size === 'lg' ? Spacing.xs : 0,
+            },
+          ]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+        >
+          Stylia
+        </Text>
+      </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  wrap: { alignSelf: 'flex-start' },
-  hatRow: { flexDirection: 'row', alignItems: 'flex-end' },
+  wrap: {
+    alignSelf: 'flex-start',
+    paddingTop: 2,
+  },
+  hatRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginBottom: -1,
+  },
+  wordmarkWrap: {
+    position: 'relative',
+  },
+  wordmarkDepth: {
+    position: 'absolute',
+    color: WORDMARK_DEPTH,
+    letterSpacing: 0.7,
+    fontWeight: '600',
+    transform: [{ translateX: 0.8 }, { translateY: 0.8 }],
+  },
   wordmark: {
     color: WORDMARK_CREAM,
-    letterSpacing: 1,
-    fontWeight: '700',
+    letterSpacing: 0.7,
+    fontWeight: '600',
   },
 });
-
