@@ -9860,7 +9860,7 @@ def _auto_trader_run_symbol(
                     # LSE/SEHK gibi yabanci borsalarda DEGIL, kullanicinin talebiyle - ve
                     # SADECE normal seans saatleri icindeyken, 1 tam hisseye yetecek kadar
                     # fon olmadiginda kesirli (ör. %20-%30 hisse) emir gonderilebilir.
-                    ibkr_fractional_order = (asset_type in ("CRYPTO", "FOREX") and action == "SELL")
+                    ibkr_fractional_order = (asset_type == "CRYPTO" and action == "SELL")
                     # GUNCELLEME (canli kanit): 'RTH icindeyken SMART hisselerde kesirli
                     # emir calisir' teorisi YANLIS cikti - USO'da normal seans saatleri
                     # icinde bile saatlerce tekrar tekrar Error 10243 (Fractional-sized
@@ -9868,9 +9868,16 @@ def _auto_trader_run_symbol(
                     # acilmadi (kullanicinin 'USO kapanmıyor sanki, günlükte kâr gözüküyor
                     # ama portföyde yok' sikayeti buradan kaynaklaniyordu - aslinda hic
                     # ACILMAMISTI). Bu hesap/API konfigurasyonu STK icin kesirli emri HICBIR
-                    # kosulda desteklemiyor; sadece CRYPTO/FOREX'te (IBKR PAXOS/IDEALPRO)
-                    # native kesirli destegi kanitlandigi icin onlar korunuyor.
-                    ibkr_allow_fractional_here = asset_type in ("CRYPTO", "FOREX")
+                    # kosulda desteklemiyor; sadece CRYPTO'da (IBKR PAXOS) native kesirli
+                    # destegi kanitlandigi icin o korunuyor.
+                    # GUNCELLEME 2 (kullanicinin 'hala işlem açılmadı' teshisi, canli kanit):
+                    # FOREX'in de kesirli miktari native destekledigi varsayimi YANLIS
+                    # cikti - canli loglarda GBPUSD/NZDUSD/EURUSD BUY emirlerinde tekrar
+                    # tekrar "Error 10318: This order doesn't support fractional quantity
+                    # trading" alindi (ör. qty=547.8256), emir her seferinde Cancelled ile
+                    # reddedildi. FOREX artik CRYPTO gibi degil, STK gibi ele alinir -
+                    # miktar HER ZAMAN tam sayiya (butun birim, ör. 547 GBP) yuvarlanir.
+                    ibkr_allow_fractional_here = asset_type == "CRYPTO"
                     # KULLANICININ TALEBI (bugun NVDA %3 yukselirken kacirildi -
                     # 'yetersiz alim gucu' hatasi): STK'de 1 tam hisseye yetecek
                     # fon olmadiginda, miktar-bazli kesirli emir yerine (Error
