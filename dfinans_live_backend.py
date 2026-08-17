@@ -4358,9 +4358,35 @@ def ibkr_place_market_order(
             if limit_price_hint and limit_price_hint > 0 and not is_fractional_qty:
                 buffer_pct = IBKR_MARKETABLE_LIMIT_BUFFER_PCT / 100.0
                 if order_side == "BUY":
-                    limit_price = round(limit_price_hint * (1 + buffer_pct), 4)
+                    raw_limit_price = limit_price_hint * (1 + buffer_pct)
                 else:
-                    limit_price = round(limit_price_hint * (1 - buffer_pct), 4)
+                    raw_limit_price = limit_price_hint * (1 - buffer_pct)
+                # KULLANICININ TALEBI ('ai karar merkezinde nvda emir iletildi
+                # diyor ama işlem açılmadı' teshisinin GERCEK kok nedeni):
+                # yeni eklenen errorEvent yakalamasi sayesinde canli olarak
+                # "IBKR Error 110: The price does not conform to the minimum
+                # price variation for this contract." goruldu - fiyat her
+                # zaman 4 ondalik basamaga yuvarlaniyordu (ör. 226.8084) ama
+                # IBKR hisse senetleri icin $1 uzerinde 0.01 (2 ondalik),
+                # forex icin 0.00005 (5 ondalik) gibi enstrumana ozgu minimum
+                # fiyat adimlari (tick size) zorunlu kılıyor - uymayan emir
+                # SESSIZCE PendingSubmit'te asili kalıyor, hicbir zaman
+                # dolmuyordu. Artik varlik turu ve fiyat seviyesine gore
+                # doğru tick size'a yuvarlaniyor.
+                _at_upper = str(asset_type or "").upper()
+                if _at_upper in ("FOREX", "FX", "CASH"):
+                    tick_size, decimals = 0.00005, 5
+                elif _at_upper == "CRYPTO":
+                    tick_size, decimals = 0.01, 2
+                elif raw_limit_price < 1.0:
+                    tick_size, decimals = 0.0001, 4
+                else:
+                    tick_size, decimals = 0.01, 2
+                if order_side == "BUY":
+                    limit_price = math.ceil(raw_limit_price / tick_size) * tick_size
+                else:
+                    limit_price = math.floor(raw_limit_price / tick_size) * tick_size
+                limit_price = round(limit_price, decimals)
                 order = ibs.LimitOrder(order_side, order_quantity, limit_price)
                 order.tif = "DAY"
                 order.outsideRth = True
