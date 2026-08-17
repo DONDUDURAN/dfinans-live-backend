@@ -4415,8 +4415,7 @@ def ibkr_place_market_order(
 
         def _on_ib_error(reqId, errorCode, errorString, contract):
             try:
-                if reqId in (getattr(trade.order, "orderId", None), 0, -1):
-                    _ib_order_errors.append({"code": errorCode, "msg": str(errorString)})
+                _ib_order_errors.append({"code": errorCode, "msg": str(errorString), "reqId": reqId})
             except Exception:
                 pass
 
@@ -4433,6 +4432,7 @@ def ibkr_place_market_order(
         trade = ib.placeOrder(qualified[0], order)
         ib.errorEvent += _on_ib_error
         trade.statusEvent += _on_status
+        _on_status(trade)
         try:
             for _ in range(40):
                 status = str(getattr(trade.orderStatus, "status", ""))
@@ -4452,7 +4452,7 @@ def ibkr_place_market_order(
         except Exception:
             pass
         for _err in _ib_order_errors:
-            log_messages.append(f"IBKR Error {_err['code']}: {_err['msg']}")
+            log_messages.append(f"IBKR Error {_err['code']} (reqId={_err.get('reqId')}): {_err['msg']}")
         for _st in _ib_status_transitions:
             log_messages.append(f"transition: {_st}")
 
