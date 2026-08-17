@@ -10307,6 +10307,57 @@ def _auto_trader_run_symbol(
                                 qty = 0
                                 ibkr_cash_qty_amount = None
                     if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
+                        # KULLANICININ TALEBI ('ai karar merkezinde nvda emir iletildi
+                        # diyor ama işlem açılmadı'): piyasa kapaliyken (ör. hafta
+                        # sonu) her karar dongusunde (30sn'de bir) AYNI sembol icin
+                        # YENI bir emir gonderiliyordu - onceki emir henuz IBKR'de
+                        # PendingSubmit/Submitted olarak beklerken (hicbir zaman
+                        # iptal edilmeden) - bu, ayni yonde onlarca YIGILMIS acik
+                        # emir olusturuyordu. Piyasa acilinca (Pazartesi NYSE)
+                        # bunlarin BIRDEN FAZLASI ayni anda dolabilir ve istenenin
+                        # kat kat fazlasi miktar/pozisyon acilmasina yol acabilirdi
+                        # (canli hesapta gercek risk). Artik ayni sembol+yon icin
+                        # zaten acik (Done olmayan) bir emir varsa YENI emir
+                        # gonderilmeden atlanir.
+                        _existing_open_order = None
+                        try:
+                            _target_symbol_norm = normalize_symbol(symbol).upper()
+                            for _oo in ibkr_open_orders_snapshot():
+                                # Forex kontratlarinda ib_insync 'symbol' alani SADECE
+                                # baz para birimini dondurur (ör. EURUSD icin 'EUR'),
+                                # cift karsilastirmasi hatali eslesmeye yol acmasin diye
+                                # forex icin sembol+para birimi birlestirilir.
+                                _oo_symbol = str(_oo.get("symbol", "")).upper()
+                                if str(_oo.get("exchange", "")).upper() == "IDEALPRO":
+                                    _oo_symbol = (_oo_symbol + str(_oo.get("currency", "")).upper())
+                                if (
+                                    _oo_symbol == _target_symbol_norm
+                                    and str(_oo.get("side", "")).upper() == action
+                                    and str(_oo.get("status", "")).upper() not in ("FILLED", "CANCELLED", "INACTIVE", "APICANCELLED")
+                                    and safe_float(_oo.get("filled", 0)) < safe_float(_oo.get("amount", 0))
+                                ):
+                                    _existing_open_order = _oo
+                                    break
+                        except Exception:
+                            _existing_open_order = None
+                        if _existing_open_order:
+                            execution = {
+                                "simulated": True,
+                                "broker": "IBKR",
+                                "symbol": symbol,
+                                "side": action,
+                                "quantity": 0,
+                                "message": (
+                                    f"Zaten açık (henüz dolmamış) bir {action} emri var "
+                                    f"(order#{_existing_open_order.get('orderId')}, kalan "
+                                    f"{_existing_open_order.get('remaining')}) - yığılmış "
+                                    f"tekrar emir gönderilmedi."
+                                ),
+                                "time": now_text(),
+                            }
+                            qty = 0
+                            ibkr_cash_qty_amount = None
+                    if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
                         # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
                         # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
                         # USD nakitten otomatik IDEALPRO FX cevrimi yap. Kullanicinin talebi:
