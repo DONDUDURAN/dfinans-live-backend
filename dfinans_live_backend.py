@@ -677,6 +677,21 @@ IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.
 # ASLA bu degerin ustune cikarmaz (sabit taban hedef, IBKR_TAKE_PROFIT_PCT,
 # etkilenmez - o zaten bunun altinda).
 IBKR_ATR_TAKE_PROFIT_CAP_PCT = float(os.getenv("IBKR_ATR_TAKE_PROFIT_CAP_PCT", "3.0"))
+# Kullanicinin bildirdigi hata: 'nakit var ama hiç işlem açmamış', 'nvda güzel
+# arttı onda bile işlem yapmadı'. Canli trade_journal kayitlari incelendiginde
+# GERCEK kok neden bulundu: hesapta CANLI piyasa veri aboneligi yok (sadece
+# DELAYED/gecikmeli - bkz. '[IBKR] Market data type set to DELAYED (3)' log
+# mesaji), bu yuzden IBKR sunuculari ham MARKET emirlerinin referans fiyatini
+# guvenilir dogrulayamiyor ve emri sessizce 'Inactive' durumunda birakip HICBIR
+# ZAMAN doldurmuyordu (canli loglarda NVDA/TSLA/GLD icin AYNI GUN icinde
+# yuzlerce kez, hem mesai ici hem disi, tekrar tekrar gozlemlendi - islem asla
+# gerceklesmedi, tek fark eden pozisyonlar T/F sadece SEYREK doldu). IBKR'in
+# kendi API dokumantasyonunun onerdigi cozum: gecikmeli veri aboneligi olan
+# hesaplarda ham MARKET yerine agresif ("marketable") bir LIMIT emri
+# kullanmak - BUY icin son bilinen fiyatin hemen ustunde, SELL icin hemen
+# altinda bir limit fiyati, likit piyasalarda ani doluma pratikte esdegerdir
+# ama IBKR'in referans-fiyat kaynakli 'Inactive' reddini engeller.
+IBKR_MARKETABLE_LIMIT_BUFFER_PCT = float(os.getenv("IBKR_MARKETABLE_LIMIT_BUFFER_PCT", "0.5"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
 # dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
@@ -14066,6 +14081,62 @@ def goal_tracker_endpoint():
         return jsonify(get_goal_progress())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
+
+
+@app.route("/debug/ibkr-market-data-test", methods=["GET"])
+def debug_ibkr_market_data_test():
+    """GECICI teşhis endpoint'i: hesapta gercek CANLI (real-time, mode=1)
+    piyasa veri aboneligi olup olmadigini dogrudan test eder. Sembol icin
+    once mode=1 (live) denenir, IBKR'in geri dondugu ticker.marketDataType
+    degeri (1=live, 2=frozen, 3=delayed, 4=delayed-frozen) raporlanir.
+    Kullanicinin 'aslında canlı fiyat alıyorduk' iddiasini net olarak
+    dogrulamak/reddetmek icin. Islem bitince bu endpoint kaldirilacak."""
+    symbol = request.args.get("symbol", "AAPL").upper()
+
+    def _run(ib, ibs):
+        errors = []
+
+        def _on_error(reqId, errorCode, errorString, contract):
+            errors.append({"reqId": reqId, "code": errorCode, "msg": errorString})
+
+        ib.errorEvent += _on_error
+        try:
+            try:
+                ib.reqMarketDataType(1)  # 1 = live/real-time istegi
+            except Exception as e:
+                errors.append({"code": "reqMarketDataType", "msg": str(e)})
+            contract = build_ibkr_contract(ibs, symbol, "STK", "SMART", "USD")
+            qualified = ib.qualifyContracts(contract)
+            if not qualified:
+                return {"error": "contract doğrulanamadı", "errors": errors}
+            ticker = ib.reqMktData(qualified[0], "", False, False)
+            ib.sleep(3.0)
+            result = {
+                "symbol": symbol,
+                "market_data_type": getattr(ticker, "marketDataType", None),
+                "market_data_type_meaning": {
+                    1: "LIVE (canlı, gerçek zamanlı)",
+                    2: "FROZEN (dondurulmuş, son kapanış)",
+                    3: "DELAYED (15-20 dk gecikmeli)",
+                    4: "DELAYED_FROZEN",
+                }.get(getattr(ticker, "marketDataType", None), "bilinmiyor"),
+                "last": _clean_float(getattr(ticker, "last", 0)),
+                "bid": _clean_float(getattr(ticker, "bid", 0)),
+                "ask": _clean_float(getattr(ticker, "ask", 0)),
+                "close": _clean_float(getattr(ticker, "close", 0)),
+                "market_price": _clean_float(ticker.marketPrice()),
+                "ib_errors_during_request": errors,
+            }
+            ib.cancelMktData(qualified[0])
+            return result
+        finally:
+            ib.errorEvent -= _on_error
+
+    try:
+        data = ibkr_execute(_run)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/debug/force-tp-check", methods=["GET"])
