@@ -4277,6 +4277,7 @@ def ibkr_place_market_order(
     allow_fractional: bool = False,
     contract_month: str = "",
     cash_qty: Optional[float] = None,
+    limit_price_hint: Optional[float] = None,
 ) -> Dict[str, Any]:
     def _run(ib, ibs):
         # KULLANICININ TALEBI: NVDA gibi pahali hisselerde 1 tam hisseye
@@ -4313,17 +4314,53 @@ def ibkr_place_market_order(
             # seans saatlerinde kabul edilir.
             order.outsideRth = False
         else:
-            order = ibs.MarketOrder(order_side, quantity)
-            order.tif = "DAY"
-            # IBKR kesirli hisse (fractional share) emirleri SADECE normal seans
-            # saatlerinde (RTH) kabul edilir - outsideRth=True ile birlikte
-            # gonderilirse "Error 10243: Fractional-sized order cannot be placed
-            # via API" hatasi alinir. Bu yuzden kesirli miktar gonderiliyorsa
-            # (allow_fractional=True, sadece ABD/SMART hisseleri icin kullanilir)
-            # outsideRth KAPATILIR; tam sayi miktarlarda eski davranis (mesai-disi
-            # da islem yapabilme) korunur.
-            is_fractional_qty = abs(quantity - round(quantity)) > 1e-9
-            order.outsideRth = not (allow_fractional and is_fractional_qty)
+            order_quantity = quantity
+            _asset_type_upper = str(asset_type or "").upper()
+            if _asset_type_upper in ("FOREX", "FX", "CASH") and not allow_fractional:
+                # Kullanicinin bildirdigi hata: 'nakit var ama hiç işlem
+                # açmamış' teshisi sirasinda canli loglarda "Error 10318:
+                # This order doesn't support fractional quantity trading"
+                # goruldu (orn. EURUSD BUY totalQuantity=640.9517). IBKR
+                # forex emirlerinde KESIRLI birim miktarini API uzerinden
+                # KABUL ETMIYOR - butce/fiyat bolmesinden gelen kesirli
+                # miktar tam sayiya yuvarlanmali, aksi halde emir daima
+                # 'Cancelled' ile reddediliyordu.
+                order_quantity = float(math.floor(quantity))
+                if order_quantity <= 0:
+                    raise RuntimeError("Forex miktarı yuvarlandıktan sonra 0'a düştü.")
+            is_fractional_qty = abs(order_quantity - round(order_quantity)) > 1e-9
+            # Kullanicinin bildirdigi hata: 'nvda güzel arttı onda bile işlem
+            # yapmadı' teshisi sirasinda GERCEK kok neden bulundu (bkz.
+            # IBKR_MARKETABLE_LIMIT_BUFFER_PCT yorumu) - hesapta canli veri
+            # aboneligi olmadigi /debug/ibkr-market-data-test ile DOGRULANDI
+            # (Error 10089: "Delayed market data is available"). Ham MARKET
+            # emri, IBKR sunucularinin guvenilir referans fiyati olmadan
+            # dogrulayamadigi icin sessizce 'Inactive' kalip HICBIR ZAMAN
+            # dolmuyordu. Bir referans fiyat (limit_price_hint, caginin
+            # zaten sahip oldugu son bilinen fiyat) verildiginde, kesirli
+            # olmayan miktarlarda agresif (marketable) bir LIMIT emrine
+            # geciyoruz - likit piyasalarda ani doluma esdeger ama IBKR'in
+            # referans-fiyat kaynakli reddini onler.
+            if limit_price_hint and limit_price_hint > 0 and not is_fractional_qty:
+                buffer_pct = IBKR_MARKETABLE_LIMIT_BUFFER_PCT / 100.0
+                if order_side == "BUY":
+                    limit_price = round(limit_price_hint * (1 + buffer_pct), 4)
+                else:
+                    limit_price = round(limit_price_hint * (1 - buffer_pct), 4)
+                order = ibs.LimitOrder(order_side, order_quantity, limit_price)
+                order.tif = "DAY"
+                order.outsideRth = True
+            else:
+                order = ibs.MarketOrder(order_side, order_quantity)
+                order.tif = "DAY"
+                # IBKR kesirli hisse (fractional share) emirleri SADECE normal seans
+                # saatlerinde (RTH) kabul edilir - outsideRth=True ile birlikte
+                # gonderilirse "Error 10243: Fractional-sized order cannot be placed
+                # via API" hatasi alinir. Bu yuzden kesirli miktar gonderiliyorsa
+                # (allow_fractional=True, sadece ABD/SMART hisseleri icin kullanilir)
+                # outsideRth KAPATILIR; tam sayi miktarlarda eski davranis (mesai-disi
+                # da islem yapabilme) korunur.
+                order.outsideRth = not (allow_fractional and is_fractional_qty)
         if IBKR_ACCOUNT:
             order.account = IBKR_ACCOUNT
         trade = ib.placeOrder(qualified[0], order)
@@ -4348,7 +4385,7 @@ def ibkr_place_market_order(
             "symbol": normalize_symbol(symbol),
             "asset_type": str(asset_type or "STK").upper(),
             "side": order_side,
-            "quantity": safe_float(getattr(trade.orderStatus, "filled", 0)) if (cash_qty is not None and cash_qty > 0) else quantity,
+            "quantity": safe_float(getattr(trade.orderStatus, "filled", 0)) if (cash_qty is not None and cash_qty > 0) else order_quantity,
             "cash_qty": round(cash_qty, 2) if (cash_qty is not None and cash_qty > 0) else None,
             "order_id": getattr(trade.order, "orderId", 0),
             "status": getattr(trade.orderStatus, "status", ""),
@@ -10287,6 +10324,7 @@ def _auto_trader_run_symbol(
                             allow_fractional=ibkr_fractional_order,
                             contract_month=contract_month,
                             cash_qty=ibkr_cash_qty_amount,
+                            limit_price_hint=price,
                         )
                         # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
                         # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
@@ -11570,6 +11608,7 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             result = ibkr_place_market_order(
                 symbol, close_side, qty, asset_type, exchange, currency,
                 request_id=f"ibkr-{'tp' if hit_take_profit else 'sl'}-{symbol}-{int(time.time())}",
+                limit_price_hint=safe_float(position.get("mark_price") or position.get("price")),
             )
         except Exception as e:
             result = {"simulated": False, "broker": "IBKR", "symbol": symbol, "error": str(e), "time": now_text()}
@@ -12118,7 +12157,7 @@ def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_pri
                 chain_qty = math.floor((available_funds * 0.95) / exit_price)
             if chain_qty < 1:
                 return None
-            execution = ibkr_place_market_order(symbol, "BUY", chain_qty, asset_type, exchange, currency)
+            execution = ibkr_place_market_order(symbol, "BUY", chain_qty, asset_type, exchange, currency, limit_price_hint=exit_price)
         else:
             return None
 
