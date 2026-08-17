@@ -3804,9 +3804,23 @@ def ibkr_open_orders_snapshot() -> List[Dict[str, Any]]:
     gerceklesmemis, ancak AI Karar Merkezi'nde 'AÇILDI' gibi gorunuyordu -
     bu emirlerin Trading Center'da 'açık emirler' olarak gorulebilmesi ve AI
     tarafinin da bunlari ayri bir durum (SUBMITTED/'Emir iletildi') olarak
-    isaretleyebilmesi icin bu anlik goruntu eklendi. ib.openTrades() henuz
-    tamamlanmamis (Done olmayan) tum trade'leri dondurur."""
+    isaretleyebilmesi icin bu anlik goruntu eklendi.
+    GUNCELLEME (kullanicinin 'nvda emir iletildi diyor ama işlem açılmadı'
+    teshisi): sadece ib.openTrades() (bu API oturumunun YEREL bellek
+    onbellegi) kullanmak, IBKR baglantisi yeniden kuruldugunda (reconnect)
+    ONCEKI oturumda gonderilmis, hala IBKR sunucusunda YASAYAN acik
+    emirleri KAYBEDIYORDU - bu yuzden yigilma-onleme kontrolu (bkz.
+    _auto_trader_run_symbol) reconnect sonrasi bu emirleri goremiyor ve
+    tekrar tekrar YENI kopya emir gonderilmesine izin veriyordu. Artik
+    once ib.reqAllOpenOrders() ile IBKR'den (bu hesaba ait TUM
+    client'lardaki) acik emirlerin GUNCEL/TAM listesi zorla istenip yerel
+    onbellek tazeleniyor, sonra ib.openTrades() okunuyor."""
     def _run(ib, _):
+        try:
+            ib.reqAllOpenOrders()
+            ib.sleep(1.0)
+        except Exception:
+            pass
         rows: List[Dict[str, Any]] = []
         for trade in ib.openTrades():
             try:
@@ -4363,12 +4377,32 @@ def ibkr_place_market_order(
                 order.outsideRth = not (allow_fractional and is_fractional_qty)
         if IBKR_ACCOUNT:
             order.account = IBKR_ACCOUNT
+        # KULLANICININ TALEBI ('nvda emir iletildi diyor ama işlem açılmadı'
+        # teshisi): emirler PendingSubmit'te kalip hicbir zaman ilerlemiyordu
+        # ama trade.log HER ZAMAN bostu - IBKR'in kendi hata/uyari mesaji
+        # (ör. gecmiste goruldugu gibi 'Error 321 ... Read-Only mode')
+        # yakalanmiyordu. errorEvent'e gecici bir dinleyici eklenip emir
+        # bekleme penceresi sirasinda gelen TUM IBKR hata/uyari mesajlari
+        # (reqId bu emrin orderId'sine esit olanlar) toplanip sonuca ekleniyor.
+        _ib_order_errors: List[Dict[str, Any]] = []
+
+        def _on_ib_error(reqId, errorCode, errorString, contract):
+            try:
+                if reqId in (getattr(trade.order, "orderId", None), 0, -1):
+                    _ib_order_errors.append({"code": errorCode, "msg": str(errorString)})
+            except Exception:
+                pass
+
         trade = ib.placeOrder(qualified[0], order)
-        for _ in range(40):
-            status = str(getattr(trade.orderStatus, "status", ""))
-            if status in ibs.OrderStatus.DoneStates:
-                break
-            ib.sleep(0.25)
+        ib.errorEvent += _on_ib_error
+        try:
+            for _ in range(40):
+                status = str(getattr(trade.orderStatus, "status", ""))
+                if status in ibs.OrderStatus.DoneStates:
+                    break
+                ib.sleep(0.25)
+        finally:
+            ib.errorEvent -= _on_ib_error
 
         log_messages = []
         try:
@@ -4378,6 +4412,8 @@ def ibkr_place_market_order(
                     log_messages.append(msg)
         except Exception:
             pass
+        for _err in _ib_order_errors:
+            log_messages.append(f"IBKR Error {_err['code']}: {_err['msg']}")
 
         result = {
             "broker": "IBKR",
