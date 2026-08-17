@@ -4411,6 +4411,7 @@ def ibkr_place_market_order(
         # bekleme penceresi sirasinda gelen TUM IBKR hata/uyari mesajlari
         # (reqId bu emrin orderId'sine esit olanlar) toplanip sonuca ekleniyor.
         _ib_order_errors: List[Dict[str, Any]] = []
+        _ib_status_transitions: List[str] = []
 
         def _on_ib_error(reqId, errorCode, errorString, contract):
             try:
@@ -4419,8 +4420,19 @@ def ibkr_place_market_order(
             except Exception:
                 pass
 
+        def _on_status(t):
+            try:
+                st = str(getattr(t.orderStatus, "status", "") or "")
+                wh = str(getattr(t.orderStatus, "whyHeld", "") or "")
+                entry = f"status={st}" + (f" whyHeld={wh}" if wh else "")
+                if not _ib_status_transitions or _ib_status_transitions[-1] != entry:
+                    _ib_status_transitions.append(entry)
+            except Exception:
+                pass
+
         trade = ib.placeOrder(qualified[0], order)
         ib.errorEvent += _on_ib_error
+        trade.statusEvent += _on_status
         try:
             for _ in range(40):
                 status = str(getattr(trade.orderStatus, "status", ""))
@@ -4429,6 +4441,7 @@ def ibkr_place_market_order(
                 ib.sleep(0.25)
         finally:
             ib.errorEvent -= _on_ib_error
+            trade.statusEvent -= _on_status
 
         log_messages = []
         try:
@@ -4440,6 +4453,8 @@ def ibkr_place_market_order(
             pass
         for _err in _ib_order_errors:
             log_messages.append(f"IBKR Error {_err['code']}: {_err['msg']}")
+        for _st in _ib_status_transitions:
+            log_messages.append(f"transition: {_st}")
 
         result = {
             "broker": "IBKR",
@@ -4455,7 +4470,7 @@ def ibkr_place_market_order(
             "remaining": safe_float(getattr(trade.orderStatus, "remaining", 0)),
             "avg_fill_price": safe_float(getattr(trade.orderStatus, "avgFillPrice", 0)),
             "why_held": str(getattr(trade.orderStatus, "whyHeld", "") or ""),
-            "log": log_messages[-5:],
+            "log": log_messages[-15:],
             "last_update": now_text(),
         }
         db_insert_trade_journal(
