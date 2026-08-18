@@ -14036,6 +14036,7 @@ def admin_db_maintenance():
     fiilen kucultur. Body ile 'keep_days' (varsayilan 14) ayarlanabilir."""
     body = request.get_json(silent=True) or {}
     keep_days = int(body.get("keep_days", 14))
+    do_vacuum = bool(body.get("vacuum", False))
     cutoff = (datetime.utcnow() - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
     report: Dict[str, Any] = {"cutoff": cutoff, "deleted": {}}
     try:
@@ -14057,13 +14058,23 @@ def admin_db_maintenance():
             try:
                 cur.execute(f"DELETE FROM {t} WHERE {ts_col} < ?", (cutoff,))
                 report["deleted"][t] = cur.rowcount
+                conn.commit()
             except Exception as e:
                 report["deleted"][t] = f"error: {e}"
-        conn.commit()
-        cur.execute("VACUUM")
-        conn.commit()
+        # NOT: VACUUM, dosyayi yeniden yazmak icin DB boyutu kadar EK disk
+        # alani gerektirir - disk zaten doluyken (ilk denemede yasandigi gibi)
+        # bu 502/worker-crash'e yol aciyor. Varsayilan olarak KAPALI; silinen
+        # satirlarin sayfalari zaten SQLite'in ic serbest listesine (freelist)
+        # dusuyor ve sonraki INSERT'ler dosyayi buyutmeden bu sayfalari
+        # yeniden kullanabiliyor - bu da 'disk full' sorununu VACUUM'suz da
+        # cozuyor. Yeterli bos alan varsa vacuum=true ile fiziksel kucultme
+        # ayrica talep edilebilir.
+        if do_vacuum:
+            cur.execute("VACUUM")
+            conn.commit()
         conn.close()
         report["ok"] = True
+        report["vacuumed"] = do_vacuum
     except Exception as e:
         report["ok"] = False
         report["error"] = str(e)
