@@ -4185,7 +4185,13 @@ def get_ibkr_cash_balance(currency: str) -> float:
         except Exception:
             return 0.0
         for r in rows:
-            if str(r.get("tag", "")) == "CashBalance" and str(r.get("currency", "")).upper() == cur:
+            # NOT: ib_insync'in ib.accountSummary() cagrisi "CashBalance" diye bir
+            # tag ASLA dondurmez (bu accountValues'a ozgu bir tag, accountSummary
+            # standart tag listesinde yok) - bu yuzden bu fonksiyon HER ZAMAN 0.0
+            # donuyordu ve /ibkr/buy-max-affordable gibi nakit-bagimli tum
+            # akislar hatali sekilde "nakit yok" sanıyordu. Dogru karsilik
+            # "TotalCashValue".
+            if str(r.get("tag", "")) == "TotalCashValue" and str(r.get("currency", "")).upper() == cur:
                 return safe_float(r.get("value"))
         return 0.0
     return _cache_get_or_fetch(f"ibkr_cash_balance_{cur}", 20, _fetch)
