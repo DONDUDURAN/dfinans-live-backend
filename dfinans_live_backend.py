@@ -14026,6 +14026,50 @@ def health():
     })
 
 
+@app.route("/admin/db-maintenance", methods=["POST"])
+def admin_db_maintenance():
+    """ACIL BAKIM: Railway kalici volume'u (/data, 500MB kota) dolmustu -
+    '/ibkr/buy-max-affordable' cagrisi 'database or disk is full' hatasi
+    veriyordu (kullanicinin 'nvda düştü tüm paraya nvda al' talebi bu yuzden
+    calismadi). Bu endpoint hizli/tek seferlik disk temizligi icin: buyuk
+    log/gecmis tablolarindan eski satirlari siler, sonra VACUUM ile dosyayi
+    fiilen kucultur. Body ile 'keep_days' (varsayilan 14) ayarlanabilir."""
+    body = request.get_json(silent=True) or {}
+    keep_days = int(body.get("keep_days", 14))
+    cutoff = (datetime.utcnow() - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
+    report: Dict[str, Any] = {"cutoff": cutoff, "deleted": {}}
+    try:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cur.fetchall()]
+        # Zaman damgasi kolonu olan (buyuyerek disk dolduran) tablolar icin
+        # eski satirlari sil - kolon adlari tabloya gore degisebiliyor.
+        ts_columns = ["created_at", "timestamp", "ts", "opened_at", "closed_at", "logged_at"]
+        for t in tables:
+            if t.startswith("sqlite_"):
+                continue
+            cur.execute(f"PRAGMA table_info({t})")
+            cols = [r[1] for r in cur.fetchall()]
+            ts_col = next((c for c in ts_columns if c in cols), None)
+            if not ts_col:
+                continue
+            try:
+                cur.execute(f"DELETE FROM {t} WHERE {ts_col} < ?", (cutoff,))
+                report["deleted"][t] = cur.rowcount
+            except Exception as e:
+                report["deleted"][t] = f"error: {e}"
+        conn.commit()
+        cur.execute("VACUUM")
+        conn.commit()
+        conn.close()
+        report["ok"] = True
+    except Exception as e:
+        report["ok"] = False
+        report["error"] = str(e)
+    return jsonify(report)
+
+
 @app.route("/ibkr/health", methods=["GET"])
 def ibkr_health():
     # NOT: burada canli bir ibkr_ping() cagrisi YAPMIYORUZ. ib_insync'in IB client'i
