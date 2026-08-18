@@ -14026,6 +14026,63 @@ def health():
     })
 
 
+@app.route("/admin/db-stats", methods=["GET"])
+def admin_db_stats():
+    """Salt-okunur teshis: /data volume dolmustu ('database or disk is full'),
+    silmeden/degistirmeden ONCE hangi tablonun ne kadar yer kapladigini ve
+    ne tur hatalarin/tekrar eden kayitlarin birikip disk doldurdugunu ogrenmek
+    icin kullanilir. Sadece SELECT calistirir, hicbir veri degistirmez/silmez."""
+    report: Dict[str, Any] = {"tables": {}}
+    try:
+        conn = sqlite3.connect(f"file:{RUNTIME_DB_PATH}?mode=ro", uri=True)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cur.fetchall()]
+        ts_columns = ["created_at", "timestamp", "ts", "opened_at", "closed_at", "logged_at"]
+        for t in tables:
+            if t.startswith("sqlite_"):
+                continue
+            info: Dict[str, Any] = {}
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {t}")
+                info["row_count"] = cur.fetchone()[0]
+            except Exception as e:
+                info["row_count_error"] = str(e)
+            cur.execute(f"PRAGMA table_info({t})")
+            cols = [r[1] for r in cur.fetchall()]
+            ts_col = next((c for c in ts_columns if c in cols), None)
+            if ts_col:
+                try:
+                    cur.execute(f"SELECT MIN({ts_col}), MAX({ts_col}) FROM {t}")
+                    row = cur.fetchone()
+                    info["oldest"] = row[0]
+                    info["newest"] = row[1]
+                except Exception:
+                    pass
+            report["tables"][t] = info
+        # Genel hata/basarisiz emir istatistikleri - kullanicinin 'hataları
+        # öğren' talebi icin: trade_journal'daki status dagilimi.
+        try:
+            cur.execute("SELECT status, COUNT(*) FROM trade_journal GROUP BY status ORDER BY COUNT(*) DESC")
+            report["trade_journal_status_counts"] = cur.fetchall()
+        except Exception as e:
+            report["trade_journal_status_counts_error"] = str(e)
+        try:
+            cur.execute(
+                "SELECT symbol, status, COUNT(*) c FROM trade_journal "
+                "GROUP BY symbol, status HAVING c > 20 ORDER BY c DESC LIMIT 30"
+            )
+            report["duplicate_heavy_symbols"] = cur.fetchall()
+        except Exception as e:
+            report["duplicate_heavy_symbols_error"] = str(e)
+        conn.close()
+        report["ok"] = True
+    except Exception as e:
+        report["ok"] = False
+        report["error"] = str(e)
+    return jsonify(report)
+
+
 @app.route("/admin/db-maintenance", methods=["POST"])
 def admin_db_maintenance():
     """ACIL BAKIM: Railway kalici volume'u (/data, 500MB kota) dolmustu -
