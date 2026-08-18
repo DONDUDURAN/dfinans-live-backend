@@ -449,6 +449,17 @@ IBKR_CRYPTO_NOTIONAL_USD = float(os.getenv("IBKR_CRYPTO_NOTIONAL_USD", "50"))
 # (notional) bazli kesirli miktar kullanilir - 1 birim (ör. 1 EUR ~1.08 USD)
 # anlamli bir islem buyuklugu olmadigi icin.
 IBKR_FOREX_NOTIONAL_USD = float(os.getenv("IBKR_FOREX_NOTIONAL_USD", "1000"))
+# KULLANICININ TALEBI ('şu anda sistem emir açabiliyormu' teshisi): canli
+# loglarda IBKR'in "Error 399: ... below the EUR/GBP/NZD 20000 IdealPro
+# minimum and will be routed as an odd lot order" uyarisi goruldu ve bu
+# odd-lot emirler API uzerinden HICBIR ZAMAN dolmuyor, sessizce 'Inactive'
+# kaliyordu. IDEALPRO'da baz para biriminden 20.000 birim ALTINDAKI emirler
+# 'odd lot' sayilir. Hesap kucuk oldugu icin (~800 USD sermaye) bu minimumu
+# hicbir major pariteda (EEUR/GBP/AUD/NZD) karsilamak mumkun degil (ör.
+# 20.000 EUR ~23.000 USD gerektirir) - bu yuzden gercek notional yerine
+# emri TAMAMEN ATLAMAK (asla dolmayacak sahte 'emir gonderildi' izlenimi
+# vermemek icin) tercih edildi.
+IBKR_FOREX_MIN_LOT_UNITS = float(os.getenv("IBKR_FOREX_MIN_LOT_UNITS", "20000"))
 
 # Binance SPOT icin de Futures'tan tamamen bagimsiz ucuncu bir auto-trader ornegi.
 # Futures kaldiracli/short calisirken, spot sadece "elde tutulan varligi al/sat"
@@ -9915,6 +9926,26 @@ def _auto_trader_run_symbol(
                     # kesirli miktar kullanilir. IBKR IDEALPRO kesirli forex
                     # miktarini native olarak destekler.
                     qty = round(IBKR_FOREX_NOTIONAL_USD / price, 2)
+                    if qty < IBKR_FOREX_MIN_LOT_UNITS:
+                        # KULLANICININ TALEBI ('şu anda sistem emir açabiliyormu'
+                        # teshisi): canli loglarda IBKR'in "Error 399: ... below
+                        # the EUR/GBP/NZD 20000 IdealPro minimum and will be
+                        # routed as an odd lot order" uyarisi goruldu - bu
+                        # odd-lot emirler API uzerinden HICBIR ZAMAN dolmuyor,
+                        # sessizce 'Inactive' kaliyordu (yigin halinde asla
+                        # gerceklesmeyen 'emir gonderildi' izlenimi). Hesap
+                        # kucuk oldugu icin (bkz. IBKR_FOREX_MIN_LOT_UNITS
+                        # yorumu) bu minimumu karsilamak mumkun degil - bu
+                        # yuzden asla dolmayacak emir gonderilmeden atlaniyor.
+                        reason = (
+                            reason
+                            + f" (IBKR forex emri atlandı: {symbol} için hesap "
+                            f"büyüklüğü IDEALPRO'nun {IBKR_FOREX_MIN_LOT_UNITS:.0f} "
+                            f"birimlik minimum lot şartını karşılamıyor - daha "
+                            f"küçük 'odd lot' emirler IBKR tarafından asla "
+                            f"gerçekleştirilmiyor.)"
+                        ).strip()
+                        qty = 0
 
                 if do_live:
                     # Sabit miktarli (ör. 1 hisse) emir, hesaptaki diger pozisyonlarin
