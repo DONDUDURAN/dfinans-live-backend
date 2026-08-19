@@ -639,6 +639,21 @@ IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
     if s.strip()
 )
 
+# Kullanicinin talebi ('bir de işlem yapmayalım dediğimiz hisseleri
+# taranmaya alma' + 'solusdt'): yukaridaki IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS
+# sadece IBKR ALIM emrini engelliyordu, ama sembol yine de her dongude
+# taraniyor, AI karari uretiliyor ve auto_history'e yaziliyordu (bosuna API
+# cagrisi + DB sismesi + karar merkezinde gereksiz gurultu). Bu yeni liste
+# TUM brokerlar (IBKR/BINANCE/BINANCE_SPOT) icin sembolu TARAMA dongusunun
+# EN BASINDA tamamen atlar - hicbir AI karari uretilmez, hicbir log yazilmaz.
+# SOLUSDT kullanicinin acikca 'bir daha islem yapmayalim' dedigi sembol
+# oldugu icin varsayilana eklendi. Ortam degiskeniyle genisletilebilir.
+AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS = set(
+    s.strip().upper()
+    for s in os.getenv("AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS", "SOLUSDT").split(",")
+    if s.strip()
+)
+
 # Kullanicinin talebi: 'genel olarak uygulamanin daha karli calismasi icin
 # eklenebilecek bir sey var mi, buyuk fon/yatirimci/karli sistemlerde ne
 # var bizde eksik'. 30 gunluk portfoy analizinde ort. kazanc %1.86 iken ort.
@@ -4246,6 +4261,38 @@ def ensure_ibkr_currency_funds(target_currency: str, needed_amount: float) -> Di
         return result
     except Exception as exc:
         return {"converted": False, "error": str(exc)}
+
+
+def _us_stock_order_too_early(exchange: str) -> str:
+    """Kullanicinin talebi ('emir iletim zamanına kadar emir iletme'): ABD
+    (SMART/NASDAQ/NYSE) hisseleri icin IBKR pre-market/after-hours penceresi
+    yaklasik 04:00-20:00 ET (08:00-00:00 UTC) arasidir - bu araligin DISINDA
+    (20:00-04:00 ET, yani 00:00-08:00 UTC 'olu saatler') gonderilen bir emir
+    IBKR'de dogrudan Error 399 ('will not be placed at the exchange until
+    04:00 US/Eastern') ile 'Inactive' kuyruga giriyordu. Sistem bunu saatler
+    once (ornegin gece yarisindan hemen sonra) gonderip kuyrukta bekletmek
+    yerine, kullanicinin istedigi gibi gercek iletim penceresi baslayana
+    kadar emri HIC GONDERMEZ - boylece hem gereksiz erken kuyruklama hem de
+    (bir onceki duzeltmeyle birlikte) 'Inactive' + tekrar deneme dongusunden
+    kaynaklanan emir yigilmasi tamamen onlenir. LSE/SEHK/IBIS/SBF/IDEALPRO/
+    CME/COMEX/NYMEX zaten kendi mesaj/kurallariyla (_ibkr_closed_exchange_message)
+    ele alindigi icin bu fonksiyon SADECE SMART/US borsalari icin calisir."""
+    ex = str(exchange or "SMART").upper()
+    if ex in ("LSE", "SEHK", "IBIS", "SBF", "IDEALPRO", "CME", "COMEX", "NYMEX", "PAXOS"):
+        return ""
+    now_utc = datetime.now(timezone.utc)
+    minute_of_day = now_utc.hour * 60 + now_utc.minute
+    # 00:00-08:00 UTC = 20:00-04:00 ET (DST yaklasik) - ABD hisseleri icin
+    # hicbir seans (ne RTH ne pre/after-market) yok.
+    if 0 <= minute_of_day < 8 * 60:
+        minutes_left = 8 * 60 - minute_of_day
+        hours_left = minutes_left / 60.0
+        return (
+            f"ABD piyasası şu an tamamen kapalı (pre-market/after-hours dahil), "
+            f"04:00 US/Eastern'da (yaklaşık {hours_left:.1f} saat sonra) açılacak. "
+            f"Emir, gerçek iletim zamanına kadar gönderilmeyecek."
+        )
+    return ""
 
 
 def _ibkr_closed_exchange_message(exchange: str) -> str:
@@ -9153,6 +9200,11 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
     # acilabiliyor, STK gibi tamamen Cmt/Paz kapali degil.
     _is_weekend_scan = broker == "IBKR" and datetime.utcnow().weekday() >= 5
     for symbol in symbols:
+        if normalize_symbol(symbol).upper() in AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS:
+            # Kullanicinin talebi: 'işlem yapmayalım dediğimiz hisseleri
+            # taranmaya alma' - bu sembol icin hicbir AI karari/log uretilmez,
+            # dongu tamamen atlanir (bkz. AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS).
+            continue
         if _is_weekend_scan:
             _sym_asset_type = get_ibkr_symbol_market_info(symbol).get("asset_type", asset_type)
             if _sym_asset_type == "STK":
@@ -10420,6 +10472,20 @@ def _auto_trader_run_symbol(
                                 ).strip()
                                 qty = 0
                                 ibkr_cash_qty_amount = None
+                            if (qty > 0 or ibkr_cash_qty_amount) and asset_type == "STK":
+                                # Kullanicinin talebi ('emir iletim zamanına kadar emir
+                                # iletme'): ABD hisseleri pre-market/after-hours
+                                # penceresinin (04:00-20:00 ET) tamamen DISINDAYSA emir
+                                # HIC GONDERILMEZ - saatler once gonderilip IBKR'de
+                                # 'Inactive' kuyrukta beklemek yerine (bkz. Error 399
+                                # 'will not be placed until 04:00 US/Eastern' + onceki
+                                # duzeltmedeki emir yigilmasi riski), gercek iletim
+                                # penceresi baslayana kadar dongu bu sembolu atlar.
+                                _too_early_msg = _us_stock_order_too_early(exchange)
+                                if _too_early_msg:
+                                    reason = (reason + f" ({_too_early_msg})").strip()
+                                    qty = 0
+                                    ibkr_cash_qty_amount = None
                     if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
                         # KULLANICININ TALEBI ('ai karar merkezinde nvda emir iletildi
                         # diyor ama işlem açılmadı'): piyasa kapaliyken (ör. hafta
