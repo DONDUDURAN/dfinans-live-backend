@@ -15011,6 +15011,29 @@ def account_summary_alias():
         return jsonify({"ok": False, "data": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 200
 
 
+@app.route("/admin/ibkr-account-values", methods=["GET"])
+def admin_ibkr_account_values():
+    """GECICI TESHIS: kullanicinin 'nvda da neden işlem açmamış' sorusu -
+    marketable fiyatli BUY LMT emirleri RTH icinde bile surekli 'Inactive'
+    kaliyor, whyHeld bos donuyor. accountSummary() sadece SABIT bir tag
+    setiyle sinirli (bkz. get_ibkr_cash_balance yorumu) - PDT (Pattern Day
+    Trader) kisitlamasi gibi durumlar 'DayTradesRemaining' benzeri
+    tag'lerle SADECE accountValues() uzerinden gorunebilir. Bu salt-okunur
+    endpoint TUM accountValues() satirlarini (filtre yok) dondurur."""
+    def _run(ib, _):
+        rows = []
+        for v in ib.accountValues(IBKR_ACCOUNT or ""):
+            if IBKR_ACCOUNT and v.account != IBKR_ACCOUNT:
+                continue
+            rows.append({"tag": v.tag, "currency": v.currency, "value": v.value, "account": v.account})
+        return rows
+    try:
+        rows = ibkr_execute(_run)
+        return jsonify({"ok": True, "data": rows, "count": len(rows), "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "data": [], "error": str(e), "last_update": now_text()}), 200
+
+
 @app.route("/market-summary", methods=["GET"])
 def market_summary():
     symbol = request.args.get("symbol", "ETHUSDT").upper().replace("/", "")
