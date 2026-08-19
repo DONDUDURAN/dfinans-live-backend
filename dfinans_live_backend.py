@@ -3870,6 +3870,8 @@ def ibkr_open_orders_snapshot() -> List[Dict[str, Any]]:
                     "price": str(getattr(order, "lmtPrice", "") or getattr(trade.orderStatus, "avgFillPrice", "") or "-"),
                     "status": status or "Submitted",
                     "orderId": getattr(order, "orderId", None),
+                    "whyHeld": str(getattr(trade.orderStatus, "whyHeld", "") or ""),
+                    "outsideRth": bool(getattr(order, "outsideRth", False)),
                 })
             except Exception:
                 continue
