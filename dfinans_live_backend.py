@@ -10447,7 +10447,22 @@ def _auto_trader_run_symbol(
                                 if (
                                     _oo_symbol == _target_symbol_norm
                                     and str(_oo.get("side", "")).upper() == action
-                                    and str(_oo.get("status", "")).upper() not in ("FILLED", "CANCELLED", "INACTIVE", "APICANCELLED")
+                                    # KULLANICININ TALEBI ('nvda gibi hisseler... pay
+                                    # toplayabilirsin' teshisi sirasinda tespit edildi):
+                                    # 'INACTIVE' burada TERMINAL/BITMIS sayiliyordu, ama
+                                    # daha once kanitlandigi gibi (bkz. ibkr_place_market_order
+                                    # yorumlari) IBKR bir emri sadece piyasa/seans henuz
+                                    # acilmadigi icin 'Inactive' yapabiliyor (Error 399:
+                                    # 'will not be placed at the exchange until ...') - bu
+                                    # GERCEKTEN ACIK, sadece kuyrukta bekleyen bir emir.
+                                    # ib_insync'in kendi OrderStatus.DoneStates = {'Filled',
+                                    # 'Cancelled','ApiCancelled'} - INACTIVE hic yok. Bu yuzden
+                                    # INACTIVE'i terminal sayan eski mantik, her 30sn'lik
+                                    # dongude AYNI sembole ONLARCA yeni 1-hisse emri
+                                    # acilmasina (disk/DB sismesi + alim gucu tukenmesi) yol
+                                    # aciyordu. Artik SADECE gercekten bitmis durumlar
+                                    # (Filled/Cancelled/ApiCancelled) yeni emre izin veriyor.
+                                    and str(_oo.get("status", "")).upper() not in ("FILLED", "CANCELLED", "APICANCELLED")
                                     and safe_float(_oo.get("filled", 0)) < safe_float(_oo.get("amount", 0))
                                 ):
                                     _existing_open_order = _oo
