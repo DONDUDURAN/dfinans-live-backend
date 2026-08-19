@@ -4188,6 +4188,47 @@ def get_ibkr_available_funds() -> float:
     return _cache_get_or_fetch("ibkr_available_funds", 20, _fetch)
 
 
+def _ibkr_reserved_amount_for_open_buy_orders(exclude_symbol: str = "") -> float:
+    """KULLANICININ TESHISI ('nvda da neden işlem açmamış'): ayni 30sn'lik
+    dongude NVDA/GLD/AMZN/AAPL/TSLA/MSFT gibi bircok farkli sembol icin
+    art arda BUY emri gonderiliyordu; her biri get_ibkr_available_funds()'i
+    AYRI AYRI kontrol ediyordu ve hepsi 'yeterli' gorunuyordu - cunku IBKR
+    henuz 'Inactive' (kuyrukta/PreSubmitted) emirler icin AvailableFunds'i
+    ANINDA dusurmuyor. Sonuc: hesabin gercek alim gucunden (ör. 760 USD)
+    KAT KAT fazla (ör. 2000+ USD) toplam tutarda emir ayni anda acik kaliyor,
+    IBKR bunlarin bir kismini (bu ornekte NVDA dahil cogu) sonsuza kadar
+    'Inactive' tutup hicbirini gerceklestirmiyor - cunku toplamda hepsini
+    karsilayacak fon yok. Bu fonksiyon, halihazirda acik (Filled/Cancelled/
+    ApiCancelled DISINDAKI) TUM BUY emirlerinin toplam USD tutarini hesaplar
+    ki yeni bir emir gonderilmeden once GERCEK kullanilabilir fon (mevcut
+    taahhutler dusulmus) bulunabilsin."""
+    total = 0.0
+    try:
+        _exclude = normalize_symbol(exclude_symbol).upper() if exclude_symbol else ""
+        for _oo in ibkr_open_orders_snapshot():
+            try:
+                if str(_oo.get("side", "")).upper() != "BUY":
+                    continue
+                if str(_oo.get("status", "")).upper() in ("FILLED", "CANCELLED", "APICANCELLED"):
+                    continue
+                _oo_symbol = normalize_symbol(str(_oo.get("symbol", ""))).upper()
+                if _exclude and _oo_symbol == _exclude:
+                    continue
+                _remaining = safe_float(_oo.get("remaining", 0))
+                _price = safe_float(_oo.get("price", 0))
+                if _remaining <= 0 or _price <= 0:
+                    continue
+                _cur = str(_oo.get("currency", "USD") or "USD").upper()
+                _exch = str(_oo.get("exchange", "") or "")
+                _native_price = _price / 100.0 if (_exch.upper() == "LSE" and _cur == "GBP") else _price
+                total += _remaining * get_ibkr_price_usd_equivalent(_native_price, _exch, _cur)
+            except Exception:
+                continue
+    except Exception:
+        return 0.0
+    return total
+
+
 def get_ibkr_cash_balance(currency: str) -> float:
     """IBKR hesabindaki belirli bir para biriminden (ör. GBP, HKD) elde bulunan
     nakit bakiyeyi dondurur. Coklu-borsa alimlarinda (Ingiltere/Hong Kong) once
@@ -10054,6 +10095,20 @@ def _auto_trader_run_symbol(
                     ibkr_cash_qty_amount: Optional[float] = None
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
+                        # KULLANICININ TESHISI ('nvda da neden işlem açmamış'): tek
+                        # basina bu kontrol, ayni dongude ONCEKI sembol(ler) icin
+                        # az once gonderilmis ama henuz IBKR tarafindan
+                        # 'gerceklesmemis'(Inactive/Submitted) BUY emirlerinin
+                        # tuttugu tutari dusmuyordu - bu yuzden NVDA/GLD/AMZN/AAPL/
+                        # TSLA/MSFT gibi coklu sembol ayni anda 'uygun' gorunup
+                        # hesabin gercek alim gucunun kat kat uzerinde emir
+                        # yigilmasina yol aciyordu (hicbiri asla gerceklesmiyordu,
+                        # cunku IBKR toplamda karsilanamayan emirleri sonsuza kadar
+                        # Inactive tutuyor). Once bu sembol DISINDAKI acik BUY
+                        # emirlerinin rezerve ettigi tutar dusuluyor.
+                        _reserved_by_others = _ibkr_reserved_amount_for_open_buy_orders(exclude_symbol=symbol)
+                        if _reserved_by_others > 0:
+                            available_funds = max(0.0, available_funds - _reserved_by_others)
                         # KRITIK DUZELTME: price, LSE hisselerinde (ULVR/SHEL/RIO/AZN/
                         # HSBA) pence/GBX biriminde donuyor (GBP degil) ve GBP/HKD gibi
                         # ABD-disi para birimlerinde dogrudan USD fon ile karsilastirma
