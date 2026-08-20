@@ -401,7 +401,12 @@ AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_AUTO_WATCHLIST", _BI
 # sembol havuzu + dusuk guven esigi cok fazla dusuk kaliteli islem aciyordu
 # (60 islemde net kar ~0). Diger iki auto-trader gibi artik env ile
 # ayarlanabilir, varsayilan 65 -> 70'e cikarildi (daha az ama daha kaliteli islem).
-AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "70"))
+# GUNCELLEME (20 Agustos, 'dün çok zarar ettik' - 19 Agustos'ta BTCUSDT/ETHUSDT/
+# BTCUSDT_261225 SHORT pozisyonlari fiyat YUKARI giderken art arda zarar-kesle
+# kapandi, toplam -25.79 USD'nin -30.46'si zarar-kesten geldi - yon okuma
+# hatasi/zayif sinyal deseni): esik 70 -> 74'e cikarildi (kullanicinin acikca
+# 'Binance'i değiştir' talebiyle, IBKR ayarlari degil).
+AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "74"))
 # Kullanicinin talebi: 'günlük işlem sayıları artsın'. Eskiden sabit 5'te
 # kaliyordu (env ile ayarlanamiyordu) - genis sembol havuzu ve Kelly bazli
 # pozisyon boyutlandirma ile birlikte artik daha fazla gunluk emir hakkina
@@ -470,7 +475,7 @@ SPOT_AUTO_TRADER.broker = "BINANCE_SPOT"
 SPOT_AUTO_TRADER.market = "SPOT"
 SPOT_AUTO_TRADER.symbol = "ETHUSDT"
 SPOT_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_SPOT_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
-SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "70"))
+SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "74"))
 SPOT_AUTO_TRADER.interval_sec = int(os.getenv("BINANCE_SPOT_AUTO_INTERVAL_SEC", "25"))
 SPOT_AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_SPOT_AUTO_MAX_DAILY_TRADES", "12"))
 SPOT_AUTO_TRADER.mode = AUTO_TRADER.mode
@@ -587,8 +592,19 @@ SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT
 SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
 SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "1.2"))
 BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "2.0"))
-BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
+# Kullanicinin talebi (20 Agustos, 'dün çok zarar ettik'): 19 Agustos'ta
+# BTCUSDT/ETHUSDT/BTCUSDT_261225 SHORT pozisyonlari fiyat YUKARI (rally)
+# giderken art arda %6-10.7 zararla kapandi (toplam -25.79 USD'nin -30.46'si
+# zarar-kesten) - yon okuma hatasi. TP%2 sabit kalirken SL 6.0 -> 4.0'a
+# cekilerek risk:odul orani 1:3'ten 1:2'ye iyilestirildi, yanlis yonlu
+# islemlerde zarar daha erken/kucuk kesiliyor.
+BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "4.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "2.0"))
+# Kullanicinin talebi (20 Agustos): 'IBKR'de fiyat düşse bile toparlanıyor' -
+# ABD hisseleri genelde derin dususlerden toparlanma egiliminde oldugu icin
+# genis zarar-kes esigi (Railway'de %20) BILINCLI/ISTENEN bir davranis,
+# degistirilmedi (kullanici talebiyle geri alindi - onceki analiz denemesinde
+# %6'ya cekilmisti, kullanici acikca 'IBKR öyle kalsın' dedi).
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
 # Kullanicinin talebi: son 1 haftalik islem gecmisi analiz edilince (bkz.
 # /position-closures) SHEL ve HSBA (ikisi de LSE/Londra hisseleri) 3'er kez
@@ -766,7 +782,7 @@ IBKR_MIN_CONFIRMATIONS_CRYPTO_WEEKEND = int(
 # pencere teyit mekanizmasi (bkz. _log_ibkr_confirmation_event /
 # _get_ibkr_confirmation_net_score - broker'a ozel degil, sembol+yon bazli
 # calisir) uzerinden bir GATE olarak uygulanir.
-BINANCE_MIN_CONFIRMATIONS = int(os.getenv("BINANCE_MIN_CONFIRMATIONS", "4"))
+BINANCE_MIN_CONFIRMATIONS = int(os.getenv("BINANCE_MIN_CONFIRMATIONS", "6"))
 
 # ATR (Average True Range) bazli volatilite-adaptif pozisyon boyutlandirma esikleri
 # (kullanicinin talebi: 'ATR ekle'). atr_pct = ATR(14) / son kapanis * 100.
