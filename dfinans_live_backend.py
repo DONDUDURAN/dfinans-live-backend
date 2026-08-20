@@ -4306,6 +4306,22 @@ def ensure_ibkr_currency_funds(target_currency: str, needed_amount: float) -> Di
         return {"converted": False, "error": str(exc)}
 
 
+    # Kullanicinin talebi (20 Agustos): IBKR hesabinda seans (RTH) disinda
+    # gonderilen ABD hisse emirlerinin sessizce 'Inactive' kalip HICBIR ZAMAN
+    # dolmadigi CANLI olarak dogrulandi (ayni sembol/emir tipi seans disinda
+    # takili kalip, seans acildiginda calisiyordu). Kullanici hesap tarafinda
+    # bir ayar duzeltip 'ŞU AN SEANS AÇIK OLMADIĞI İÇİN EMİR İLETMİYOR, SADECE
+    # SEANS AÇIKKEN EMİR İLET' talimatini net verdi - bu yuzden ABD hisse (STK)
+    # ALIM emirleri artik SADECE gercek normal seans (RTH, 09:30-16:00 ET)
+    # icindeyken gonderilir; pre-market/after-hours penceresi de (04:00-09:30
+    # ve 16:00-20:00 ET) artik 'too early/late' sayilir. Kapanis (SAT/zarar-kes/
+    # kar-al) emirleri BU KONTROLDEN ETKILENMEZ (enforce_ibkr_take_profit_stop_loss
+    # bu fonksiyonu hic cagirmaz) - zarari erken kesmek icin seans disinda da
+    # denenmeye devam eder. Ortam degiskeniyle eski (sadece 'olu saatler')
+    # davranisina geri donulebilir.
+IBKR_STOCK_BUY_RTH_ONLY = os.getenv("IBKR_STOCK_BUY_RTH_ONLY", "1") != "0"
+
+
 def _us_stock_order_too_early(exchange: str) -> str:
     """Kullanicinin talebi ('emir iletim zamanına kadar emir iletme'): ABD
     (SMART/NASDAQ/NYSE) hisseleri icin IBKR pre-market/after-hours penceresi
@@ -4319,12 +4335,32 @@ def _us_stock_order_too_early(exchange: str) -> str:
     (bir onceki duzeltmeyle birlikte) 'Inactive' + tekrar deneme dongusunden
     kaynaklanan emir yigilmasi tamamen onlenir. LSE/SEHK/IBIS/SBF/IDEALPRO/
     CME/COMEX/NYMEX zaten kendi mesaj/kurallariyla (_ibkr_closed_exchange_message)
-    ele alindigi icin bu fonksiyon SADECE SMART/US borsalari icin calisir."""
+    ele alindigi icin bu fonksiyon SADECE SMART/US borsalari icin calisir.
+
+    GUNCELLEME (20 Agustos, IBKR_STOCK_BUY_RTH_ONLY varsayilan acik): artik
+    sadece 00:00-08:00 UTC 'olu saatler' degil, TUM normal-seans-disi pencere
+    (pre-market 08:00-13:30 UTC ve after-hours 20:00-00:00 UTC dahil) 'too
+    early' sayilir - yeni ALIM emri SADECE 13:30-20:00 UTC (09:30-16:00 ET,
+    gercek RTH) icinde gonderilir."""
     ex = str(exchange or "SMART").upper()
     if ex in ("LSE", "SEHK", "IBIS", "SBF", "IDEALPRO", "CME", "COMEX", "NYMEX", "PAXOS"):
         return ""
     now_utc = datetime.now(timezone.utc)
     minute_of_day = now_utc.hour * 60 + now_utc.minute
+    rth_start, rth_end = 13 * 60 + 30, 20 * 60  # 09:30-16:00 ET (DST yaklasik)
+    if IBKR_STOCK_BUY_RTH_ONLY:
+        if rth_start <= minute_of_day < rth_end:
+            return ""
+        if minute_of_day < rth_start:
+            minutes_left = rth_start - minute_of_day
+        else:
+            minutes_left = (24 * 60 - minute_of_day) + rth_start
+        hours_left = minutes_left / 60.0
+        return (
+            f"ABD hisse seansı (RTH, 09:30-16:00 ET) şu an açık değil, "
+            f"yaklaşık {hours_left:.1f} saat sonra açılacak. Yeni ALIM emri "
+            f"sadece gerçek seans saatlerinde gönderilir (kullanıcı talebi)."
+        )
     # 00:00-08:00 UTC = 20:00-04:00 ET (DST yaklasik) - ABD hisseleri icin
     # hicbir seans (ne RTH ne pre/after-market) yok.
     if 0 <= minute_of_day < 8 * 60:
