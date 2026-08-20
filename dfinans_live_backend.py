@@ -6473,37 +6473,50 @@ def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) ->
       2) Herhangi bir sembolde uzun vadeli (IBKR: 5 gun, kripto: 24s) degisim
          belirgin negatifken kisa vadeli (IBKR: 1 gun, kripto: 1 saat) degisim
          pozitife donmusse ('dipten toparlanma'), BUY'a bias eklenir - dusmus
-         ama tekrar yukselmeye baslamis varliklari yakalamak icindir."""
-    if action != "BUY":
+         ama tekrar yukselmeye baslamis varliklari yakalamak icindir.
+      3) SIMETRIK durum (SELL icin): Kullanicinin talebi ('ETH cok artti, bir
+         sure oralarda tutunmaya calisir sonra kar realizasyonu yapilir, terse
+         dondugunde yakalamak gerek') - uzun vadeli degisim belirgin
+         POZITIFKEN kisa vadeli degisim negatife donmusse ('zirveden donus/
+         kar realizasyonu'), SELL'e (short/kapanis) bias eklenir - yukselmis
+         ama simdi geri cekilmeye baslamis varliklari yakalamak icindir."""
+    if action not in ("BUY", "SELL"):
         return {"bias": 0, "notes": []}
     bias = 0
     notes: List[str] = []
-    try:
-        regime = get_macro_regime()
-        if regime.get("regime") == "RISK_OFF" and symbol.upper() in ("GLD", "USO"):
-            bias += 10
-            notes.append(
-                f"Piyasa geneli RISK_OFF rejiminde (SP500 5g %{regime.get('sp500_5d_pct')}, "
-                f"DXY 5g %{regime.get('dxy_5d_pct')}): {symbol} güvenli liman olarak BUY'ı destekler."
-            )
-    except Exception:
-        pass
+    if action == "BUY":
+        try:
+            regime = get_macro_regime()
+            if regime.get("regime") == "RISK_OFF" and symbol.upper() in ("GLD", "USO"):
+                bias += 10
+                notes.append(
+                    f"Piyasa geneli RISK_OFF rejiminde (SP500 5g %{regime.get('sp500_5d_pct')}, "
+                    f"DXY 5g %{regime.get('dxy_5d_pct')}): {symbol} güvenli liman olarak BUY'ı destekler."
+                )
+        except Exception:
+            pass
     try:
         mtf = get_multi_timeframe_momentum_signal(symbol, market, broker)
         short_c = safe_float(mtf.get("short_change_pct"))
         long_c = safe_float(mtf.get("long_change_pct"))
-        if long_c <= -1.5 and short_c >= 0.3:
+        if action == "BUY" and long_c <= -1.5 and short_c >= 0.3:
             bias += 8
             notes.append(
                 f"{symbol} uzun vadede (%{long_c:.2f}) düştü ama kısa vadede (%{short_c:.2f}) toparlanmaya "
                 f"başladı: düşüşten fırsat olarak BUY'ı destekler."
+            )
+        elif action == "SELL" and long_c >= 1.5 and short_c <= -0.3:
+            bias += 8
+            notes.append(
+                f"{symbol} uzun vadede (%{long_c:.2f}) yükseldi ama kısa vadede (%{short_c:.2f}) geri "
+                f"çekilmeye başladı: zirveden dönüş/kâr realizasyonu olarak SELL'i destekler."
             )
     except Exception:
         pass
     return {"bias": max(0, min(18, bias)), "notes": notes}
 
 
-def get_early_reversal_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
+def get_early_reversal_signal(symbol: str, market: str, broker: str, direction: str = "up") -> Dict[str, Any]:
     """Kullanicinin talebi: 'dönüş yapmaya başlamadan toplamak hisseyi' - yani
     get_dip_recovery_bias GIBI kesin donus TEYIDINI (kisa vadeli degisim zaten
     pozitife donmus) BEKLEMEDEN, henuz dususte olan ama dususun 'tukenmekte'
@@ -6516,7 +6529,13 @@ def get_early_reversal_signal(symbol: str, market: str, broker: str) -> Dict[str
          gercek bir 'toparlanma' baslamamis, sadece dususun hizi kesiliyor.
     Bu ucu de saglanirsa 'erken sinyal' (dusuk guvenli, kucuk baslangic
     pozisyonu icin) doner - get_dip_recovery_bias'in aksine KESIN TEYIT
-    DEGILDIR, sadece 'yakinda donebilir' uyarisidir."""
+    DEGILDIR, sadece 'yakinda donebilir' uyarisidir.
+    direction='down' ise SIMETRIK (ayna) mantik uygulanir - kullanicinin
+    talebi ('ETH cok artti, bir sure oralarda tutunmaya calisir sonra kar
+    realizasyonu yapilir, terse dondugunde yakalamak gerek'): asiri alim
+    (RSI>=65) + yukselisin yavaslamasi (plato/tutunma) + uzun vadede hala
+    belirgin pozitif (>=1.5%) ama henuz kesin donus (kisa vadeli negatif)
+    olmamis - zirve/kar realizasyonu icin erken SELL sinyali."""
     try:
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
@@ -6543,6 +6562,32 @@ def get_early_reversal_signal(symbol: str, market: str, broker: str) -> Dict[str
         ]
         last_2 = recent_daily_changes[-2:]
         prior_3 = recent_daily_changes[-5:-2]
+
+        if direction == "down":
+            avg_recent_rise = sum(max(v, 0.0) for v in last_2) / max(len(last_2), 1)
+            avg_prior_rise = sum(max(v, 0.0) for v in prior_3) / max(len(prior_3), 1)
+            decelerating = avg_prior_rise > 0.01 and avg_recent_rise <= avg_prior_rise * 0.6
+            overbought = rsi is not None and rsi >= 65.0
+            still_rising_long_term = long_change >= 1.5
+            already_reversed = recent_daily_changes[-1] <= -0.3
+            if overbought and decelerating and still_rising_long_term and not already_reversed:
+                note = (
+                    f"{symbol} için ERKEN zirve/dönüş sinyali (henüz teyit değil): RSI {rsi:.1f} (aşırı alım), "
+                    f"yükseliş hızı yavaşlıyor/tutunmaya çalışıyor (son dönem ort. %{avg_recent_rise:.2f} vs önceki "
+                    f"%{avg_prior_rise:.2f}), uzun vadede hâlâ %{long_change:.2f} yukarıda. Alım baskısı tükeniyor "
+                    f"olabilir - kâr realizasyonu/küçük short için düşünülebilir, kesin teyit geldiğinde artırılabilir."
+                )
+                return {
+                    "is_early_signal": True,
+                    "bias": 4,
+                    "rsi": round(rsi, 1) if rsi is not None else None,
+                    "long_change_pct": round(long_change, 3),
+                    "avg_recent_rise_pct": round(avg_recent_rise, 3),
+                    "avg_prior_rise_pct": round(avg_prior_rise, 3),
+                    "notes": [note],
+                }
+            return {"is_early_signal": False, "bias": 0, "notes": []}
+
         avg_recent_decline = abs(sum(min(v, 0.0) for v in last_2) / max(len(last_2), 1))
         avg_prior_decline = abs(sum(min(v, 0.0) for v in prior_3) / max(len(prior_3), 1))
         decelerating = avg_prior_decline > 0.01 and avg_recent_decline <= avg_prior_decline * 0.6
@@ -6573,14 +6618,17 @@ def get_early_reversal_signal(symbol: str, market: str, broker: str) -> Dict[str
 
 
 def get_early_reversal_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
-    """get_early_reversal_signal'i BUY karar aggregatorune baglar - dusuk
+    """get_early_reversal_signal'i BUY/SELL karar aggregatorune baglar - dusuk
     guvenli erken sinyal, dip-recovery'nin (+8/+18) aksine kucuk (+4) bir
     bias ekler, boylece AI donus TEYIT EDILMEDEN once kucuk bir baslangic
-    pozisyonu alabilir, ama tam boyutta islem yapmaz."""
-    if action != "BUY":
+    pozisyonu alabilir, ama tam boyutta islem yapmaz. SELL icin de simetrik
+    (zirve/kar-realizasyonu) mantik kullanilir (bkz. get_early_reversal_signal
+    direction='down')."""
+    if action not in ("BUY", "SELL"):
         return {"bias": 0, "notes": []}
     try:
-        signal = get_early_reversal_signal(symbol, market, broker)
+        direction = "up" if action == "BUY" else "down"
+        signal = get_early_reversal_signal(symbol, market, broker, direction=direction)
         if signal.get("is_early_signal"):
             return {"bias": signal.get("bias", 0), "notes": signal.get("notes", [])}
     except Exception:
