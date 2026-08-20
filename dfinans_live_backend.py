@@ -6418,6 +6418,49 @@ def _hard_block_weak_trend_chop(symbol: str, market: str, broker: str) -> Option
     )
 
 
+def _hard_block_counter_momentum(symbol: str, action: str, market: str, broker: str) -> Optional[str]:
+    """Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde etmek icin ne
+    yapmaliyiz, profesyoneller nasil kar ediyor' analizinde tespit edildi -
+    19 Agustos'ta BTCUSDT/ETHUSDT/BTCUSDT_261225 SHORT pozisyonlari, fiyat
+    ZATEN kisa/orta vadede YUKARI giderken acilip art arda zarar-kesle
+    kapandi (toplam -25.79 USD'nin -30.46'si zarar-kesten). Mevcut
+    get_multi_timeframe_signal_bias fonksiyonu bu durumda sadece -6 puanlik
+    YUMUSAK bir ceza uyguluyordu - diger sinyaller (order flow, haber vb.)
+    yeterince guclu oldugunda bu ceza kolayca asilabiliyordu. Profesyonel
+    trend-takip prensibi: 'akintiya karsi yuzme' (kisa/orta/uzun vadeli
+    momentum HEPSI ayni yonde iken tam ters yonde islem acmak) kayip
+    olasiligini cok artirir. Bu fonksiyon, kisa (1s/1g) + orta (4s/3g) +
+    uzun (24s/5g) vadeli momentumun UCU DE ayni yonde oldugu (mtf.aligned)
+    ve bu yon acilmak istenen islemin TAM TERSI oldugu durumlarda yeni
+    pozisyon acma/buyutmeyi KOSULSUZ engeller (sadece -6 bias degil).
+    SADECE yeni pozisyon acma/buyutme icin cagrilmalidir - mevcut pozisyonu
+    KAPATMA islemleri bu fonksiyonla ASLA engellenmez. Veri yetersizse
+    sessizce izin verir (None)."""
+    if action not in ("BUY", "SELL"):
+        return None
+    try:
+        mtf = get_multi_timeframe_momentum_signal(symbol, market, broker)
+    except Exception:
+        return None
+    if mtf.get("error") or not mtf.get("aligned"):
+        return None
+    consensus = mtf.get("consensus_direction", 0)
+    if consensus == 0:
+        return None
+    wanted_direction = 1 if action == "BUY" else -1
+    if consensus != -wanted_direction:
+        return None
+    labels = mtf.get("timeframe_labels", {})
+    trend_word = "yükseliş" if consensus > 0 else "düşüş"
+    return (
+        f"{labels.get('short','kısa')} (%{mtf.get('short_change_pct')}), "
+        f"{labels.get('mid','orta')} (%{mtf.get('mid_change_pct')}) ve "
+        f"{labels.get('long','uzun')} (%{mtf.get('long_change_pct')}) vadeli momentumun "
+        f"HEPSİ {trend_word} yönünde hizalı - tam ters yönde ({action}) yeni pozisyon açmak "
+        f"akıntıya karşı işlem sert engeli nedeniyle koşulsuz atlandı."
+    )
+
+
 def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
     """Kullanicinin talebi: 'genel piyasa dususlerinde (ör. bir cip sirketi
     yuzunden tum borsalar dustugunde) nakitte beklemek yerine guvenli limana
@@ -9939,11 +9982,18 @@ def _auto_trader_run_symbol(
                     # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
                     # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
                     _spot_chop_block_msg = None if spot_skip_reason else _hard_block_weak_trend_chop(symbol, market, "BINANCE_SPOT")
+                    # Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde etmek icin
+                    # ne yapmaliyiz' - kisa/orta/uzun vadeli momentum HEPSI ters yondeyse
+                    # (akintiya karsi islem) yeni pozisyon acma koşulsuz engellenir.
+                    _spot_momentum_block_msg = None if (spot_skip_reason or _spot_chop_block_msg) else _hard_block_counter_momentum(symbol, "BUY", market, "BINANCE_SPOT")
                     if not spot_skip_reason and _spot_cycle_block_msg:
                         spot_skip_reason = f"Spot işlem atlandı: {_spot_cycle_block_msg}"
                         qty = 0
                     elif not spot_skip_reason and _spot_chop_block_msg:
                         spot_skip_reason = f"Spot işlem atlandı: {_spot_chop_block_msg}"
+                        qty = 0
+                    elif not spot_skip_reason and _spot_momentum_block_msg:
+                        spot_skip_reason = f"Spot işlem atlandı: {_spot_momentum_block_msg}"
                         qty = 0
                     elif not spot_skip_reason and spot_is_position_add and db_position_added_today("BINANCE_SPOT", symbol):
                         spot_skip_reason = (
@@ -10357,6 +10407,13 @@ def _auto_trader_run_symbol(
                         if _chop_block_msg:
                             reason = (reason + f" (IBKR emri atlandı: {_chop_block_msg})").strip()
                             qty = 0
+                        # Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde etmek
+                        # icin ne yapmaliyiz' - kisa/orta/uzun vadeli momentum HEPSI
+                        # ters yondeyse (akintiya karsi islem) engellenir.
+                        _momentum_block_msg = None if qty == 0 else _hard_block_counter_momentum(symbol, "BUY", market, "IBKR")
+                        if _momentum_block_msg:
+                            reason = (reason + f" (IBKR emri atlandı: {_momentum_block_msg})").strip()
+                            qty = 0
                     # AI'nin SELL karariyla mevcut acik (LONG) bir IBKR pozisyonunu kapatip
                     # kapatmadigini anlamak icin emirden ONCE mevcut pozisyonu (varsa) kaydediyoruz.
                     # Boylece emir basariyla dolarsa gerceklesen kar/zarari hesaplayip
@@ -10431,6 +10488,14 @@ def _auto_trader_run_symbol(
                                 if _chop_block_msg:
                                     ibkr_can_short = False
                                     reason = (reason + f" (Açığa satış atlandı: {_chop_block_msg})").strip()
+                            # Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde
+                            # etmek icin ne yapmaliyiz' - kisa/orta/uzun vadeli momentum
+                            # HEPSI yukari yondeyse (ralliye karsi short) engellenir.
+                            if ibkr_can_short:
+                                _momentum_block_msg = _hard_block_counter_momentum(symbol, "SELL", market, "IBKR")
+                                if _momentum_block_msg:
+                                    ibkr_can_short = False
+                                    reason = (reason + f" (Açığa satış atlandı: {_momentum_block_msg})").strip()
                             if ibkr_can_short:
                                 try:
                                     available_funds_for_short = get_ibkr_available_funds()
@@ -10866,6 +10931,16 @@ def _auto_trader_run_symbol(
                     _futures_chop_block_msg = _hard_block_weak_trend_chop(symbol, market, "BINANCE_FUTURES")
                     if _futures_chop_block_msg:
                         reason = (reason + f" (Futures emri atlandı: {_futures_chop_block_msg})").strip()
+                        qty = 0
+                # Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde etmek icin
+                # ne yapmaliyiz' - 19 Agustos'ta BTCUSDT/ETHUSDT/BTCUSDT_261225 SHORT
+                # pozisyonlari fiyat zaten yukari giderken acilip zarar etti. Kisa/orta/
+                # uzun vadeli momentum HEPSI ters yondeyse (akintiya karsi islem) yeni
+                # pozisyon acma koşulsuz engellenir.
+                if qty > 0 and not pre_close_futures_position:
+                    _futures_momentum_block_msg = _hard_block_counter_momentum(symbol, action, market, "BINANCE_FUTURES")
+                    if _futures_momentum_block_msg:
+                        reason = (reason + f" (Futures emri atlandı: {_futures_momentum_block_msg})").strip()
                         qty = 0
                 # Ayni yonde mevcut acik pozisyon uzerine ekleme (piramitleme) yapiliyor mu
                 # kontrol et - kullanicinin talebi: ayni yonde ekleme sembol basina
