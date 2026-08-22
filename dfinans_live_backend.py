@@ -9448,6 +9448,21 @@ def _auto_trader_run_symbol(
     portfolio_risk_qty_scale = 1.0
     kelly_qty_scale = 1.0
 
+    if broker == "BINANCE_FUTURES" and "_" in symbol:
+        # Kullanicinin talebi ('son zamanda ciddi zarar ettik... arastir')
+        # ile bulundu: BTCUSDT_261225 gibi VADELI/tarihli (quarterly delivery)
+        # futures kontratlari - normal perpetual (BTCUSDT) sozlesmelerden
+        # farkli olarak vade sonuna yaklastikca spot'tan sapan bir bazis
+        # (contango/backwardation) fiyati tasir ve likiditesi cok daha
+        # dusuktur. 19 Agustos'ta bu sekilde acilan bir BTCUSDT_261225 SHORT
+        # pozisyonu -17.47 USD (-%7.02) zararla kapandi ve bu TEK islem
+        # sonraki her rapor doneminde (2/3/5/14/30 gun) toplam zarar
+        # rakamlarinin buyuk kismini olusturmaya devam etti. Sistem SADECE
+        # perpetual (vadesiz) futures kontratlari icin tasarlandigi icin,
+        # sembolde alt cizgi (vade/teslim tarihi eki) varsa yeni islem
+        # KOSULSUZ atlanir - nasil watchlist'e girdiginden bagimsiz olarak.
+        return
+
     if broker == "IBKR":
         # Cok-borsali havuz destegi: her sembolun kendi borsa/para birimi vardir
         # (ör. AAPL->SMART/USD, SHEL->LSE/GBP, 700->SEHK/HKD). Global auto-trader
