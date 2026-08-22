@@ -1920,7 +1920,8 @@ def db_recent_position_closures(limit: int = 50) -> List[Dict[str, Any]]:
 
 
 def db_all_position_closures(
-    days: Optional[int] = None, broker: Optional[str] = None, include_mandatory_holdings: bool = False
+    days: Optional[int] = None, broker: Optional[str] = None, include_mandatory_holdings: bool = False,
+    include_legacy_dated_contracts: bool = False,
 ) -> List[Dict[str, Any]]:
     """Performans istatistikleri icin TUM kapanis kayitlarini (trade_journal'daki
     500 satir sinirinin aksine, position_closures hicbir zaman silinmedigi icin
@@ -1930,7 +1931,18 @@ def db_all_position_closures(
     disariya alinir: bu hisse, aracı kurumdan (IBKR) islem yapabilmek icin
     zorunlu tutulan bir pay - gercek bir AI alim-satim karari degil, bu yuzden
     kar/zarari performans istatistiklerini carpitmasin diye haric tutuluyor.
-    include_mandatory_holdings=True verilirse bu filtre kaldirilir."""
+    include_mandatory_holdings=True verilirse bu filtre kaldirilir.
+
+    KOK NEDEN DUZELTMESI (kullanicinin 'rapor her zaman ayni eski islemi
+    gosteriyor, raporu duzelt' sikayeti): sembolunde alt cizgi (_) olan
+    tarihli/vadeli Binance futures kontratlari (orn. BTCUSDT_261225),
+    _auto_trader_run_symbol() icindeki kalici koruma sayesinde ARTIK BIR
+    DAHA ASLA acilamaz - yani bu tur eski kapanislar sistemin GUNCEL
+    davranisini yansitmiyor, sadece gecmiste (koruma eklenmeden once) acilan
+    tek seferlik bir hatanin kalintisi. Varsayilan olarak bu kayitlar
+    performans/rapor hesaplarindan haric tutulur ki 'son X gun' raporlari
+    surekli o tek eski islemle carpitilmasin; include_legacy_dated_contracts=True
+    ile (denetim/arsiv amacli) tekrar dahil edilebilir."""
     where_clauses = []
     params: List[Any] = []
     if days and days > 0:
@@ -1943,6 +1955,9 @@ def db_all_position_closures(
     if not include_mandatory_holdings:
         where_clauses.append("UPPER(symbol) != ?")
         params.append("IBKR")
+    if not include_legacy_dated_contracts:
+        where_clauses.append("symbol NOT LIKE ? ESCAPE '\\'")
+        params.append("%\\_%")
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     with DB_LOCK:
@@ -16404,10 +16419,17 @@ def performance_stats_route():
     days = int(safe_float(days_param)) if days_param else None
     broker = request.args.get("broker", "ALL")
     include_mandatory = str(request.args.get("include_mandatory", "0")).lower() in ("1", "true", "yes")
+    include_legacy = str(request.args.get("include_legacy_dated_contracts", "0")).lower() in ("1", "true", "yes")
     try:
-        rows = db_all_position_closures(days=days, broker=broker, include_mandatory_holdings=include_mandatory)
+        rows = db_all_position_closures(
+            days=days, broker=broker, include_mandatory_holdings=include_mandatory,
+            include_legacy_dated_contracts=include_legacy,
+        )
         stats = compute_performance_stats(rows)
-        stats["filter"] = {"days": days, "broker": broker, "include_mandatory_holdings": include_mandatory}
+        stats["filter"] = {
+            "days": days, "broker": broker, "include_mandatory_holdings": include_mandatory,
+            "include_legacy_dated_contracts": include_legacy,
+        }
         stats["time"] = now_text()
         return jsonify(stats)
     except Exception as e:
@@ -16425,14 +16447,21 @@ def strategy_analysis_route():
     days = int(safe_float(days_param)) if days_param else 30
     broker = request.args.get("broker", "ALL")
     include_mandatory = str(request.args.get("include_mandatory", "0")).lower() in ("1", "true", "yes")
+    include_legacy = str(request.args.get("include_legacy_dated_contracts", "0")).lower() in ("1", "true", "yes")
     try:
-        rows = db_all_position_closures(days=days, broker=broker, include_mandatory_holdings=include_mandatory)
+        rows = db_all_position_closures(
+            days=days, broker=broker, include_mandatory_holdings=include_mandatory,
+            include_legacy_dated_contracts=include_legacy,
+        )
         base_stats = compute_performance_stats(rows)
         strategy = compute_strategy_analysis(rows, base_stats)
         response = {
             "performance": base_stats,
             "strategy": strategy,
-            "filter": {"days": days, "broker": broker, "include_mandatory_holdings": include_mandatory},
+            "filter": {
+                "days": days, "broker": broker, "include_mandatory_holdings": include_mandatory,
+                "include_legacy_dated_contracts": include_legacy,
+            },
             "time": now_text(),
         }
         return jsonify(response)
