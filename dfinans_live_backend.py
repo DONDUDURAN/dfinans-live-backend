@@ -12077,16 +12077,19 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         # ATR-bazli buyutulmus hedef IBKR_ATR_TAKE_PROFIT_CAP_PCT'yi asamaz.
         if IBKR_ATR_TAKE_PROFIT_CAP_PCT > 0:
             ibkr_take_profit_pct = min(ibkr_take_profit_pct, IBKR_ATR_TAKE_PROFIT_CAP_PCT)
-        # Kullanicinin talebi (GUNCELLEME): IBKR'de trailing kafa karistirici
-        # bulundu (SAP/GLD %2-3 karda idi ama zirveden %1.2 geri cekilme
-        # beklendigi icin kapanmiyordu) - IBKR'de artik hedefe ulasilinca
-        # HEMEN kapatilir (use_trailing=False). Binance Futures/Spot'ta
-        # trailing (zirveden TRAILING_GIVEBACK_PCT kadar geri cekilme
-        # bekleme) aynen devam eder (bkz. resolve_trailing_take_profit).
+        # Kullanicinin talebi (GUNCELLEME 2): kullanici trailing stop'u ONCE
+        # sadece Binance icin istedi (kazananlarin daha fazla kosmasini
+        # saglamak icin), sonra 'IBKR'de de yap' diyerek IBKR'de de
+        # etkinlestirilmesini istedi. Daha once (GUNCELLEME 1) SAP/GLD
+        # ornegiyle IBKR'de trailing kafa karistirici bulunup kapatilmisti
+        # (use_trailing=False) - kullanicinin yeni acik talebiyle bu tekrar
+        # ACILDI (use_trailing=True, varsayilan). Artik IBKR'de de sabit
+        # hedefe ulasildiginda hemen kapatmak yerine, zirveden
+        # TRAILING_GIVEBACK_PCT kadar geri cekilme olana kadar pozisyon
+        # acik kalir (Binance Futures/Spot ile ayni mekanizma).
         entry_price_for_trail = safe_float(position.get("avgCost") or position.get("entry_price"))
         hit_take_profit = resolve_trailing_take_profit(
             "IBKR", symbol_check, entry_price_for_trail, profit_pct, ibkr_take_profit_pct,
-            use_trailing=False,
         )
         hit_stop_loss = effective_stop_loss_pct > 0 and profit_pct <= -effective_stop_loss_pct
         if not hit_take_profit and not hit_stop_loss:
