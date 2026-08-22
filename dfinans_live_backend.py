@@ -406,7 +406,10 @@ AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_AUTO_WATCHLIST", _BI
 # kapandi, toplam -25.79 USD'nin -30.46'si zarar-kesten geldi - yon okuma
 # hatasi/zayif sinyal deseni): esik 70 -> 74'e cikarildi (kullanicinin acikca
 # 'Binance'i değiştir' talebiyle, IBKR ayarlari degil).
-AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "74"))
+# GUNCELLEME (kullanicinin talebi: 'gerçek yatırımcı olsan nasıl kurardın' ->
+# 'senin istediğin gibi kur'): az ama seçici islem felsefesiyle esik
+# 74 -> 82'ye cikarildi - sadece yuksek guvenli sinyallerde islem acilir.
+AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "82"))
 # Kullanicinin talebi: 'günlük işlem sayıları artsın'. Eskiden sabit 5'te
 # kaliyordu (env ile ayarlanamiyordu) - genis sembol havuzu ve Kelly bazli
 # pozisyon boyutlandirma ile birlikte artik daha fazla gunluk emir hakkina
@@ -430,7 +433,7 @@ IBKR_AUTO_TRADER.asset_type = "STK"
 IBKR_AUTO_TRADER.exchange = "SMART"
 IBKR_AUTO_TRADER.currency = "USD"
 IBKR_AUTO_TRADER.quantity = float(os.getenv("IBKR_AUTO_QUANTITY", "1"))
-IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "68"))
+IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "76"))
 IBKR_AUTO_TRADER.interval_sec = int(os.getenv("IBKR_AUTO_INTERVAL_SEC", "30"))
 IBKR_AUTO_TRADER.mode = AUTO_TRADER.mode
 IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower() == "true"
@@ -475,7 +478,7 @@ SPOT_AUTO_TRADER.broker = "BINANCE_SPOT"
 SPOT_AUTO_TRADER.market = "SPOT"
 SPOT_AUTO_TRADER.symbol = "ETHUSDT"
 SPOT_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_SPOT_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
-SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "74"))
+SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "82"))
 SPOT_AUTO_TRADER.interval_sec = int(os.getenv("BINANCE_SPOT_AUTO_INTERVAL_SEC", "25"))
 SPOT_AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_SPOT_AUTO_MAX_DAILY_TRADES", "12"))
 SPOT_AUTO_TRADER.mode = AUTO_TRADER.mode
@@ -598,7 +601,13 @@ BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "2.0"))
 # zarar-kesten) - yon okuma hatasi. TP%2 sabit kalirken SL 6.0 -> 4.0'a
 # cekilerek risk:odul orani 1:3'ten 1:2'ye iyilestirildi, yanlis yonlu
 # islemlerde zarar daha erken/kucuk kesiliyor.
-BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "4.0"))
+# GUNCELLEME ('gerçek yatırımcı olsan nasıl kurardın' -> 'senin istediğin
+# gibi kur'): profesyonel sistemlerin ozelligi 'kucuk zarar, buyuk kazanc'
+# asimetrisidir. TP%2 + trailing stop (kazananlari zirveye kadar tasima)
+# zaten kazanc tarafini buyutuyordu; SL 4.0 -> 3.0'a cekilerek kayip tarafi
+# da kucultuldu - artik basa bas icin gereken kazanma orani %66.7 -> %60'a
+# dustu, kalan fark doğrudan kar marjina donusuyor.
+BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "2.0"))
 # Kullanicinin talebi (20 Agustos): 'IBKR'de fiyat düşse bile toparlanıyor' -
 # ABD hisseleri genelde derin dususlerden toparlanma egiliminde oldugu icin
@@ -685,7 +694,10 @@ MIN_REWARD_RISK_RATIO = float(os.getenv("MIN_REWARD_RISK_RATIO", "1.5"))
 # kismini olusturuyordu (bkz. compute_adx). ADX bu esigin ALTINDAYSA (zayif/yok
 # trend) yeni pozisyon acma/buyutme koşulsuz engellenir (bkz.
 # _hard_block_weak_trend_chop) - mevcut pozisyon kapatma ASLA etkilenmez.
-ADX_MIN_TREND_STRENGTH = float(os.getenv("ADX_MIN_TREND_STRENGTH", "20"))
+# GUNCELLEME ('gerçek yatırımcı olsan nasıl kurardın' -> 'senin istediğin
+# gibi kur'): 'fırsat net olduğunda gir, degilse pas geç' felsefesiyle esik
+# 20 -> 25'e cikarildi - daha guclu, net trend teyidi olmadan islem acilmaz.
+ADX_MIN_TREND_STRENGTH = float(os.getenv("ADX_MIN_TREND_STRENGTH", "25"))
 # ATR-bazli dinamik kar hedefi carpani: sabit yuzde yerine, o an ki
 # volatiliteye (ATR% - bkz. get_technical_indicator_snapshot) gore hedef
 # ATR_TARGET_MULTIPLIER kati kadar buyutulur (asla kucultulmez, sadece
@@ -8793,7 +8805,11 @@ def compute_correlation_matrix(symbols: List[str]) -> List[Dict[str, Any]]:
 # Kullanicinin talebi: 'etkin risk limti ekle' (etkin risk limiti). Ayni yonde/
 # korele varliklarda ustuste pozisyon acildiginda gercek risk maruziyetinin
 # fark edilmeden artmasini onlemek icin esikler.
-PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT = float(os.getenv("PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT", "40.0"))
+# GUNCELLEME ('gerçek yatırımcı olsan nasıl kurardın' -> 'senin istediğin
+# gibi kur'): 'BTC/ETH/SOL ayni anda LONG ise bu aslinda tek bir buyuk BTC
+# bahsi gibidir' mantigiyla esik %40 -> %30'a cekildi - korele varliklara
+# asiri yigilma daha erken caydirilir/kucultulur.
+PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT = float(os.getenv("PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT", "30.0"))
 
 
 def get_total_portfolio_value_usd() -> float:
