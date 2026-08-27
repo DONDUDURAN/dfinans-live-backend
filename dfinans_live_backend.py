@@ -819,6 +819,25 @@ KELLY_MIN_SCALE = float(os.getenv("KELLY_MIN_SCALE", "0.5"))
 KELLY_MAX_SCALE = float(os.getenv("KELLY_MAX_SCALE", "1.5"))
 KELLY_LOOKBACK_DAYS = int(os.getenv("KELLY_LOOKBACK_DAYS", "60"))
 
+# Kullanicinin talebi (27 Agustos, 'nerede hata yaptik' analizi): 24 Agustos
+# 11:36'da acilan tek bir BTCUSDT SHORT islemi normal pozisyon marjinin
+# (~80 USD) YAKLASIK 2.6 KATI (~206 USD) buyuklukte acildi (muhtemelen
+# ayni anda hem Kelly hem ATR hem market-cycle katmanlarinin hepsi buyutme
+# yonunde ust uste binmesinden) ve -8.08 USD zararla kapandi - bu TEK islem,
+# ayni 5 gunluk pencheredeki DIGER 26 islemin toplam net K/Z'sini (+0.01 USD,
+# fiilen tam basa bas) tek basina sildi. Kok neden: birden fazla boyut-
+# buyutme katmani (market_cycle_qty_scale x atr_qty_scale x
+# portfolio_risk_qty_scale x kelly_qty_scale) CARPIMSAL calisiyor - her biri
+# ayri ayri makul bir ust sinira sahip olsa da (ör. Kelly max 1.5x), hepsi
+# ayni anda buyutme yonunde hizalanirsa carpimin kendisi cok daha buyuk bir
+# sonuc uretebiliyordu (1.5 x 1.25 x ... > 1.5). Bu yuzden TUM katmanlarin
+# BILESIK carpimina da ayri, daha siki bir ust tavan (MAX_COMBINED_QTY_SCALE)
+# eklendi - hicbir tek islem, katmanlarin kac tanesi ayni anda buyutme
+# yonunde hizalanirsa hizalansin, normal boyutun bu katindan fazla acilamaz.
+# Kucultme yonu (0'a kadar) HICBIR SEKILDE sinirlanmaz - bu tavan sadece
+# yukari carpimsal birikmeyi keser, asagi risk azaltmayi asla engellemez.
+MAX_COMBINED_QTY_SCALE = float(os.getenv("MAX_COMBINED_QTY_SCALE", "1.5"))
+
 # Kullanicinin talebi: 'acigа satis islemi yapamiyor mu sistem, açığa satış
 # yapılabilecek hisselerde açığa satış denenebilir'. Onceden bu hesap SADECE
 # LONG islem yapiyordu - elde pozisyon yokken SELL sinyali geldiginde emir
@@ -9908,6 +9927,32 @@ def _auto_trader_run_symbol(
         if kelly_scale_info.get("notes"):
             reason = (reason + " " + " ".join(kelly_scale_info["notes"])).strip()
         kelly_qty_scale = kelly_scale_info.get("qty_scale", 1.0)
+
+        # Kullanicinin talebi (27 Agustos, 'nerede hata yaptik' analizi):
+        # yukaridaki 4 boyut-buyutme katmani (market_cycle x atr x
+        # portfolio_risk x kelly) CARPIMSAL calisiyor - hepsi ayni anda
+        # buyutme yonunde hizalanirsa (ör. guclu trend + dusuk volatilite +
+        # gecmiste kazandiran sembol) bilesik carpim, her katmanin kendi tek
+        # basina makul ust sinirindan cok daha buyuk bir sonuc uretebiliyordu
+        # (bkz. 24 Agustos BTCUSDT SHORT ornegi: tek islem normal boyutun
+        # ~2.6 kati acildi ve -8.08 USD'lik zararla 5 gunluk 26 diger islemin
+        # net K/Z'sini tek basina sildi). Burada bilesik carpim
+        # MAX_COMBINED_QTY_SCALE'i asarsa, 4 katman da AYNI oranda asagi
+        # cekilir (goreceli agirliklari korunur, sadece toplam tavan asilmaz).
+        # Kucultme yonunde (carpim < 1.0) HICBIR sinir yok - bu sadece yukari
+        # birikmeyi keser.
+        _raw_combined_qty_scale = market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale * kelly_qty_scale
+        if _raw_combined_qty_scale > MAX_COMBINED_QTY_SCALE > 0:
+            _cap_correction = MAX_COMBINED_QTY_SCALE / _raw_combined_qty_scale
+            market_cycle_qty_scale *= _cap_correction
+            atr_qty_scale *= _cap_correction
+            portfolio_risk_qty_scale *= _cap_correction
+            kelly_qty_scale *= _cap_correction
+            reason = (
+                reason
+                + f" [Boyut Tavanı] Bileşik büyütme çarpanı ({_raw_combined_qty_scale:.2f}x) "
+                f"MAX_COMBINED_QTY_SCALE ({MAX_COMBINED_QTY_SCALE:.1f}x) sınırına indirildi."
+            ).strip()
 
         # Kullanicinin talebi: 'sektör rotasyonu ekle' - ayni sektordeki lider
         # varlik belirgin hareket ettiyse ama bu sembol henuz takip etmediyse
