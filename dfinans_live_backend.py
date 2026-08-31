@@ -58,6 +58,7 @@ BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SEC
 LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
 IBKR_ENABLED = os.getenv("IBKR_ENABLED", "false").lower() == "true"  # Disabled by default; VPS connectivity issues
 IBKR_FORCE_DISABLED = os.getenv("IBKR_FORCE_DISABLED", "false").lower() == "true"
+IBKR_US_ONLY = os.getenv("IBKR_US_ONLY", "true").lower() == "true"
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = int(os.getenv("IBKR_PORT", "7497"))
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "21"))
@@ -359,6 +360,55 @@ def get_ibkr_symbol_market_info(symbol: str) -> Dict[str, str]:
     return {"exchange": "SMART", "currency": "USD", "region": "US", "asset_type": "STK"}
 
 
+def assert_ibkr_us_only_trade_allowed(
+    symbol: str,
+    asset_type: str,
+    exchange: str,
+    currency: str,
+    *,
+    bypass_us_only: bool = False,
+) -> None:
+    """US-only politika aktifken IBKR tarafında ABD dışı emirleri engeller."""
+    if bypass_us_only or not IBKR_US_ONLY:
+        return
+    ex = str(exchange or "").upper()
+    cur = str(currency or "USD").upper()
+    kind = str(asset_type or "STK").upper()
+    info = get_ibkr_symbol_market_info(symbol)
+    region = str(info.get("region", "US")).upper()
+
+    # Kullanicinin talebi: sadece ABD tarafinda islem.
+    # STK: US, FUT: US_FUTURES, CRYPTO: CRYPTO (PAXOS) disina izin verme.
+    if kind in ("STK", "STOCK") and region != "US":
+        raise RuntimeError(f"US-only mod aktif: {symbol} için {region} bölgesinde işlem engellendi.")
+    if kind == "FUT" and region != "US_FUTURES":
+        raise RuntimeError(f"US-only mod aktif: {symbol} için US futures dışı işlem engellendi.")
+    if kind == "CRYPTO" and region != "CRYPTO":
+        raise RuntimeError(f"US-only mod aktif: {symbol} için bu kripto piyasası engellendi.")
+    if kind in ("FOREX", "FX", "CASH"):
+        raise RuntimeError("US-only mod aktif: Forex işlemleri engellendi.")
+
+    if cur != "USD":
+        raise RuntimeError(f"US-only mod aktif: {cur} para birimiyle işlem engellendi.")
+    if ex in {"LSE", "SEHK", "IBIS", "SBF", "IDEALPRO"}:
+        raise RuntimeError(f"US-only mod aktif: {ex} borsasında işlem engellendi.")
+
+
+def filter_ibkr_symbols_us_only(symbols: List[str]) -> List[str]:
+    if not IBKR_US_ONLY:
+        return [normalize_symbol(s) for s in symbols if str(s).strip()]
+    allowed_regions = {"US", "US_FUTURES", "CRYPTO"}
+    filtered: List[str] = []
+    for raw in symbols:
+        sym = normalize_symbol(raw)
+        if not sym:
+            continue
+        info = get_ibkr_symbol_market_info(sym)
+        if str(info.get("region", "US")).upper() in allowed_regions:
+            filtered.append(sym)
+    return filtered
+
+
 def to_yfinance_symbol(symbol: str) -> str:
     """IBKR sembolunu yfinance'in bekledigi formata cevirir. ABD hisseleri
     degismeden kalir; Ingiltere (LSE) hisselerine '.L', Hong Kong (SEHK)
@@ -398,19 +448,6 @@ def _parse_symbol_list(raw: str) -> List[str]:
 
 
 AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
-# Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde - genis
-# sembol havuzu + dusuk guven esigi cok fazla dusuk kaliteli islem aciyordu
-# (60 islemde net kar ~0). Diger iki auto-trader gibi artik env ile
-# ayarlanabilir, varsayilan 65 -> 70'e cikarildi (daha az ama daha kaliteli islem).
-# GUNCELLEME (20 Agustos, 'dün çok zarar ettik' - 19 Agustos'ta BTCUSDT/ETHUSDT/
-# BTCUSDT_261225 SHORT pozisyonlari fiyat YUKARI giderken art arda zarar-kesle
-# kapandi, toplam -25.79 USD'nin -30.46'si zarar-kesten geldi - yon okuma
-# hatasi/zayif sinyal deseni): esik 70 -> 74'e cikarildi (kullanicinin acikca
-# 'Binance'i değiştir' talebiyle, IBKR ayarlari degil).
-# GUNCELLEME (kullanicinin talebi: 'gerçek yatırımcı olsan nasıl kurardın' ->
-# 'senin istediğin gibi kur'): az ama seçici islem felsefesiyle esik
-# 74 -> 82'ye cikarildi - sadece yuksek guvenli sinyallerde islem acilir.
-AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "82"))
 # Kullanicinin talebi: 'günlük işlem sayıları artsın'. Eskiden sabit 5'te
 # kaliyordu (env ile ayarlanamiyordu) - genis sembol havuzu ve Kelly bazli
 # pozisyon boyutlandirma ile birlikte artik daha fazla gunluk emir hakkina
@@ -428,13 +465,15 @@ AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_AUTO_MAX_DAILY_TRADES", "1
 IBKR_AUTO_TRADER = AutoTraderState()
 IBKR_AUTO_TRADER.broker = "IBKR"
 IBKR_AUTO_TRADER.symbol = os.getenv("IBKR_AUTO_SYMBOL", "AAPL")
-IBKR_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("IBKR_AUTO_WATCHLIST", _IBKR_WATCHLIST_DEFAULT))
+IBKR_AUTO_TRADER.symbols = filter_ibkr_symbols_us_only(
+    _parse_symbol_list(os.getenv("IBKR_AUTO_WATCHLIST", _IBKR_WATCHLIST_DEFAULT))
+)
 IBKR_AUTO_TRADER.market = "IBKR"
 IBKR_AUTO_TRADER.asset_type = "STK"
 IBKR_AUTO_TRADER.exchange = "SMART"
 IBKR_AUTO_TRADER.currency = "USD"
 IBKR_AUTO_TRADER.quantity = float(os.getenv("IBKR_AUTO_QUANTITY", "1"))
-IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "76"))
+IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "60"))
 IBKR_AUTO_TRADER.interval_sec = int(os.getenv("IBKR_AUTO_INTERVAL_SEC", "30"))
 IBKR_AUTO_TRADER.mode = AUTO_TRADER.mode
 IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower() == "true"
@@ -458,17 +497,6 @@ IBKR_CRYPTO_NOTIONAL_USD = float(os.getenv("IBKR_CRYPTO_NOTIONAL_USD", "50"))
 # (notional) bazli kesirli miktar kullanilir - 1 birim (ör. 1 EUR ~1.08 USD)
 # anlamli bir islem buyuklugu olmadigi icin.
 IBKR_FOREX_NOTIONAL_USD = float(os.getenv("IBKR_FOREX_NOTIONAL_USD", "1000"))
-# KULLANICININ TALEBI ('şu anda sistem emir açabiliyormu' teshisi): canli
-# loglarda IBKR'in "Error 399: ... below the EUR/GBP/NZD 20000 IdealPro
-# minimum and will be routed as an odd lot order" uyarisi goruldu ve bu
-# odd-lot emirler API uzerinden HICBIR ZAMAN dolmuyor, sessizce 'Inactive'
-# kaliyordu. IDEALPRO'da baz para biriminden 20.000 birim ALTINDAKI emirler
-# 'odd lot' sayilir. Hesap kucuk oldugu icin (~800 USD sermaye) bu minimumu
-# hicbir major pariteda (EEUR/GBP/AUD/NZD) karsilamak mumkun degil (ör.
-# 20.000 EUR ~23.000 USD gerektirir) - bu yuzden gercek notional yerine
-# emri TAMAMEN ATLAMAK (asla dolmayacak sahte 'emir gonderildi' izlenimi
-# vermemek icin) tercih edildi.
-IBKR_FOREX_MIN_LOT_UNITS = float(os.getenv("IBKR_FOREX_MIN_LOT_UNITS", "20000"))
 
 # Binance SPOT icin de Futures'tan tamamen bagimsiz ucuncu bir auto-trader ornegi.
 # Futures kaldiracli/short calisirken, spot sadece "elde tutulan varligi al/sat"
@@ -479,7 +507,7 @@ SPOT_AUTO_TRADER.broker = "BINANCE_SPOT"
 SPOT_AUTO_TRADER.market = "SPOT"
 SPOT_AUTO_TRADER.symbol = "ETHUSDT"
 SPOT_AUTO_TRADER.symbols = _parse_symbol_list(os.getenv("BINANCE_SPOT_AUTO_WATCHLIST", _BINANCE_WATCHLIST_DEFAULT))
-SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "82"))
+SPOT_AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_SPOT_AUTO_MIN_CONFIDENCE", "65"))
 SPOT_AUTO_TRADER.interval_sec = int(os.getenv("BINANCE_SPOT_AUTO_INTERVAL_SEC", "25"))
 SPOT_AUTO_TRADER.max_daily_trades = int(os.getenv("BINANCE_SPOT_AUTO_MAX_DAILY_TRADES", "12"))
 SPOT_AUTO_TRADER.mode = AUTO_TRADER.mode
@@ -598,25 +626,8 @@ SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT
 SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
 SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "1.2"))
 BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "2.0"))
-# Kullanicinin talebi (20 Agustos, 'dün çok zarar ettik'): 19 Agustos'ta
-# BTCUSDT/ETHUSDT/BTCUSDT_261225 SHORT pozisyonlari fiyat YUKARI (rally)
-# giderken art arda %6-10.7 zararla kapandi (toplam -25.79 USD'nin -30.46'si
-# zarar-kesten) - yon okuma hatasi. TP%2 sabit kalirken SL 6.0 -> 4.0'a
-# cekilerek risk:odul orani 1:3'ten 1:2'ye iyilestirildi, yanlis yonlu
-# islemlerde zarar daha erken/kucuk kesiliyor.
-# GUNCELLEME ('gerçek yatırımcı olsan nasıl kurardın' -> 'senin istediğin
-# gibi kur'): profesyonel sistemlerin ozelligi 'kucuk zarar, buyuk kazanc'
-# asimetrisidir. TP%2 + trailing stop (kazananlari zirveye kadar tasima)
-# zaten kazanc tarafini buyutuyordu; SL 4.0 -> 3.0'a cekilerek kayip tarafi
-# da kucultuldu - artik basa bas icin gereken kazanma orani %66.7 -> %60'a
-# dustu, kalan fark doğrudan kar marjina donusuyor.
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "2.0"))
-# Kullanicinin talebi (20 Agustos): 'IBKR'de fiyat düşse bile toparlanıyor' -
-# ABD hisseleri genelde derin dususlerden toparlanma egiliminde oldugu icin
-# genis zarar-kes esigi (Railway'de %20) BILINCLI/ISTENEN bir davranis,
-# degistirilmedi (kullanici talebiyle geri alindi - onceki analiz denemesinde
-# %6'ya cekilmisti, kullanici acikca 'IBKR öyle kalsın' dedi).
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
 # Kullanicinin talebi: son 1 haftalik islem gecmisi analiz edilince (bkz.
 # /position-closures) SHEL ve HSBA (ikisi de LSE/Londra hisseleri) 3'er kez
@@ -667,21 +678,6 @@ IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
     if s.strip()
 )
 
-# Kullanicinin talebi ('bir de işlem yapmayalım dediğimiz hisseleri
-# taranmaya alma' + 'solusdt'): yukaridaki IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS
-# sadece IBKR ALIM emrini engelliyordu, ama sembol yine de her dongude
-# taraniyor, AI karari uretiliyor ve auto_history'e yaziliyordu (bosuna API
-# cagrisi + DB sismesi + karar merkezinde gereksiz gurultu). Bu yeni liste
-# TUM brokerlar (IBKR/BINANCE/BINANCE_SPOT) icin sembolu TARAMA dongusunun
-# EN BASINDA tamamen atlar - hicbir AI karari uretilmez, hicbir log yazilmaz.
-# SOLUSDT kullanicinin acikca 'bir daha islem yapmayalim' dedigi sembol
-# oldugu icin varsayilana eklendi. Ortam degiskeniyle genisletilebilir.
-AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS = set(
-    s.strip().upper()
-    for s in os.getenv("AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS", "SOLUSDT").split(",")
-    if s.strip()
-)
-
 # Kullanicinin talebi: 'genel olarak uygulamanin daha karli calismasi icin
 # eklenebilecek bir sey var mi, buyuk fon/yatirimci/karli sistemlerde ne
 # var bizde eksik'. 30 gunluk portfoy analizinde ort. kazanc %1.86 iken ort.
@@ -692,15 +688,6 @@ AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS = set(
 # (LSE/grandfather/scaled dahil), kar hedefi bu oranin ALTINA asla dusurulmez
 # (bkz. compute_dynamic_take_profit_pct).
 MIN_REWARD_RISK_RATIO = float(os.getenv("MIN_REWARD_RISK_RATIO", "1.5"))
-# Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde - yatay/
-# gurultulu (chop) piyasada islem acmak (net trend yokken) kayiplarin buyuk
-# kismini olusturuyordu (bkz. compute_adx). ADX bu esigin ALTINDAYSA (zayif/yok
-# trend) yeni pozisyon acma/buyutme koşulsuz engellenir (bkz.
-# _hard_block_weak_trend_chop) - mevcut pozisyon kapatma ASLA etkilenmez.
-# GUNCELLEME ('gerçek yatırımcı olsan nasıl kurardın' -> 'senin istediğin
-# gibi kur'): 'fırsat net olduğunda gir, degilse pas geç' felsefesiyle esik
-# 20 -> 25'e cikarildi - daha guclu, net trend teyidi olmadan islem acilmaz.
-ADX_MIN_TREND_STRENGTH = float(os.getenv("ADX_MIN_TREND_STRENGTH", "25"))
 # ATR-bazli dinamik kar hedefi carpani: sabit yuzde yerine, o an ki
 # volatiliteye (ATR% - bkz. get_technical_indicator_snapshot) gore hedef
 # ATR_TARGET_MULTIPLIER kati kadar buyutulur (asla kucultulmez, sadece
@@ -725,30 +712,6 @@ IBKR_TAKE_PROFIT_PCT_NON_STOCK = float(os.getenv("IBKR_TAKE_PROFIT_PCT_NON_STOCK
 # arttigi icin risk de arttigindan kari daha erken realize etmek mantikli.
 BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "1.0"))
 IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.0"))
-# Kullanicinin talebi: 'atr çok yüksek, T %3.51 karda kapatılsın, atr
-# olanlarda en fazla yüzde 2'de kapatılsın' - ATR-bazli dinamik hedef
-# (compute_dynamic_take_profit_pct, bkz. ATR_TARGET_MULTIPLIER) volatil
-# hisselerde hedefi %8+ gibi ulasilmasi zor seviyelere buyutebiliyordu (T
-# ornegi: ATR%2.67 x 3.0 = %8 hedef, %3.51 karda pozisyon hic kapanmadi).
-# Bu ust sinir IBKR hisse (STK) pozisyonlarinda ATR-buyutulmus hedefi
-# ASLA bu degerin ustune cikarmaz (sabit taban hedef, IBKR_TAKE_PROFIT_PCT,
-# etkilenmez - o zaten bunun altinda).
-IBKR_ATR_TAKE_PROFIT_CAP_PCT = float(os.getenv("IBKR_ATR_TAKE_PROFIT_CAP_PCT", "3.0"))
-# Kullanicinin bildirdigi hata: 'nakit var ama hiç işlem açmamış', 'nvda güzel
-# arttı onda bile işlem yapmadı'. Canli trade_journal kayitlari incelendiginde
-# GERCEK kok neden bulundu: hesapta CANLI piyasa veri aboneligi yok (sadece
-# DELAYED/gecikmeli - bkz. '[IBKR] Market data type set to DELAYED (3)' log
-# mesaji), bu yuzden IBKR sunuculari ham MARKET emirlerinin referans fiyatini
-# guvenilir dogrulayamiyor ve emri sessizce 'Inactive' durumunda birakip HICBIR
-# ZAMAN doldurmuyordu (canli loglarda NVDA/TSLA/GLD icin AYNI GUN icinde
-# yuzlerce kez, hem mesai ici hem disi, tekrar tekrar gozlemlendi - islem asla
-# gerceklesmedi, tek fark eden pozisyonlar T/F sadece SEYREK doldu). IBKR'in
-# kendi API dokumantasyonunun onerdigi cozum: gecikmeli veri aboneligi olan
-# hesaplarda ham MARKET yerine agresif ("marketable") bir LIMIT emri
-# kullanmak - BUY icin son bilinen fiyatin hemen ustunde, SELL icin hemen
-# altinda bir limit fiyati, likit piyasalarda ani doluma pratikte esdegerdir
-# ama IBKR'in referans-fiyat kaynakli 'Inactive' reddini engeller.
-IBKR_MARKETABLE_LIMIT_BUFFER_PCT = float(os.getenv("IBKR_MARKETABLE_LIMIT_BUFFER_PCT", "0.5"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
 # dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
@@ -797,7 +760,7 @@ IBKR_MIN_CONFIRMATIONS_CRYPTO_WEEKEND = int(
 # pencere teyit mekanizmasi (bkz. _log_ibkr_confirmation_event /
 # _get_ibkr_confirmation_net_score - broker'a ozel degil, sembol+yon bazli
 # calisir) uzerinden bir GATE olarak uygulanir.
-BINANCE_MIN_CONFIRMATIONS = int(os.getenv("BINANCE_MIN_CONFIRMATIONS", "6"))
+BINANCE_MIN_CONFIRMATIONS = int(os.getenv("BINANCE_MIN_CONFIRMATIONS", "4"))
 
 # ATR (Average True Range) bazli volatilite-adaptif pozisyon boyutlandirma esikleri
 # (kullanicinin talebi: 'ATR ekle'). atr_pct = ATR(14) / son kapanis * 100.
@@ -821,25 +784,6 @@ KELLY_FRACTION = float(os.getenv("KELLY_FRACTION", "0.5"))
 KELLY_MIN_SCALE = float(os.getenv("KELLY_MIN_SCALE", "0.5"))
 KELLY_MAX_SCALE = float(os.getenv("KELLY_MAX_SCALE", "1.5"))
 KELLY_LOOKBACK_DAYS = int(os.getenv("KELLY_LOOKBACK_DAYS", "60"))
-
-# Kullanicinin talebi (27 Agustos, 'nerede hata yaptik' analizi): 24 Agustos
-# 11:36'da acilan tek bir BTCUSDT SHORT islemi normal pozisyon marjinin
-# (~80 USD) YAKLASIK 2.6 KATI (~206 USD) buyuklukte acildi (muhtemelen
-# ayni anda hem Kelly hem ATR hem market-cycle katmanlarinin hepsi buyutme
-# yonunde ust uste binmesinden) ve -8.08 USD zararla kapandi - bu TEK islem,
-# ayni 5 gunluk pencheredeki DIGER 26 islemin toplam net K/Z'sini (+0.01 USD,
-# fiilen tam basa bas) tek basina sildi. Kok neden: birden fazla boyut-
-# buyutme katmani (market_cycle_qty_scale x atr_qty_scale x
-# portfolio_risk_qty_scale x kelly_qty_scale) CARPIMSAL calisiyor - her biri
-# ayri ayri makul bir ust sinira sahip olsa da (ör. Kelly max 1.5x), hepsi
-# ayni anda buyutme yonunde hizalanirsa carpimin kendisi cok daha buyuk bir
-# sonuc uretebiliyordu (1.5 x 1.25 x ... > 1.5). Bu yuzden TUM katmanlarin
-# BILESIK carpimina da ayri, daha siki bir ust tavan (MAX_COMBINED_QTY_SCALE)
-# eklendi - hicbir tek islem, katmanlarin kac tanesi ayni anda buyutme
-# yonunde hizalanirsa hizalansin, normal boyutun bu katindan fazla acilamaz.
-# Kucultme yonu (0'a kadar) HICBIR SEKILDE sinirlanmaz - bu tavan sadece
-# yukari carpimsal birikmeyi keser, asagi risk azaltmayi asla engellemez.
-MAX_COMBINED_QTY_SCALE = float(os.getenv("MAX_COMBINED_QTY_SCALE", "1.5"))
 
 # Kullanicinin talebi: 'acigа satis islemi yapamiyor mu sistem, açığa satış
 # yapılabilecek hisselerde açığa satış denenebilir'. Onceden bu hesap SADECE
@@ -1954,8 +1898,7 @@ def db_recent_position_closures(limit: int = 50) -> List[Dict[str, Any]]:
 
 
 def db_all_position_closures(
-    days: Optional[int] = None, broker: Optional[str] = None, include_mandatory_holdings: bool = False,
-    include_legacy_dated_contracts: bool = False,
+    days: Optional[int] = None, broker: Optional[str] = None, include_mandatory_holdings: bool = False
 ) -> List[Dict[str, Any]]:
     """Performans istatistikleri icin TUM kapanis kayitlarini (trade_journal'daki
     500 satir sinirinin aksine, position_closures hicbir zaman silinmedigi icin
@@ -1965,18 +1908,7 @@ def db_all_position_closures(
     disariya alinir: bu hisse, aracı kurumdan (IBKR) islem yapabilmek icin
     zorunlu tutulan bir pay - gercek bir AI alim-satim karari degil, bu yuzden
     kar/zarari performans istatistiklerini carpitmasin diye haric tutuluyor.
-    include_mandatory_holdings=True verilirse bu filtre kaldirilir.
-
-    KOK NEDEN DUZELTMESI (kullanicinin 'rapor her zaman ayni eski islemi
-    gosteriyor, raporu duzelt' sikayeti): sembolunde alt cizgi (_) olan
-    tarihli/vadeli Binance futures kontratlari (orn. BTCUSDT_261225),
-    _auto_trader_run_symbol() icindeki kalici koruma sayesinde ARTIK BIR
-    DAHA ASLA acilamaz - yani bu tur eski kapanislar sistemin GUNCEL
-    davranisini yansitmiyor, sadece gecmiste (koruma eklenmeden once) acilan
-    tek seferlik bir hatanin kalintisi. Varsayilan olarak bu kayitlar
-    performans/rapor hesaplarindan haric tutulur ki 'son X gun' raporlari
-    surekli o tek eski islemle carpitilmasin; include_legacy_dated_contracts=True
-    ile (denetim/arsiv amacli) tekrar dahil edilebilir."""
+    include_mandatory_holdings=True verilirse bu filtre kaldirilir."""
     where_clauses = []
     params: List[Any] = []
     if days and days > 0:
@@ -1989,9 +1921,6 @@ def db_all_position_closures(
     if not include_mandatory_holdings:
         where_clauses.append("UPPER(symbol) != ?")
         params.append("IBKR")
-    if not include_legacy_dated_contracts:
-        where_clauses.append("symbol NOT LIKE ? ESCAPE '\\'")
-        params.append("%\\_%")
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     with DB_LOCK:
@@ -3904,23 +3833,9 @@ def ibkr_open_orders_snapshot() -> List[Dict[str, Any]]:
     gerceklesmemis, ancak AI Karar Merkezi'nde 'AÇILDI' gibi gorunuyordu -
     bu emirlerin Trading Center'da 'açık emirler' olarak gorulebilmesi ve AI
     tarafinin da bunlari ayri bir durum (SUBMITTED/'Emir iletildi') olarak
-    isaretleyebilmesi icin bu anlik goruntu eklendi.
-    GUNCELLEME (kullanicinin 'nvda emir iletildi diyor ama işlem açılmadı'
-    teshisi): sadece ib.openTrades() (bu API oturumunun YEREL bellek
-    onbellegi) kullanmak, IBKR baglantisi yeniden kuruldugunda (reconnect)
-    ONCEKI oturumda gonderilmis, hala IBKR sunucusunda YASAYAN acik
-    emirleri KAYBEDIYORDU - bu yuzden yigilma-onleme kontrolu (bkz.
-    _auto_trader_run_symbol) reconnect sonrasi bu emirleri goremiyor ve
-    tekrar tekrar YENI kopya emir gonderilmesine izin veriyordu. Artik
-    once ib.reqAllOpenOrders() ile IBKR'den (bu hesaba ait TUM
-    client'lardaki) acik emirlerin GUNCEL/TAM listesi zorla istenip yerel
-    onbellek tazeleniyor, sonra ib.openTrades() okunuyor."""
+    isaretleyebilmesi icin bu anlik goruntu eklendi. ib.openTrades() henuz
+    tamamlanmamis (Done olmayan) tum trade'leri dondurur."""
     def _run(ib, _):
-        try:
-            ib.reqAllOpenOrders()
-            ib.sleep(1.0)
-        except Exception:
-            pass
         rows: List[Dict[str, Any]] = []
         for trade in ib.openTrades():
             try:
@@ -3944,8 +3859,6 @@ def ibkr_open_orders_snapshot() -> List[Dict[str, Any]]:
                     "price": str(getattr(order, "lmtPrice", "") or getattr(trade.orderStatus, "avgFillPrice", "") or "-"),
                     "status": status or "Submitted",
                     "orderId": getattr(order, "orderId", None),
-                    "whyHeld": str(getattr(trade.orderStatus, "whyHeld", "") or ""),
-                    "outsideRth": bool(getattr(order, "outsideRth", False)),
                 })
             except Exception:
                 continue
@@ -4264,47 +4177,6 @@ def get_ibkr_available_funds() -> float:
     return _cache_get_or_fetch("ibkr_available_funds", 20, _fetch)
 
 
-def _ibkr_reserved_amount_for_open_buy_orders(exclude_symbol: str = "") -> float:
-    """KULLANICININ TESHISI ('nvda da neden işlem açmamış'): ayni 30sn'lik
-    dongude NVDA/GLD/AMZN/AAPL/TSLA/MSFT gibi bircok farkli sembol icin
-    art arda BUY emri gonderiliyordu; her biri get_ibkr_available_funds()'i
-    AYRI AYRI kontrol ediyordu ve hepsi 'yeterli' gorunuyordu - cunku IBKR
-    henuz 'Inactive' (kuyrukta/PreSubmitted) emirler icin AvailableFunds'i
-    ANINDA dusurmuyor. Sonuc: hesabin gercek alim gucunden (ör. 760 USD)
-    KAT KAT fazla (ör. 2000+ USD) toplam tutarda emir ayni anda acik kaliyor,
-    IBKR bunlarin bir kismini (bu ornekte NVDA dahil cogu) sonsuza kadar
-    'Inactive' tutup hicbirini gerceklestirmiyor - cunku toplamda hepsini
-    karsilayacak fon yok. Bu fonksiyon, halihazirda acik (Filled/Cancelled/
-    ApiCancelled DISINDAKI) TUM BUY emirlerinin toplam USD tutarini hesaplar
-    ki yeni bir emir gonderilmeden once GERCEK kullanilabilir fon (mevcut
-    taahhutler dusulmus) bulunabilsin."""
-    total = 0.0
-    try:
-        _exclude = normalize_symbol(exclude_symbol).upper() if exclude_symbol else ""
-        for _oo in ibkr_open_orders_snapshot():
-            try:
-                if str(_oo.get("side", "")).upper() != "BUY":
-                    continue
-                if str(_oo.get("status", "")).upper() in ("FILLED", "CANCELLED", "APICANCELLED"):
-                    continue
-                _oo_symbol = normalize_symbol(str(_oo.get("symbol", ""))).upper()
-                if _exclude and _oo_symbol == _exclude:
-                    continue
-                _remaining = safe_float(_oo.get("remaining", 0))
-                _price = safe_float(_oo.get("price", 0))
-                if _remaining <= 0 or _price <= 0:
-                    continue
-                _cur = str(_oo.get("currency", "USD") or "USD").upper()
-                _exch = str(_oo.get("exchange", "") or "")
-                _native_price = _price / 100.0 if (_exch.upper() == "LSE" and _cur == "GBP") else _price
-                total += _remaining * get_ibkr_price_usd_equivalent(_native_price, _exch, _cur)
-            except Exception:
-                continue
-    except Exception:
-        return 0.0
-    return total
-
-
 def get_ibkr_cash_balance(currency: str) -> float:
     """IBKR hesabindaki belirli bir para biriminden (ör. GBP, HKD) elde bulunan
     nakit bakiyeyi dondurur. Coklu-borsa alimlarinda (Ingiltere/Hong Kong) once
@@ -4317,13 +4189,7 @@ def get_ibkr_cash_balance(currency: str) -> float:
         except Exception:
             return 0.0
         for r in rows:
-            # NOT: ib_insync'in ib.accountSummary() cagrisi "CashBalance" diye bir
-            # tag ASLA dondurmez (bu accountValues'a ozgu bir tag, accountSummary
-            # standart tag listesinde yok) - bu yuzden bu fonksiyon HER ZAMAN 0.0
-            # donuyordu ve /ibkr/buy-max-affordable gibi nakit-bagimli tum
-            # akislar hatali sekilde "nakit yok" sanıyordu. Dogru karsilik
-            # "TotalCashValue".
-            if str(r.get("tag", "")) == "TotalCashValue" and str(r.get("currency", "")).upper() == cur:
+            if str(r.get("tag", "")) == "CashBalance" and str(r.get("currency", "")).upper() == cur:
                 return safe_float(r.get("value"))
         return 0.0
     return _cache_get_or_fetch(f"ibkr_cash_balance_{cur}", 20, _fetch)
@@ -4371,6 +4237,7 @@ def ibkr_convert_currency_to_usd(source_currency: str, amount: float) -> Dict[st
         currency="USD",
         request_id=request_id,
         allow_fractional=True,
+        bypass_us_only=True,
     )
     _invalidate_cache(f"ibkr_cash_balance_{cur}")
     _invalidate_cache("ibkr_cash_balance_USD")
@@ -4428,74 +4295,6 @@ def ensure_ibkr_currency_funds(target_currency: str, needed_amount: float) -> Di
         return result
     except Exception as exc:
         return {"converted": False, "error": str(exc)}
-
-
-    # Kullanicinin talebi (20 Agustos): IBKR hesabinda seans (RTH) disinda
-    # gonderilen ABD hisse emirlerinin sessizce 'Inactive' kalip HICBIR ZAMAN
-    # dolmadigi CANLI olarak dogrulandi (ayni sembol/emir tipi seans disinda
-    # takili kalip, seans acildiginda calisiyordu). Kullanici hesap tarafinda
-    # bir ayar duzeltip 'ŞU AN SEANS AÇIK OLMADIĞI İÇİN EMİR İLETMİYOR, SADECE
-    # SEANS AÇIKKEN EMİR İLET' talimatini net verdi - bu yuzden ABD hisse (STK)
-    # ALIM emirleri artik SADECE gercek normal seans (RTH, 09:30-16:00 ET)
-    # icindeyken gonderilir; pre-market/after-hours penceresi de (04:00-09:30
-    # ve 16:00-20:00 ET) artik 'too early/late' sayilir. Kapanis (SAT/zarar-kes/
-    # kar-al) emirleri BU KONTROLDEN ETKILENMEZ (enforce_ibkr_take_profit_stop_loss
-    # bu fonksiyonu hic cagirmaz) - zarari erken kesmek icin seans disinda da
-    # denenmeye devam eder. Ortam degiskeniyle eski (sadece 'olu saatler')
-    # davranisina geri donulebilir.
-IBKR_STOCK_BUY_RTH_ONLY = os.getenv("IBKR_STOCK_BUY_RTH_ONLY", "1") != "0"
-
-
-def _us_stock_order_too_early(exchange: str) -> str:
-    """Kullanicinin talebi ('emir iletim zamanına kadar emir iletme'): ABD
-    (SMART/NASDAQ/NYSE) hisseleri icin IBKR pre-market/after-hours penceresi
-    yaklasik 04:00-20:00 ET (08:00-00:00 UTC) arasidir - bu araligin DISINDA
-    (20:00-04:00 ET, yani 00:00-08:00 UTC 'olu saatler') gonderilen bir emir
-    IBKR'de dogrudan Error 399 ('will not be placed at the exchange until
-    04:00 US/Eastern') ile 'Inactive' kuyruga giriyordu. Sistem bunu saatler
-    once (ornegin gece yarisindan hemen sonra) gonderip kuyrukta bekletmek
-    yerine, kullanicinin istedigi gibi gercek iletim penceresi baslayana
-    kadar emri HIC GONDERMEZ - boylece hem gereksiz erken kuyruklama hem de
-    (bir onceki duzeltmeyle birlikte) 'Inactive' + tekrar deneme dongusunden
-    kaynaklanan emir yigilmasi tamamen onlenir. LSE/SEHK/IBIS/SBF/IDEALPRO/
-    CME/COMEX/NYMEX zaten kendi mesaj/kurallariyla (_ibkr_closed_exchange_message)
-    ele alindigi icin bu fonksiyon SADECE SMART/US borsalari icin calisir.
-
-    GUNCELLEME (20 Agustos, IBKR_STOCK_BUY_RTH_ONLY varsayilan acik): artik
-    sadece 00:00-08:00 UTC 'olu saatler' degil, TUM normal-seans-disi pencere
-    (pre-market 08:00-13:30 UTC ve after-hours 20:00-00:00 UTC dahil) 'too
-    early' sayilir - yeni ALIM emri SADECE 13:30-20:00 UTC (09:30-16:00 ET,
-    gercek RTH) icinde gonderilir."""
-    ex = str(exchange or "SMART").upper()
-    if ex in ("LSE", "SEHK", "IBIS", "SBF", "IDEALPRO", "CME", "COMEX", "NYMEX", "PAXOS"):
-        return ""
-    now_utc = datetime.now(timezone.utc)
-    minute_of_day = now_utc.hour * 60 + now_utc.minute
-    rth_start, rth_end = 13 * 60 + 30, 20 * 60  # 09:30-16:00 ET (DST yaklasik)
-    if IBKR_STOCK_BUY_RTH_ONLY:
-        if rth_start <= minute_of_day < rth_end:
-            return ""
-        if minute_of_day < rth_start:
-            minutes_left = rth_start - minute_of_day
-        else:
-            minutes_left = (24 * 60 - minute_of_day) + rth_start
-        hours_left = minutes_left / 60.0
-        return (
-            f"ABD hisse seansı (RTH, 09:30-16:00 ET) şu an açık değil, "
-            f"yaklaşık {hours_left:.1f} saat sonra açılacak. Yeni ALIM emri "
-            f"sadece gerçek seans saatlerinde gönderilir (kullanıcı talebi)."
-        )
-    # 00:00-08:00 UTC = 20:00-04:00 ET (DST yaklasik) - ABD hisseleri icin
-    # hicbir seans (ne RTH ne pre/after-market) yok.
-    if 0 <= minute_of_day < 8 * 60:
-        minutes_left = 8 * 60 - minute_of_day
-        hours_left = minutes_left / 60.0
-        return (
-            f"ABD piyasası şu an tamamen kapalı (pre-market/after-hours dahil), "
-            f"04:00 US/Eastern'da (yaklaşık {hours_left:.1f} saat sonra) açılacak. "
-            f"Emir, gerçek iletim zamanına kadar gönderilmeyecek."
-        )
-    return ""
 
 
 def _ibkr_closed_exchange_message(exchange: str) -> str:
@@ -4558,7 +4357,7 @@ def ibkr_place_market_order(
     allow_fractional: bool = False,
     contract_month: str = "",
     cash_qty: Optional[float] = None,
-    limit_price_hint: Optional[float] = None,
+    bypass_us_only: bool = False,
 ) -> Dict[str, Any]:
     def _run(ib, ibs):
         # KULLANICININ TALEBI: NVDA gibi pahali hisselerde 1 tam hisseye
@@ -4579,6 +4378,13 @@ def ibkr_place_market_order(
         order_side = str(side or "").upper()
         if order_side not in ["BUY", "SELL"]:
             raise RuntimeError("side BUY veya SELL olmalı.")
+        assert_ibkr_us_only_trade_allowed(
+            symbol=symbol,
+            asset_type=asset_type,
+            exchange=exchange,
+            currency=currency,
+            bypass_us_only=bypass_us_only,
+        )
         closed_msg = _ibkr_closed_exchange_message(exchange)
         if closed_msg:
             raise RuntimeError(closed_msg)
@@ -4595,120 +4401,25 @@ def ibkr_place_market_order(
             # seans saatlerinde kabul edilir.
             order.outsideRth = False
         else:
-            order_quantity = quantity
-            _asset_type_upper = str(asset_type or "").upper()
-            if _asset_type_upper in ("FOREX", "FX", "CASH") and not allow_fractional:
-                # Kullanicinin bildirdigi hata: 'nakit var ama hiç işlem
-                # açmamış' teshisi sirasinda canli loglarda "Error 10318:
-                # This order doesn't support fractional quantity trading"
-                # goruldu (orn. EURUSD BUY totalQuantity=640.9517). IBKR
-                # forex emirlerinde KESIRLI birim miktarini API uzerinden
-                # KABUL ETMIYOR - butce/fiyat bolmesinden gelen kesirli
-                # miktar tam sayiya yuvarlanmali, aksi halde emir daima
-                # 'Cancelled' ile reddediliyordu.
-                order_quantity = float(math.floor(quantity))
-                if order_quantity <= 0:
-                    raise RuntimeError("Forex miktarı yuvarlandıktan sonra 0'a düştü.")
-            is_fractional_qty = abs(order_quantity - round(order_quantity)) > 1e-9
-            # Kullanicinin bildirdigi hata: 'nvda güzel arttı onda bile işlem
-            # yapmadı' teshisi sirasinda GERCEK kok neden bulundu (bkz.
-            # IBKR_MARKETABLE_LIMIT_BUFFER_PCT yorumu) - hesapta canli veri
-            # aboneligi olmadigi /debug/ibkr-market-data-test ile DOGRULANDI
-            # (Error 10089: "Delayed market data is available"). Ham MARKET
-            # emri, IBKR sunucularinin guvenilir referans fiyati olmadan
-            # dogrulayamadigi icin sessizce 'Inactive' kalip HICBIR ZAMAN
-            # dolmuyordu. Bir referans fiyat (limit_price_hint, caginin
-            # zaten sahip oldugu son bilinen fiyat) verildiginde, kesirli
-            # olmayan miktarlarda agresif (marketable) bir LIMIT emrine
-            # geciyoruz - likit piyasalarda ani doluma esdeger ama IBKR'in
-            # referans-fiyat kaynakli reddini onler.
-            if limit_price_hint and limit_price_hint > 0 and not is_fractional_qty:
-                buffer_pct = IBKR_MARKETABLE_LIMIT_BUFFER_PCT / 100.0
-                if order_side == "BUY":
-                    raw_limit_price = limit_price_hint * (1 + buffer_pct)
-                else:
-                    raw_limit_price = limit_price_hint * (1 - buffer_pct)
-                # KULLANICININ TALEBI ('ai karar merkezinde nvda emir iletildi
-                # diyor ama işlem açılmadı' teshisinin GERCEK kok nedeni):
-                # yeni eklenen errorEvent yakalamasi sayesinde canli olarak
-                # "IBKR Error 110: The price does not conform to the minimum
-                # price variation for this contract." goruldu - fiyat her
-                # zaman 4 ondalik basamaga yuvarlaniyordu (ör. 226.8084) ama
-                # IBKR hisse senetleri icin $1 uzerinde 0.01 (2 ondalik),
-                # forex icin 0.00005 (5 ondalik) gibi enstrumana ozgu minimum
-                # fiyat adimlari (tick size) zorunlu kılıyor - uymayan emir
-                # SESSIZCE PendingSubmit'te asili kalıyor, hicbir zaman
-                # dolmuyordu. Artik varlik turu ve fiyat seviyesine gore
-                # doğru tick size'a yuvarlaniyor.
-                _at_upper = str(asset_type or "").upper()
-                if _at_upper in ("FOREX", "FX", "CASH"):
-                    tick_size, decimals = 0.00005, 5
-                elif _at_upper == "CRYPTO":
-                    tick_size, decimals = 0.01, 2
-                elif raw_limit_price < 1.0:
-                    tick_size, decimals = 0.0001, 4
-                else:
-                    tick_size, decimals = 0.01, 2
-                if order_side == "BUY":
-                    limit_price = math.ceil(raw_limit_price / tick_size) * tick_size
-                else:
-                    limit_price = math.floor(raw_limit_price / tick_size) * tick_size
-                limit_price = round(limit_price, decimals)
-                order = ibs.LimitOrder(order_side, order_quantity, limit_price)
-                order.tif = "DAY"
-                order.outsideRth = True
-            else:
-                order = ibs.MarketOrder(order_side, order_quantity)
-                order.tif = "DAY"
-                # IBKR kesirli hisse (fractional share) emirleri SADECE normal seans
-                # saatlerinde (RTH) kabul edilir - outsideRth=True ile birlikte
-                # gonderilirse "Error 10243: Fractional-sized order cannot be placed
-                # via API" hatasi alinir. Bu yuzden kesirli miktar gonderiliyorsa
-                # (allow_fractional=True, sadece ABD/SMART hisseleri icin kullanilir)
-                # outsideRth KAPATILIR; tam sayi miktarlarda eski davranis (mesai-disi
-                # da islem yapabilme) korunur.
-                order.outsideRth = not (allow_fractional and is_fractional_qty)
+            order = ibs.MarketOrder(order_side, quantity)
+            order.tif = "DAY"
+            # IBKR kesirli hisse (fractional share) emirleri SADECE normal seans
+            # saatlerinde (RTH) kabul edilir - outsideRth=True ile birlikte
+            # gonderilirse "Error 10243: Fractional-sized order cannot be placed
+            # via API" hatasi alinir. Bu yuzden kesirli miktar gonderiliyorsa
+            # (allow_fractional=True, sadece ABD/SMART hisseleri icin kullanilir)
+            # outsideRth KAPATILIR; tam sayi miktarlarda eski davranis (mesai-disi
+            # da islem yapabilme) korunur.
+            is_fractional_qty = abs(quantity - round(quantity)) > 1e-9
+            order.outsideRth = not (allow_fractional and is_fractional_qty)
         if IBKR_ACCOUNT:
             order.account = IBKR_ACCOUNT
-        # KULLANICININ TALEBI ('nvda emir iletildi diyor ama işlem açılmadı'
-        # teshisi): emirler PendingSubmit'te kalip hicbir zaman ilerlemiyordu
-        # ama trade.log HER ZAMAN bostu - IBKR'in kendi hata/uyari mesaji
-        # (ör. gecmiste goruldugu gibi 'Error 321 ... Read-Only mode')
-        # yakalanmiyordu. errorEvent'e gecici bir dinleyici eklenip emir
-        # bekleme penceresi sirasinda gelen TUM IBKR hata/uyari mesajlari
-        # (reqId bu emrin orderId'sine esit olanlar) toplanip sonuca ekleniyor.
-        _ib_order_errors: List[Dict[str, Any]] = []
-        _ib_status_transitions: List[str] = []
-
-        def _on_ib_error(reqId, errorCode, errorString, contract):
-            try:
-                _ib_order_errors.append({"code": errorCode, "msg": str(errorString), "reqId": reqId})
-            except Exception:
-                pass
-
-        def _on_status(t):
-            try:
-                st = str(getattr(t.orderStatus, "status", "") or "")
-                wh = str(getattr(t.orderStatus, "whyHeld", "") or "")
-                entry = f"status={st}" + (f" whyHeld={wh}" if wh else "")
-                if not _ib_status_transitions or _ib_status_transitions[-1] != entry:
-                    _ib_status_transitions.append(entry)
-            except Exception:
-                pass
-
         trade = ib.placeOrder(qualified[0], order)
-        ib.errorEvent += _on_ib_error
-        trade.statusEvent += _on_status
-        _on_status(trade)
-        try:
-            for _ in range(40):
-                status = str(getattr(trade.orderStatus, "status", ""))
-                if status in ibs.OrderStatus.DoneStates:
-                    break
-                ib.sleep(0.25)
-        finally:
-            ib.errorEvent -= _on_ib_error
-            trade.statusEvent -= _on_status
+        for _ in range(40):
+            status = str(getattr(trade.orderStatus, "status", ""))
+            if status in ibs.OrderStatus.DoneStates:
+                break
+            ib.sleep(0.25)
 
         log_messages = []
         try:
@@ -4718,10 +4429,6 @@ def ibkr_place_market_order(
                     log_messages.append(msg)
         except Exception:
             pass
-        for _err in _ib_order_errors:
-            log_messages.append(f"IBKR Error {_err['code']} (reqId={_err.get('reqId')}): {_err['msg']}")
-        for _st in _ib_status_transitions:
-            log_messages.append(f"transition: {_st}")
 
         result = {
             "broker": "IBKR",
@@ -4729,7 +4436,7 @@ def ibkr_place_market_order(
             "symbol": normalize_symbol(symbol),
             "asset_type": str(asset_type or "STK").upper(),
             "side": order_side,
-            "quantity": safe_float(getattr(trade.orderStatus, "filled", 0)) if (cash_qty is not None and cash_qty > 0) else order_quantity,
+            "quantity": safe_float(getattr(trade.orderStatus, "filled", 0)) if (cash_qty is not None and cash_qty > 0) else quantity,
             "cash_qty": round(cash_qty, 2) if (cash_qty is not None and cash_qty > 0) else None,
             "order_id": getattr(trade.order, "orderId", 0),
             "status": getattr(trade.orderStatus, "status", ""),
@@ -4737,7 +4444,7 @@ def ibkr_place_market_order(
             "remaining": safe_float(getattr(trade.orderStatus, "remaining", 0)),
             "avg_fill_price": safe_float(getattr(trade.orderStatus, "avgFillPrice", 0)),
             "why_held": str(getattr(trade.orderStatus, "whyHeld", "") or ""),
-            "log": log_messages[-15:],
+            "log": log_messages[-5:],
             "last_update": now_text(),
         }
         db_insert_trade_journal(
@@ -4751,12 +4458,6 @@ def ibkr_place_market_order(
             payload=result,
             request_id=request_id,
         )
-        # Kullanicinin bildirdigi hata: /trade-log (bellek ici TRADE_LOG) hep
-        # bos gorunuyordu cunku IBKR emirleri sadece db_insert_trade_journal'a
-        # (kalici /trade-journal endpointine) yaziliyordu, Binance emirlerinde
-        # (place_spot_order/place_futures_order) oldugu gibi TRADE_LOG'a hic
-        # eklenmiyordu - bu yuzden /trade-log IBKR islemlerini asla gostermiyordu.
-        TRADE_LOG.insert(0, {"simulated": False, "time": now_text(), "order": result, "request_id": request_id})
         return result
     return ibkr_execute(_run)
 
@@ -5668,64 +5369,6 @@ def compute_atr(highs: List[float], lows: List[float], closes: List[float], peri
     return atr
 
 
-def compute_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
-    """Wilder'in ADX (Average Directional Index) formulu - trend GUCUNU olcer
-    (yon degil, sadece 'trend var mi yok mu, ne kadar guclu'). Kullanicinin
-    talebi: 'kar elde etmek icin ne yapabiliriz' analizinde - yatay/gurultulu
-    (chop) piyasada islem acmanin kayiplarin buyuk kismini olusturdugu
-    goruldugu icin, ADX dusukken (zayif/yok trend) yeni pozisyon acmayi
-    engelleyen bir filtre eklendi (bkz. _hard_block_weak_trend_chop).
-    ADX < 20: trend yok/cok zayif (yatay/chop piyasa).
-    ADX 20-25: trend olusmaya basliyor.
-    ADX > 25: belirgin trend.
-    En az 2*period+1 bar gerektirir (Wilder cift-katmanli smoothing icin),
-    yetersizse None doner (cagiran taraf sessizce notr davranisa duser)."""
-    n = min(len(highs), len(lows), len(closes))
-    if n < (period * 2) + 1:
-        return None
-    plus_dm: List[float] = []
-    minus_dm: List[float] = []
-    true_ranges: List[float] = []
-    for i in range(1, n):
-        up_move = highs[i] - highs[i - 1]
-        down_move = lows[i - 1] - lows[i]
-        plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
-        minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1]),
-        )
-        true_ranges.append(tr)
-    if len(true_ranges) < period * 2:
-        return None
-
-    def _wilder_smooth(values: List[float]) -> List[float]:
-        smoothed = [sum(values[:period])]
-        for v in values[period:]:
-            smoothed.append(smoothed[-1] - (smoothed[-1] / period) + v)
-        return smoothed
-
-    smoothed_tr = _wilder_smooth(true_ranges)
-    smoothed_plus_dm = _wilder_smooth(plus_dm)
-    smoothed_minus_dm = _wilder_smooth(minus_dm)
-    dx_values: List[float] = []
-    for tr_s, pdm_s, mdm_s in zip(smoothed_tr, smoothed_plus_dm, smoothed_minus_dm):
-        if tr_s <= 0:
-            continue
-        plus_di = 100.0 * (pdm_s / tr_s)
-        minus_di = 100.0 * (mdm_s / tr_s)
-        di_sum = plus_di + minus_di
-        dx = (100.0 * abs(plus_di - minus_di) / di_sum) if di_sum > 0 else 0.0
-        dx_values.append(dx)
-    if len(dx_values) < period:
-        return None
-    adx = sum(dx_values[:period]) / period
-    for dx in dx_values[period:]:
-        adx = (adx * (period - 1) + dx) / period
-    return adx
-
-
 def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60, contract_month: str = "") -> List[Dict[str, float]]:
     """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyati VE hacmini ceker
     (RSI/SMA ve hacim teyidi hesaplamalari icin gecmis veri gerekir). /history
@@ -5799,11 +5442,6 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
         sma20 = compute_sma(closes, 20)
         sma50 = compute_sma(closes, 50)
         atr = compute_atr(highs, lows, closes, 14)
-        # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde -
-        # yatay/gurultulu (chop) piyasada islem acmak kayiplarin buyuk kismini
-        # olusturuyordu. ADX (Average Directional Index) trend GUCUNU olcer
-        # (bkz. compute_adx, get_technical_signal_bias'taki hard-block).
-        adx = compute_adx(highs, lows, closes, 14)
         # Kullanicinin talebi: 'RSI/SMA aşırı-uç sinyali sadece yumuşak puan
         # (bias) - dipte SHORT/zirvede LONG açmayı engellemiyor'. MACD
         # histogramı burada da hesaplanip donus teyidi (RSI asiri uc + MACD
@@ -5835,7 +5473,6 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
             "sma_50": round(sma50, 4) if sma50 is not None else None,
             "atr_14": round(atr, 6) if atr is not None else None,
             "atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
-            "adx_14": round(adx, 2) if adx is not None else None,
             "last_close": round(closes[-1], 6),
             "last_closed_volume": round(last_closed_volume, 2),
             "avg_volume_20": round(avg_volume, 2) if avg_volume else None,
@@ -6034,28 +5671,19 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
 
 
 def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
-    """Kisa (1s), orta (4s), uzun (24s), 1 hafta ve 1 ay vadeli mum
-    kapanislarindan yuzde degisim hesaplayip bunlarin AYNI YONDE olup
-    olmadigina bakar. Mevcut sistem sadece 24s degisimi (change_24h)
-    kullaniyordu - kisa vadeli yon celiskisi (orn. 24s +%5 ama son 1s -%2,
-    yani donus baslamis olabilir) fark edilmiyordu. Kripto icin Binance
-    1h/4h/1d/1w mumlari, IBKR icin (intraday veri bu ortamda pratik olarak
-    elde edilemedigi icin) gunluk bar serisinden turetilen kisa/orta/uzun/
-    hafta/ay pencereler kullanilir.
-    Kullanicinin talebi: 'momentumda bir gun uc gun bir hafta bir ay vs
-    bakacaktik hani' - onceden sadece kisa/orta/uzun (1/3/5 gun) pencereler
-    vardi, hafta/ay YOKTU. Simdi 1 hafta (~5 islem gunu) ve 1 ay (~22 islem
-    gunu) pencereleri de eklendi ve "week_month_aligned" alani (haftalik VE
-    aylik ayni yonde mi, yani orta-uzun vadeli gercek trend var mi) bilgisi
-    donduruluyor - bu bilgi artik SADECE bias degil, get_multi_timeframe_co_signal
-    araciligiyla order_flow gibi bagimsiz bir BUY/SELL co-sinyali de
-    uretebiliyor (bkz. asagida).
+    """Kisa (1s), orta (4s) ve uzun (24s) vadeli mum kapanislarindan yuzde
+    degisim hesaplayip bunlarin AYNI YONDE olup olmadigina bakar. Mevcut
+    sistem sadece 24s degisimi (change_24h) kullaniyordu - kisa vadeli yon
+    celiskisi (orn. 24s +%5 ama son 1s -%2, yani donus baslamis olabilir)
+    fark edilmiyordu. Kripto icin Binance 1h/4h/1d mumlari, IBKR icin
+    (intraday veri bu ortamda pratik olarak elde edilemedigi icin) gunluk
+    bar serisinden turetilen kisa/orta/uzun pencereler kullanilir.
     Sembol+broker basina 15dk cache'lenir."""
     def _fetch():
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
             bars = get_ibkr_daily_bars(
-                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=35, contract_month=market_info.get("contract_month", ""),
+                symbol, market_info.get("asset_type", "STK"), market_info.get("exchange", "SMART"), market_info.get("currency", "USD"), num_days=10, contract_month=market_info.get("contract_month", ""),
             )
             closes = [b["close"] for b in bars]
             if len(closes) < 6:
@@ -6063,26 +5691,18 @@ def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -
             short_change = ((closes[-1] - closes[-2]) / closes[-2]) * 100.0 if closes[-2] else 0.0
             mid_change = ((closes[-1] - closes[-4]) / closes[-4]) * 100.0 if len(closes) >= 4 and closes[-4] else 0.0
             long_change = ((closes[-1] - closes[-6]) / closes[-6]) * 100.0 if len(closes) >= 6 and closes[-6] else 0.0
-            week_idx = -6 if len(closes) >= 6 else None
-            week_change = ((closes[-1] - closes[week_idx]) / closes[week_idx]) * 100.0 if week_idx is not None and closes[week_idx] else 0.0
-            month_idx = -22 if len(closes) >= 22 else None
-            month_change = ((closes[-1] - closes[month_idx]) / closes[month_idx]) * 100.0 if month_idx is not None and closes[month_idx] else None
-            timeframe_labels = {"short": "1 gün", "mid": "3 gün", "long": "5 gün", "week": "1 hafta", "month": "1 ay"}
+            timeframe_labels = {"short": "1 gün", "mid": "3 gün", "long": "5 gün"}
         else:
             binance_market = "FUTURES" if broker == "BINANCE_FUTURES" else "SPOT"
             hourly = fetch_binance_klines(symbol, binance_market, interval="1h", total_candles=6)
             four_hourly = fetch_binance_klines(symbol, binance_market, interval="4h", total_candles=6)
-            daily = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=32)
+            daily = fetch_binance_klines(symbol, binance_market, interval="1d", total_candles=2)
             if len(hourly) < 2 or len(four_hourly) < 2 or len(daily) < 2:
                 raise RuntimeError(f"{symbol} için çoklu zaman dilimi hesaplamaya yetecek veri yok.")
             short_change = ((hourly[-1]["close"] - hourly[-2]["close"]) / hourly[-2]["close"]) * 100.0 if hourly[-2]["close"] else 0.0
             mid_change = ((four_hourly[-1]["close"] - four_hourly[-2]["close"]) / four_hourly[-2]["close"]) * 100.0 if four_hourly[-2]["close"] else 0.0
             long_change = ((daily[-1]["close"] - daily[-2]["close"]) / daily[-2]["close"]) * 100.0 if daily[-2]["close"] else 0.0
-            week_idx = -8 if len(daily) >= 8 else None
-            week_change = ((daily[-1]["close"] - daily[week_idx]["close"]) / daily[week_idx]["close"]) * 100.0 if week_idx is not None and daily[week_idx]["close"] else 0.0
-            month_idx = -31 if len(daily) >= 31 else None
-            month_change = ((daily[-1]["close"] - daily[month_idx]["close"]) / daily[month_idx]["close"]) * 100.0 if month_idx is not None and daily[month_idx]["close"] else None
-            timeframe_labels = {"short": "1 saat", "mid": "4 saat", "long": "24 saat", "week": "1 hafta", "month": "1 ay"}
+            timeframe_labels = {"short": "1 saat", "mid": "4 saat", "long": "24 saat"}
 
         directions = []
         for v in (short_change, mid_change, long_change):
@@ -6096,70 +5716,18 @@ def get_multi_timeframe_momentum_signal(symbol: str, market: str, broker: str) -
         aligned = len(non_zero) >= 2 and len(set(non_zero)) == 1
         conflicting = len(set(d for d in directions if d != 0)) > 1
 
-        def _dir(v: Optional[float]) -> int:
-            if v is None:
-                return 0
-            if v > 0.5:
-                return 1
-            if v < -0.5:
-                return -1
-            return 0
-
-        week_dir = _dir(week_change)
-        month_dir = _dir(month_change) if month_change is not None else 0
-        week_month_aligned = bool(week_dir != 0 and week_dir == month_dir)
-
         return {
             "symbol": symbol,
             "short_change_pct": round(short_change, 3),
             "mid_change_pct": round(mid_change, 3),
             "long_change_pct": round(long_change, 3),
-            "week_change_pct": round(week_change, 3),
-            "month_change_pct": round(month_change, 3) if month_change is not None else None,
             "timeframe_labels": timeframe_labels,
             "aligned": aligned,
             "conflicting": conflicting,
             "consensus_direction": non_zero[0] if aligned else 0,
-            "week_month_aligned": week_month_aligned,
-            "week_month_direction": week_dir if week_month_aligned else 0,
             "time": now_text(),
         }
     return _cache_get_or_fetch(f"multi_timeframe:{broker}:{symbol}", 900, _fetch)
-
-
-def get_multi_timeframe_co_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
-    """Kullanicinin talebi: 'momentumda bir gun uc gun bir hafta bir ay vs
-    bakacaktik hani, ayi boga piyasasi falan' - onceden 1/3/5 gunluk pencere
-    sadece kucuk bir confidence bias'i (+-5/6) uretiyordu, asil BUY/SELL
-    karari HALA dar/anlik '24s degisim'e (change_24h) dayaniyordu - bu da
-    NVDA gibi bir hisse 1 hafta/1 ay net yukari trendliyken bile anlik
-    degisim %0 ise 'net sinyal yok' (WAIT) sonucuna yol aciyordu.
-    Bu fonksiyon 1 hafta VE 1 ay penceresinin AYNI yonde oldugu (gercek
-    orta-uzun vadeli trend, sadece gurultu degil) durumlarda order_flow
-    ile ayni seviyede BAGIMSIZ bir BUY/SELL co-sinyali uretir - boylece
-    kisa vadeli (24s) sinyal notr olsa bile uzun vadeli trend tek basina
-    islem tetikleyebilir. Veri yetersizse veya hafta/ay celisiyorsa NEUTRAL
-    doner (islemi engellemez, sadece katkida bulunmaz)."""
-    try:
-        mtf = get_multi_timeframe_momentum_signal(symbol, market, broker)
-        if mtf.get("error") or not mtf.get("week_month_aligned"):
-            return {"signal": "NEUTRAL", "reason": ""}
-        direction = mtf.get("week_month_direction", 0)
-        if direction == 0:
-            return {"signal": "NEUTRAL", "reason": ""}
-        signal = "BUY" if direction > 0 else "SELL"
-        labels = mtf.get("timeframe_labels", {})
-        reason = (
-            f"{labels.get('week','1 hafta')} (%{mtf.get('week_change_pct')}) ve "
-            f"{labels.get('month','1 ay')} (%{mtf.get('month_change_pct')}) aynı yönde "
-            f"({signal} trend) - orta/uzun vadeli momentum co-sinyali."
-        )
-        return {"signal": signal, "reason": reason}
-    except Exception:
-        return {"signal": "NEUTRAL", "reason": ""}
-
-
-
 
 
 def get_multi_timeframe_signal_bias(symbol: str, market: str, broker: str, action: str) -> Dict[str, Any]:
@@ -6465,110 +6033,6 @@ def get_market_cycle_bias(symbol: str, action: str, market: str) -> Dict[str, An
     return {"bias": bias, "qty_scale": qty_scale, "notes": [note], "regime": regime}
 
 
-def _hard_block_against_market_cycle(symbol: str, action: str, market: str) -> Optional[str]:
-    """Kullanicinin talebi: 'rejime karsi islemi sert engelle' - yukaridaki
-    get_market_cycle_bias sadece caydirici bir puan/boyut kucultmesi (-6 bias,
-    qty_scale 0.6) uyguluyordu, digger sinyaller yeterince guclu oldugunda
-    kolayca asilabiliyordu (bkz. RISK_OFF rejiminde bile alim yapilan olay).
-    Bu fonksiyon uzun vadeli (50/200 gunluk SMA) BOGA/AYI rejimine TAM TERS
-    yonde YENI pozisyon acmayi/buyutmeyi KOSULSUZ olarak engeller: AYI (BEAR)
-    rejiminde yeni/ek BUY, BOGA (BULL) rejiminde yeni SHORT (SELL) acilamaz.
-    SADECE yeni pozisyon acma/buyutme icin cagrilmalidir - mevcut pozisyonu
-    KAPATMA (closing/buy-to-cover) islemleri bu fonksiyonla ASLA engellenmez
-    (cagiran yerler bunu pre_close_* kontrolleriyle disarida tutar)."""
-    if action not in ("BUY", "SELL"):
-        return None
-    try:
-        regime_info = get_bull_bear_market_regime(market)
-        regime = regime_info.get("regime", "TRANSITION")
-    except Exception:
-        return None
-    if regime == "TRANSITION":
-        return None
-    against = (regime == "BEAR" and action == "BUY") or (regime == "BULL" and action == "SELL")
-    if not against:
-        return None
-    trend_label = "Ayı (BEAR)" if regime == "BEAR" else "Boğa (BULL)"
-    return (
-        f"uzun vadeli {trend_label} piyasa döngüsüne ({regime_info.get('reference_symbol')} "
-        f"SMA200'e göre %{regime_info.get('pct_vs_sma200')}) tam ters yönde yeni {action} "
-        f"pozisyonu, rejime karşı işlem sert engeli nedeniyle koşulsuz atlandı."
-    )
-
-
-def _hard_block_weak_trend_chop(symbol: str, market: str, broker: str) -> Optional[str]:
-    """Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz, baskalari nasil
-    kar ediyor' analizinde tespit edildi - yatay/gurultulu (chop, net trend
-    olmayan) piyasada acilan islemler, guclu trendli piyasadakilere gore cok
-    daha dusuk kazanc/zarar oranina sahip oluyor (kucuk sinyal gurultusu ile
-    surekli giris-cikis). ADX (Average Directional Index, bkz. compute_adx)
-    trend GUCUNU olcer - ADX_MIN_TREND_STRENGTH esiginin ALTINDAYSA piyasa
-    net bir yon bulamamis (chop) demektir, bu durumda YENI pozisyon acma/
-    buyutme KOSULSUZ engellenir. SADECE yeni pozisyon acma/buyutme icin
-    cagrilmalidir - mevcut pozisyonu KAPATMA islemleri bu fonksiyonla ASLA
-    engellenmez (cagiran yerler bunu pre_close_* kontrolleriyle disarida
-    tutar). Veri yetersizse (ADX hesaplanamazsa) sessizce izin verir (None)."""
-    if ADX_MIN_TREND_STRENGTH <= 0:
-        return None
-    try:
-        tech_snap = get_technical_indicator_snapshot(symbol, market, broker)
-        adx_val = tech_snap.get("adx_14")
-    except Exception:
-        return None
-    if adx_val is None:
-        return None
-    if adx_val >= ADX_MIN_TREND_STRENGTH:
-        return None
-    return (
-        f"ADX(14) %{adx_val:.1f} - {ADX_MIN_TREND_STRENGTH:.0f} eşiğinin altında "
-        f"(yatay/gürültülü piyasa, net trend yok), yeni pozisyon açma/büyütme "
-        f"trend gücü zayıf olduğu için koşulsuz atlandı."
-    )
-
-
-def _hard_block_counter_momentum(symbol: str, action: str, market: str, broker: str) -> Optional[str]:
-    """Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde etmek icin ne
-    yapmaliyiz, profesyoneller nasil kar ediyor' analizinde tespit edildi -
-    19 Agustos'ta BTCUSDT/ETHUSDT/BTCUSDT_261225 SHORT pozisyonlari, fiyat
-    ZATEN kisa/orta vadede YUKARI giderken acilip art arda zarar-kesle
-    kapandi (toplam -25.79 USD'nin -30.46'si zarar-kesten). Mevcut
-    get_multi_timeframe_signal_bias fonksiyonu bu durumda sadece -6 puanlik
-    YUMUSAK bir ceza uyguluyordu - diger sinyaller (order flow, haber vb.)
-    yeterince guclu oldugunda bu ceza kolayca asilabiliyordu. Profesyonel
-    trend-takip prensibi: 'akintiya karsi yuzme' (kisa/orta/uzun vadeli
-    momentum HEPSI ayni yonde iken tam ters yonde islem acmak) kayip
-    olasiligini cok artirir. Bu fonksiyon, kisa (1s/1g) + orta (4s/3g) +
-    uzun (24s/5g) vadeli momentumun UCU DE ayni yonde oldugu (mtf.aligned)
-    ve bu yon acilmak istenen islemin TAM TERSI oldugu durumlarda yeni
-    pozisyon acma/buyutmeyi KOSULSUZ engeller (sadece -6 bias degil).
-    SADECE yeni pozisyon acma/buyutme icin cagrilmalidir - mevcut pozisyonu
-    KAPATMA islemleri bu fonksiyonla ASLA engellenmez. Veri yetersizse
-    sessizce izin verir (None)."""
-    if action not in ("BUY", "SELL"):
-        return None
-    try:
-        mtf = get_multi_timeframe_momentum_signal(symbol, market, broker)
-    except Exception:
-        return None
-    if mtf.get("error") or not mtf.get("aligned"):
-        return None
-    consensus = mtf.get("consensus_direction", 0)
-    if consensus == 0:
-        return None
-    wanted_direction = 1 if action == "BUY" else -1
-    if consensus != -wanted_direction:
-        return None
-    labels = mtf.get("timeframe_labels", {})
-    trend_word = "yükseliş" if consensus > 0 else "düşüş"
-    return (
-        f"{labels.get('short','kısa')} (%{mtf.get('short_change_pct')}), "
-        f"{labels.get('mid','orta')} (%{mtf.get('mid_change_pct')}) ve "
-        f"{labels.get('long','uzun')} (%{mtf.get('long_change_pct')}) vadeli momentumun "
-        f"HEPSİ {trend_word} yönünde hizalı - tam ters yönde ({action}) yeni pozisyon açmak "
-        f"akıntıya karşı işlem sert engeli nedeniyle koşulsuz atlandı."
-    )
-
-
 def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
     """Kullanicinin talebi: 'genel piyasa dususlerinde (ör. bir cip sirketi
     yuzunden tum borsalar dustugunde) nakitte beklemek yerine guvenli limana
@@ -6581,50 +6045,37 @@ def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) ->
       2) Herhangi bir sembolde uzun vadeli (IBKR: 5 gun, kripto: 24s) degisim
          belirgin negatifken kisa vadeli (IBKR: 1 gun, kripto: 1 saat) degisim
          pozitife donmusse ('dipten toparlanma'), BUY'a bias eklenir - dusmus
-         ama tekrar yukselmeye baslamis varliklari yakalamak icindir.
-      3) SIMETRIK durum (SELL icin): Kullanicinin talebi ('ETH cok artti, bir
-         sure oralarda tutunmaya calisir sonra kar realizasyonu yapilir, terse
-         dondugunde yakalamak gerek') - uzun vadeli degisim belirgin
-         POZITIFKEN kisa vadeli degisim negatife donmusse ('zirveden donus/
-         kar realizasyonu'), SELL'e (short/kapanis) bias eklenir - yukselmis
-         ama simdi geri cekilmeye baslamis varliklari yakalamak icindir."""
-    if action not in ("BUY", "SELL"):
+         ama tekrar yukselmeye baslamis varliklari yakalamak icindir."""
+    if action != "BUY":
         return {"bias": 0, "notes": []}
     bias = 0
     notes: List[str] = []
-    if action == "BUY":
-        try:
-            regime = get_macro_regime()
-            if regime.get("regime") == "RISK_OFF" and symbol.upper() in ("GLD", "USO"):
-                bias += 10
-                notes.append(
-                    f"Piyasa geneli RISK_OFF rejiminde (SP500 5g %{regime.get('sp500_5d_pct')}, "
-                    f"DXY 5g %{regime.get('dxy_5d_pct')}): {symbol} güvenli liman olarak BUY'ı destekler."
-                )
-        except Exception:
-            pass
+    try:
+        regime = get_macro_regime()
+        if regime.get("regime") == "RISK_OFF" and symbol.upper() in ("GLD", "USO"):
+            bias += 10
+            notes.append(
+                f"Piyasa geneli RISK_OFF rejiminde (SP500 5g %{regime.get('sp500_5d_pct')}, "
+                f"DXY 5g %{regime.get('dxy_5d_pct')}): {symbol} güvenli liman olarak BUY'ı destekler."
+            )
+    except Exception:
+        pass
     try:
         mtf = get_multi_timeframe_momentum_signal(symbol, market, broker)
         short_c = safe_float(mtf.get("short_change_pct"))
         long_c = safe_float(mtf.get("long_change_pct"))
-        if action == "BUY" and long_c <= -1.5 and short_c >= 0.3:
+        if long_c <= -1.5 and short_c >= 0.3:
             bias += 8
             notes.append(
                 f"{symbol} uzun vadede (%{long_c:.2f}) düştü ama kısa vadede (%{short_c:.2f}) toparlanmaya "
                 f"başladı: düşüşten fırsat olarak BUY'ı destekler."
-            )
-        elif action == "SELL" and long_c >= 1.5 and short_c <= -0.3:
-            bias += 8
-            notes.append(
-                f"{symbol} uzun vadede (%{long_c:.2f}) yükseldi ama kısa vadede (%{short_c:.2f}) geri "
-                f"çekilmeye başladı: zirveden dönüş/kâr realizasyonu olarak SELL'i destekler."
             )
     except Exception:
         pass
     return {"bias": max(0, min(18, bias)), "notes": notes}
 
 
-def get_early_reversal_signal(symbol: str, market: str, broker: str, direction: str = "up") -> Dict[str, Any]:
+def get_early_reversal_signal(symbol: str, market: str, broker: str) -> Dict[str, Any]:
     """Kullanicinin talebi: 'dönüş yapmaya başlamadan toplamak hisseyi' - yani
     get_dip_recovery_bias GIBI kesin donus TEYIDINI (kisa vadeli degisim zaten
     pozitife donmus) BEKLEMEDEN, henuz dususte olan ama dususun 'tukenmekte'
@@ -6637,13 +6088,7 @@ def get_early_reversal_signal(symbol: str, market: str, broker: str, direction: 
          gercek bir 'toparlanma' baslamamis, sadece dususun hizi kesiliyor.
     Bu ucu de saglanirsa 'erken sinyal' (dusuk guvenli, kucuk baslangic
     pozisyonu icin) doner - get_dip_recovery_bias'in aksine KESIN TEYIT
-    DEGILDIR, sadece 'yakinda donebilir' uyarisidir.
-    direction='down' ise SIMETRIK (ayna) mantik uygulanir - kullanicinin
-    talebi ('ETH cok artti, bir sure oralarda tutunmaya calisir sonra kar
-    realizasyonu yapilir, terse dondugunde yakalamak gerek'): asiri alim
-    (RSI>=65) + yukselisin yavaslamasi (plato/tutunma) + uzun vadede hala
-    belirgin pozitif (>=1.5%) ama henuz kesin donus (kisa vadeli negatif)
-    olmamis - zirve/kar realizasyonu icin erken SELL sinyali."""
+    DEGILDIR, sadece 'yakinda donebilir' uyarisidir."""
     try:
         if broker == "IBKR":
             market_info = get_ibkr_symbol_market_info(symbol)
@@ -6670,32 +6115,6 @@ def get_early_reversal_signal(symbol: str, market: str, broker: str, direction: 
         ]
         last_2 = recent_daily_changes[-2:]
         prior_3 = recent_daily_changes[-5:-2]
-
-        if direction == "down":
-            avg_recent_rise = sum(max(v, 0.0) for v in last_2) / max(len(last_2), 1)
-            avg_prior_rise = sum(max(v, 0.0) for v in prior_3) / max(len(prior_3), 1)
-            decelerating = avg_prior_rise > 0.01 and avg_recent_rise <= avg_prior_rise * 0.6
-            overbought = rsi is not None and rsi >= 65.0
-            still_rising_long_term = long_change >= 1.5
-            already_reversed = recent_daily_changes[-1] <= -0.3
-            if overbought and decelerating and still_rising_long_term and not already_reversed:
-                note = (
-                    f"{symbol} için ERKEN zirve/dönüş sinyali (henüz teyit değil): RSI {rsi:.1f} (aşırı alım), "
-                    f"yükseliş hızı yavaşlıyor/tutunmaya çalışıyor (son dönem ort. %{avg_recent_rise:.2f} vs önceki "
-                    f"%{avg_prior_rise:.2f}), uzun vadede hâlâ %{long_change:.2f} yukarıda. Alım baskısı tükeniyor "
-                    f"olabilir - kâr realizasyonu/küçük short için düşünülebilir, kesin teyit geldiğinde artırılabilir."
-                )
-                return {
-                    "is_early_signal": True,
-                    "bias": 4,
-                    "rsi": round(rsi, 1) if rsi is not None else None,
-                    "long_change_pct": round(long_change, 3),
-                    "avg_recent_rise_pct": round(avg_recent_rise, 3),
-                    "avg_prior_rise_pct": round(avg_prior_rise, 3),
-                    "notes": [note],
-                }
-            return {"is_early_signal": False, "bias": 0, "notes": []}
-
         avg_recent_decline = abs(sum(min(v, 0.0) for v in last_2) / max(len(last_2), 1))
         avg_prior_decline = abs(sum(min(v, 0.0) for v in prior_3) / max(len(prior_3), 1))
         decelerating = avg_prior_decline > 0.01 and avg_recent_decline <= avg_prior_decline * 0.6
@@ -6726,17 +6145,14 @@ def get_early_reversal_signal(symbol: str, market: str, broker: str, direction: 
 
 
 def get_early_reversal_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
-    """get_early_reversal_signal'i BUY/SELL karar aggregatorune baglar - dusuk
+    """get_early_reversal_signal'i BUY karar aggregatorune baglar - dusuk
     guvenli erken sinyal, dip-recovery'nin (+8/+18) aksine kucuk (+4) bir
     bias ekler, boylece AI donus TEYIT EDILMEDEN once kucuk bir baslangic
-    pozisyonu alabilir, ama tam boyutta islem yapmaz. SELL icin de simetrik
-    (zirve/kar-realizasyonu) mantik kullanilir (bkz. get_early_reversal_signal
-    direction='down')."""
-    if action not in ("BUY", "SELL"):
+    pozisyonu alabilir, ama tam boyutta islem yapmaz."""
+    if action != "BUY":
         return {"bias": 0, "notes": []}
     try:
-        direction = "up" if action == "BUY" else "down"
-        signal = get_early_reversal_signal(symbol, market, broker, direction=direction)
+        signal = get_early_reversal_signal(symbol, market, broker)
         if signal.get("is_early_signal"):
             return {"bias": signal.get("bias", 0), "notes": signal.get("notes", [])}
     except Exception:
@@ -6803,611 +6219,6 @@ def get_cross_session_bias(region: str) -> Dict[str, Any]:
             "note": f"[Seans-Sirasi] {prior_region} seansı %{avg:.2f} ile RISK_ON kapandı, {region} seansına olumlu momentum aktarılıyor.",
         }
     return {"bias": 0, "note": ""}
-
-
-# Kullanicinin talebi: 'genel piyasa yapisini okuyamiyoruz, her ulkeyi dunya
-# ekonomisine/piyasalara etkisine gore agirlandirip bir dunya borsa endeksi
-# cikarsin'. Asagidaki agirliklar KABA/yaklasiktir - IMF/Dunya Bankasi GSYIH
-# ve MSCI All-Country World Index (ACWI) ulke agirliklarindan esinlenerek
-# elle belirlendi (kesin/resmi degil, gorece buyukluk siralamasini yansitir).
-# Yahoo Finance uzerinden ucretsiz erisilebilen, her ulkeyi/bolgeyi temsil
-# eden ana borsa endeksleri kullanilir.
-WORLD_INDEX_WEIGHTS: Dict[str, tuple] = {
-    # (yfinance ticker, ulke/bolge adi, agirlik)
-    "US": ("^GSPC", "ABD (S&P 500)", 0.38),
-    "CHINA": ("000001.SS", "Çin (Shanghai)", 0.16),
-    "EUROZONE": ("^STOXX50E", "Avrupa Bölgesi (Euro Stoxx 50)", 0.10),
-    "JAPAN": ("^N225", "Japonya (Nikkei 225)", 0.08),
-    "UK": ("^FTSE", "İngiltere (FTSE 100)", 0.05),
-    "INDIA": ("^BSESN", "Hindistan (Sensex)", 0.07),
-    "HONGKONG": ("^HSI", "Hong Kong (Hang Seng)", 0.05),
-    "GERMANY": ("^GDAXI", "Almanya (DAX)", 0.05),
-    "EMERGING": ("EEM", "Diğer Gelişen Piyasalar (EEM ETF)", 0.06),
-}
-
-
-def get_world_market_index() -> Dict[str, Any]:
-    """Kullanicinin talebi: 'her ulkeyi dunya ekonomisine ve piyasalara
-    etkisine gore agirlandirip endeks cikarsin, dunya finans endeksi/dunya
-    borsa endeksi gibi'. Mevcut get_macro_regime() SADECE ABD (S&P500) +
-    Dolar Endeksi'ne bakiyordu - Cin/Avrupa/Japonya/Hindistan/Ingiltere/Hong
-    Kong'daki hareketler tamamen kor noktaydi (ornegin Cin borsasi cokerken
-    ABD henuz tepki vermemis olabilir). Bu fonksiyon WORLD_INDEX_WEIGHTS'teki
-    her ulke/bolge endeksinin 5 gunluk VE 1 aylik yuzde degisimini agirlikli
-    ortalamayla birlestirip tek bir 'Dunya Piyasa Momentum Skoru' uretir,
-    ayrica hangi ulke/bolgenin en cok yukseldigini/dustugunu ('para nereye
-    gidiyor/kaciyor') gosterir. RISK_ON/RISK_OFF/NOTR siniflandirmasi,
-    agirlikli 5 gunluk skor +%0.5 uzeriyse RISK_ON, -%0.5 altiysa RISK_OFF,
-    aksi halde NOTR olarak belirlenir. Agir yfinance cagrisi oldugu icin 4
-    saat cache'lenir; herhangi bir ulke verisi cekilemezse o ulke sessizce
-    atlanir (kalan ulkelerle devam edilir, agirliklar normalize edilir)."""
-    def _fetch():
-        import yfinance as yf
-        tickers = [t for t, _, _ in WORLD_INDEX_WEIGHTS.values()]
-        data = yf.download(tickers, period="35d", interval="1d", progress=False, auto_adjust=True, threads=True)
-        close = data["Close"] if "Close" in data else data
-
-        countries: List[Dict[str, Any]] = []
-        weighted_5d_sum = 0.0
-        weighted_1m_sum = 0.0
-        total_weight_used = 0.0
-
-        for key, (ticker, name, weight) in WORLD_INDEX_WEIGHTS.items():
-            try:
-                series = close[ticker].dropna() if ticker in close else close.dropna()
-                if len(series) < 6:
-                    continue
-                last = float(series.iloc[-1])
-                five_day_ago = float(series.iloc[-6])
-                change_5d_pct = ((last - five_day_ago) / five_day_ago) * 100.0 if five_day_ago else 0.0
-                month_ago = float(series.iloc[0])
-                change_1m_pct = ((last - month_ago) / month_ago) * 100.0 if month_ago else 0.0
-                countries.append({
-                    "key": key,
-                    "name": name,
-                    "weight": weight,
-                    "change_5d_pct": round(change_5d_pct, 2),
-                    "change_1m_pct": round(change_1m_pct, 2),
-                })
-                weighted_5d_sum += change_5d_pct * weight
-                weighted_1m_sum += change_1m_pct * weight
-                total_weight_used += weight
-            except Exception:
-                continue
-
-        if total_weight_used <= 0 or not countries:
-            raise RuntimeError("Dünya endeksi için hiçbir ülke verisi çekilemedi.")
-
-        world_change_5d_pct = weighted_5d_sum / total_weight_used
-        world_change_1m_pct = weighted_1m_sum / total_weight_used
-
-        if world_change_5d_pct > 0.5:
-            regime = "RISK_ON"
-        elif world_change_5d_pct < -0.5:
-            regime = "RISK_OFF"
-        else:
-            regime = "NEUTRAL"
-
-        ranked_by_1m = sorted(countries, key=lambda c: c["change_1m_pct"], reverse=True)
-        strongest = ranked_by_1m[:3]
-        weakest = list(reversed(ranked_by_1m[-3:]))
-
-        return {
-            "countries": countries,
-            "world_change_5d_pct": round(world_change_5d_pct, 2),
-            "world_change_1m_pct": round(world_change_1m_pct, 2),
-            "regime": regime,
-            "money_flowing_toward": [{"name": c["name"], "change_1m_pct": c["change_1m_pct"]} for c in strongest],
-            "money_flowing_away_from": [{"name": c["name"], "change_1m_pct": c["change_1m_pct"]} for c in weakest],
-            "coverage_weight_used_pct": round(total_weight_used * 100.0, 1),
-            "note": (
-                "Ülke ağırlıkları (GSYİH/piyasa büyüklüğüne göre kaba yaklaşık tahmin) ile "
-                "5 günlük/1 aylık endeks değişimlerinin ağırlıklı ortalamasıdır - resmi bir "
-                "endeks değildir, yönlendirici bir gösterge niteliğindedir."
-            ),
-            "time": now_text(),
-        }
-
-    try:
-        return _cache_get_or_fetch("world_market_index", 14400, _fetch)
-    except Exception as exc:
-        return {
-            "countries": [], "world_change_5d_pct": 0.0, "world_change_1m_pct": 0.0,
-            "regime": "NEUTRAL", "money_flowing_toward": [], "money_flowing_away_from": [],
-            "error": str(exc), "time": now_text(),
-        }
-
-
-def get_global_macro_bias(action: str) -> Dict[str, Any]:
-    """get_world_market_index() sonucunu (yukarida) BUY/SELL confidence'ina
-    bias olarak baglar - mevcut get_macro_regime() SADECE ABD+Dolar'a
-    bakiyordu, bu fonksiyon GERCEKTEN kuresel (Cin/Avrupa/Japonya/Hindistan/
-    Ingiltere/Hong Kong dahil) piyasa yonunu dikkate alir. Tum sembollere
-    (kripto dahil) uygulanir - kuresel risk-off ortaminda hicbir varlik
-    tam bagisik degildir."""
-    if action not in ("BUY", "SELL"):
-        return {"bias": 0, "notes": []}
-    try:
-        world = get_world_market_index()
-        regime = world.get("regime", "NEUTRAL")
-        if world.get("error") or regime == "NEUTRAL":
-            return {"bias": 0, "notes": []}
-        world_5d = world.get("world_change_5d_pct", 0.0)
-        if regime == "RISK_ON" and action == "BUY":
-            return {"bias": 6, "notes": [f"[Dünya Piyasa Endeksi] Küresel piyasalar RISK_ON (ağırlıklı 5g %{world_5d:+.2f}): BUY'ı destekler."]}
-        if regime == "RISK_OFF" and action == "SELL":
-            return {"bias": 6, "notes": [f"[Dünya Piyasa Endeksi] Küresel piyasalar RISK_OFF (ağırlıklı 5g %{world_5d:+.2f}): SELL'i destekler."]}
-        if regime == "RISK_OFF" and action == "BUY":
-            return {"bias": -8, "notes": [f"[Dünya Piyasa Endeksi] Küresel piyasalar RISK_OFF (ağırlıklı 5g %{world_5d:+.2f}): yeni alım riski artıyor."]}
-        if regime == "RISK_ON" and action == "SELL":
-            return {"bias": -5, "notes": [f"[Dünya Piyasa Endeksi] Küresel piyasalar RISK_ON (ağırlıklı 5g %{world_5d:+.2f}): satış (SELL) trende karşı."]}
-    except Exception:
-        pass
-    return {"bias": 0, "notes": []}
-
-
-def get_geo_news_topics_signal() -> Dict[str, Any]:
-    """Kullanicinin talebi: 'fed karari piyasayi nasil etkiler, iran krizi
-    petrol fiyatlarini nasil etkiler' gibi GERCEK dunya olaylarini/haberleri
-    okuyabilmek. Ucretsiz, API-anahtari GEREKTIRMEYEN GDELT Project DOC 2.0
-    haber taramasi API'si kullanilir - onceden tanimli birkac riskli baslik
-    (Fed faiz karari, Iran/Ortadogu gerilimi, petrol arz sarsintisi, banka/
-    finans krizi, kuresel resesyon) icin son 3 gunluk haber hacmi/tonu (ton
-    negatifse kotu haber agirlikli demektir) taranir. GDELT halka acik/ucretsiz
-    oldugu icin sik istekte hiz siniri (rate limit) var - bu yuzden sonuc 12
-    saat cache'lenir VE herhangi bir hata/rate-limit durumunda sessizce bos
-    (etkisiz) sonuc doner (fail-open, ASLA islem kararini bloke etmez,
-    sadece EK bilgi/bias saglar)."""
-    topics = {
-        "FED_FAIZ": "\"Federal Reserve\" interest rate decision",
-        "IRAN_GERILIM": "Iran Middle East conflict tension",
-        "PETROL_ARZ": "oil supply crisis OPEC",
-        "BANKA_KRIZI": "bank financial crisis",
-        "KURESEL_RESESYON": "global recession warning",
-    }
-
-    def _fetch():
-        results: List[Dict[str, Any]] = []
-        for key, query in topics.items():
-            try:
-                import urllib.parse
-                q = urllib.parse.quote(query)
-                url = (
-                    f"https://api.gdeltproject.org/api/v2/doc/doc?query={q}"
-                    f"&mode=ToneChart&format=json&timespan=3d"
-                )
-                resp = requests.get(url, timeout=8)
-                if resp.status_code != 200:
-                    continue
-                data = resp.json()
-                tonechart = data.get("tonechart", [])
-                if not tonechart:
-                    continue
-                total_articles = sum(safe_float(b.get("count")) for b in tonechart)
-                if total_articles <= 0:
-                    continue
-                weighted_tone = sum(safe_float(b.get("bin")) * safe_float(b.get("count")) for b in tonechart) / total_articles
-                results.append({
-                    "key": key,
-                    "topic": query,
-                    "avg_tone": round(weighted_tone, 2),
-                    "article_count": int(total_articles),
-                })
-            except Exception:
-                continue
-            time.sleep(1.2)  # GDELT ucretsiz kotasi icin nazik istek araligi
-
-        if not results:
-            raise RuntimeError("GDELT'ten hicbir haber/ton verisi alinamadi (rate-limit veya erisim sorunu).")
-
-        overall_tone = sum(r["avg_tone"] for r in results) / len(results)
-        if overall_tone <= -3:
-            sentiment = "OLUMSUZ (kötü haber ağırlıklı)"
-        elif overall_tone >= 2:
-            sentiment = "OLUMLU"
-        else:
-            sentiment = "NÖTR"
-
-        return {
-            "topics": results,
-            "overall_tone": round(overall_tone, 2),
-            "sentiment": sentiment,
-            "note": (
-                "GDELT Project (ücretsiz, halka açık küresel haber tarama servisi) üzerinden son "
-                "3 günlük haber tonu - -10 (çok olumsuz) ile +10 (çok olumlu) arası bir ölçektir, "
-                "kesin bir öngörü değildir."
-            ),
-            "time": now_text(),
-        }
-
-    try:
-        return _cache_get_or_fetch("geopolitical_risk_signal", 43200, _fetch)
-    except Exception as exc:
-        return {"topics": [], "overall_tone": 0.0, "sentiment": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
-
-
-def get_geo_news_topics_bias(action: str) -> Dict[str, Any]:
-    """get_geopolitical_risk_signal() sonucunu (Fed/İran/petrol/banka/resesyon
-    haber tonu) BUY/SELL confidence'ına küçük bir bias olarak bağlar - haber
-    verisi gürültülü olabileceği için etkisi kasıtlı olarak küçük tutulur
-    (sert engel DEĞİL, sadece ek bir ipucu)."""
-    if action not in ("BUY", "SELL"):
-        return {"bias": 0, "notes": []}
-    try:
-        geo = get_geo_news_topics_signal()
-        if geo.get("error"):
-            return {"bias": 0, "notes": []}
-        tone = safe_float(geo.get("overall_tone"))
-        if tone <= -3 and action == "BUY":
-            return {"bias": -4, "notes": [f"[Jeopolitik] Küresel haber tonu olumsuz (Fed/İran/petrol/banka, ort. ton {tone:.1f}): yeni alım riskini artırır."]}
-        if tone <= -3 and action == "SELL":
-            return {"bias": 2, "notes": [f"[Jeopolitik] Küresel haber tonu olumsuz (ort. ton {tone:.1f}): SELL'i hafif destekler."]}
-        if tone >= 2 and action == "BUY":
-            return {"bias": 2, "notes": [f"[Jeopolitik] Küresel haber tonu olumlu (ort. ton {tone:.1f}): BUY'ı hafif destekler."]}
-    except Exception:
-        pass
-    return {"bias": 0, "notes": []}
-
-
-def get_options_flow_signal(symbol: str) -> Dict[str, Any]:
-    """Kullanicinin talebi: 'nvda opsiyonlari dun cok atti, vadeli/opsiyonlardaki
-    degisime bakarak pay tarafinda islem yapabilir miyiz'. Profesyonel
-    yatirimcilarin izledigi klasik bir 'akilli para' oncu gostergesi: put/call
-    hacim orani ve ATM (paraya-yakin) opsiyonlarin ima edilen volatilitesi
-    (IV). yfinance uzerinden (IBKR ozel opsiyon veri izni gerektirmeden,
-    ucretsiz) en yakin vadeli islem tarihinin opsiyon zincirine bakilir:
-      - Call hacmi put hacminden belirgin fazlaysa (oran <0.7) -> yukselis
-        beklentisi (BUY'i destekler).
-      - Put hacmi call hacminden belirgin fazlaysa (oran >1.3) -> dusus
-        beklentisi (SELL'i destekler/BUY'a karsi temkinli olunur).
-      - IV, hissenin normal seviyesine gore asiri yuksekse (>%80) buyuk bir
-        haber/olay beklentisi (kazanc aciklamasi, dava, vs.) var demektir -
-        yon vermez ama oynaklik/risk uyarisi olarak not dusulur.
-    Sadece STK (hisse) sembolleri icin anlamlidir. Agir yfinance cagrisi
-    oldugu icin sembol basina 2 saat cache'lenir, veri yoksa (opsiyon
-    islem gormeyen kucuk semboller) sessizce notr/bos doner."""
-    def _fetch():
-        import yfinance as yf
-        ticker = yf.Ticker(to_yfinance_symbol(symbol))
-        expirations = ticker.options
-        if not expirations:
-            raise RuntimeError(f"{symbol} için opsiyon verisi yok.")
-        nearest_expiry = expirations[0]
-        chain = ticker.option_chain(nearest_expiry)
-        calls = chain.calls
-        puts = chain.puts
-        call_volume = float(calls["volume"].fillna(0).sum())
-        put_volume = float(puts["volume"].fillna(0).sum())
-        if call_volume + put_volume <= 0:
-            raise RuntimeError(f"{symbol} için opsiyon hacim verisi yok.")
-        put_call_ratio = (put_volume / call_volume) if call_volume > 0 else 999.0
-
-        last_price = safe_float(ticker.fast_info.get("lastPrice")) if hasattr(ticker, "fast_info") else 0.0
-        atm_iv = None
-        try:
-            if last_price > 0 and not calls.empty:
-                calls = calls.copy()
-                calls["dist"] = (calls["strike"] - last_price).abs()
-                atm_row = calls.sort_values("dist").iloc[0]
-                atm_iv = safe_float(atm_row.get("impliedVolatility")) * 100.0
-        except Exception:
-            atm_iv = None
-
-        if put_call_ratio < 0.7:
-            flow_signal = "BUY"
-            flow_reason = f"Call hacmi put hacminden belirgin fazla (P/C oranı {put_call_ratio:.2f}) - yükseliş beklentisi."
-        elif put_call_ratio > 1.3:
-            flow_signal = "SELL"
-            flow_reason = f"Put hacmi call hacminden belirgin fazla (P/C oranı {put_call_ratio:.2f}) - düşüş beklentisi."
-        else:
-            flow_signal = "NEUTRAL"
-            flow_reason = f"Put/call hacmi dengeli (oran {put_call_ratio:.2f})."
-
-        return {
-            "symbol": symbol,
-            "expiry": nearest_expiry,
-            "call_volume": int(call_volume),
-            "put_volume": int(put_volume),
-            "put_call_ratio": round(put_call_ratio, 3),
-            "atm_implied_volatility_pct": round(atm_iv, 1) if atm_iv else None,
-            "flow_signal": flow_signal,
-            "reason": flow_reason,
-            "time": now_text(),
-        }
-
-    try:
-        return _cache_get_or_fetch(f"options_flow:{symbol}", 7200, _fetch)
-    except Exception as exc:
-        return {"symbol": symbol, "flow_signal": "NEUTRAL", "reason": "", "error": str(exc), "time": now_text()}
-
-
-def get_options_flow_bias(symbol: str, action: str, asset_type: str) -> Dict[str, Any]:
-    """get_options_flow_signal() sonucunu (put/call oranı) BUY/SELL
-    confidence'ına bias olarak bağlar - SADECE hisse (STK) sembolleri için
-    (opsiyon zinciri olmayan forex/futures/kripto IBKR sembollerinde
-    otomatik olarak notr/etkisiz döner). Kullanicinin talebi: 'sadece
-    sinyal olarak kullan, opsiyon islemi acma' - bu yuzden SADECE mevcut
-    hisse BUY/SELL kararina kucuk bir bias ekler, opsiyon/vadeli emri
-    ASLA gondermez."""
-    if action not in ("BUY", "SELL") or asset_type != "STK":
-        return {"bias": 0, "notes": []}
-    try:
-        flow = get_options_flow_signal(symbol)
-        if flow.get("error") or flow.get("flow_signal") == "NEUTRAL":
-            return {"bias": 0, "notes": []}
-        signal = flow.get("flow_signal")
-        reason = flow.get("reason", "")
-        if signal == action:
-            return {"bias": 5, "notes": [f"[Opsiyon Akışı] {reason}"]}
-        if signal != "NEUTRAL" and signal != action:
-            return {"bias": -5, "notes": [f"[Opsiyon Akışı] {reason} ({action} yönüne karşı)."]}
-    except Exception:
-        pass
-    return {"bias": 0, "notes": []}
-
-
-def get_yield_curve_signal() -> Dict[str, Any]:
-    """Kullanicinin sorusu: 'buyuk yatirimcilar/kurumlar neye bakiyor' -
-    kurumsal yatirimcilarin #1 resesyon gostergesi getiri egrisidir (yield
-    curve). 3 aylik hazine bonosu (^IRX) getirisi 10 yillik tahvil (^TNX)
-    getirisinden YUKSEK olursa egri 'ters donmus' (inverted) sayilir - bu
-    tarihsel olarak her ABD resesyonundan once gorulmustur (3a10y spread,
-    NY Fed arastirmalarina gore 2y10y'den bile daha guvenilir kabul edilir).
-    Ucretsiz Yahoo Finance verisiyle hesaplanir, 6 saat cache'lenir."""
-    def _fetch():
-        import yfinance as yf
-        data = yf.download(["^IRX", "^TNX"], period="10d", interval="1d", progress=False, auto_adjust=True, threads=True)
-        close = data["Close"] if "Close" in data else data
-        irx = float(close["^IRX"].dropna().iloc[-1])
-        tnx = float(close["^TNX"].dropna().iloc[-1])
-        spread = tnx - irx
-        if spread < -0.10:
-            status = "TERS_DONMUS (inverted) - resesyon riski yuksek"
-        elif spread < 0.25:
-            status = "DUZLESIYOR (flattening) - dikkatli olunmali"
-        else:
-            status = "NORMAL"
-        return {
-            "three_month_yield_pct": round(irx, 2),
-            "ten_year_yield_pct": round(tnx, 2),
-            "spread_10y_minus_3m": round(spread, 2),
-            "status": status,
-            "note": "3ay-10yil getiri farki (spread) negatifse egri ters donmus demektir; kurumsal yatirimcilarin en cok izledigi resesyon on gostergesidir.",
-            "time": now_text(),
-        }
-    try:
-        return _cache_get_or_fetch("yield_curve_signal", 21600, _fetch)
-    except Exception as exc:
-        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
-
-
-def get_credit_spread_signal() -> Dict[str, Any]:
-    """Kurumsal 'risk istahi' gostergesi: yuksek getirili (junk/high-yield)
-    tahvil ETF'i (HYG) ile orta vadeli hazine tahvili ETF'i (IEF) arasindaki
-    goreceli performans - kredi spreadleri genisliyorsa (HYG, IEF'e gore
-    geriliyorsa) bu genelde borsa dususlerinden ONCE gorulen bir 'akilli para'
-    stres sinyalidir (buyuk fonlar kredi piyasalarini hisse piyasasindan once
-    okur). 20 gunluk goreceli performans farkina bakar, 6 saat cache'lenir."""
-    def _fetch():
-        import yfinance as yf
-        data = yf.download(["HYG", "IEF"], period="30d", interval="1d", progress=False, auto_adjust=True, threads=True)
-        close = data["Close"] if "Close" in data else data
-        hyg = close["HYG"].dropna()
-        ief = close["IEF"].dropna()
-        if len(hyg) < 21 or len(ief) < 21:
-            raise RuntimeError("Kredi spreadi icin yeterli veri yok.")
-        hyg_chg = (float(hyg.iloc[-1]) - float(hyg.iloc[-21])) / float(hyg.iloc[-21]) * 100.0
-        ief_chg = (float(ief.iloc[-1]) - float(ief.iloc[-21])) / float(ief.iloc[-21]) * 100.0
-        relative = hyg_chg - ief_chg
-        if relative < -2.0:
-            status = "GENISLIYOR (widening) - kredi stresi artiyor, risk-off"
-        elif relative > 1.5:
-            status = "DARALIYOR (tightening) - risk istahi guclu"
-        else:
-            status = "STABIL"
-        return {
-            "hyg_20d_change_pct": round(hyg_chg, 2),
-            "ief_20d_change_pct": round(ief_chg, 2),
-            "relative_performance_pct": round(relative, 2),
-            "status": status,
-            "note": "Yuksek getirili tahvil (HYG) hazine tahviline (IEF) gore geriliyorsa kredi spreadleri geniyor demektir - buyuk fonlarin izledigi bir risk-off on gostergesidir.",
-            "time": now_text(),
-        }
-    try:
-        return _cache_get_or_fetch("credit_spread_signal", 21600, _fetch)
-    except Exception as exc:
-        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
-
-
-def get_copper_gold_ratio_signal() -> Dict[str, Any]:
-    """'Dr. Copper' - bakir sanayi/insaat buyumesine duyarlidir (buyume
-    iyimserligi), altin ise korku/guvenli liman varligidir. Bakir/Altin
-    orani yukseliyorsa kuresel buyume beklentisi guclenıyor demektir,
-    dusuyorsa resesyon/korku sinyali. Fon yoneticilerinin kuresel buyume
-    yonunu okumak icin kullandigi klasik bir oran. 20 gunluk trend, 6 saat
-    cache'lenir."""
-    def _fetch():
-        import yfinance as yf
-        data = yf.download(["HG=F", "GC=F"], period="30d", interval="1d", progress=False, auto_adjust=True, threads=True)
-        close = data["Close"] if "Close" in data else data
-        copper = close["HG=F"].dropna()
-        gold = close["GC=F"].dropna()
-        if len(copper) < 21 or len(gold) < 21:
-            raise RuntimeError("Bakir/altin orani icin yeterli veri yok.")
-        ratio_now = float(copper.iloc[-1]) / float(gold.iloc[-1])
-        ratio_20d_ago = float(copper.iloc[-21]) / float(gold.iloc[-21])
-        change_pct = (ratio_now - ratio_20d_ago) / ratio_20d_ago * 100.0 if ratio_20d_ago else 0.0
-        if change_pct > 3.0:
-            status = "YUKSELIYOR - kuresel buyume iyimserligi guclleniyor"
-        elif change_pct < -3.0:
-            status = "DUSUYOR - buyume korkusu/resesyon sinyali artiyor"
-        else:
-            status = "STABIL"
-        return {
-            "copper_gold_ratio": round(ratio_now, 5),
-            "change_20d_pct": round(change_pct, 2),
-            "status": status,
-            "note": "Bakir/Altin orani kuresel buyume beklentisinin klasik bir gostergesidir; yukselmesi buyumeye guveni, dusmesi korku/resesyon riskini isaret eder.",
-            "time": now_text(),
-        }
-    try:
-        return _cache_get_or_fetch("copper_gold_ratio_signal", 21600, _fetch)
-    except Exception as exc:
-        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
-
-
-def get_real_yield_proxy_signal() -> Dict[str, Any]:
-    """Altin fiyatini asil belirleyen nominal faiz degil REEL (enflasyondan
-    arindirilmis) faizdir. Enflasyon-korumali tahvil ETF'i (TIP) fiyat
-    momentumu, reel faizlerin ters yonlu bir proxy'sidir: TIP fiyati
-    dusuyorsa reel faizler yukseliyor demektir (altin icin olumsuz), TIP
-    yukseliyorsa reel faizler dusuyor demektir (altin icin olumlu). Resmi
-    FRED reel faiz verisine (DFII10) gore daha kaba bir yaklasimdir ama
-    API anahtari gerektirmez. 20 gunluk trend, 6 saat cache'lenir."""
-    def _fetch():
-        import yfinance as yf
-        data = yf.download(["TIP"], period="30d", interval="1d", progress=False, auto_adjust=True, threads=True)
-        close = data["Close"] if "Close" in data else data
-        tip = close["TIP"].dropna() if "TIP" in close else close.dropna()
-        if len(tip) < 21:
-            raise RuntimeError("Reel faiz proxy'si icin yeterli veri yok.")
-        change_pct = (float(tip.iloc[-1]) - float(tip.iloc[-21])) / float(tip.iloc[-21]) * 100.0
-        if change_pct < -1.0:
-            status = "REEL_FAIZ_YUKSELIYOR (TIP dusuyor) - altin/risksiz varliklar icin olumsuz"
-        elif change_pct > 1.0:
-            status = "REEL_FAIZ_DUSUYOR (TIP yukseliyor) - altin icin olumlu"
-        else:
-            status = "STABIL"
-        return {
-            "tip_etf_20d_change_pct": round(change_pct, 2),
-            "status": status,
-            "note": "TIP (enflasyon korumali tahvil) fiyati reel faizlerin TERS yonlu bir proxy'sidir - kesin FRED reel faiz verisi degildir, kaba bir yaklasimdir.",
-            "time": now_text(),
-        }
-    try:
-        return _cache_get_or_fetch("real_yield_proxy_signal", 21600, _fetch)
-    except Exception as exc:
-        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
-
-
-def get_cot_positioning_signal() -> Dict[str, Any]:
-    """Kullanicinin sorusu: 'buyuk yatirimcilar neye bakiyor' - CFTC'nin
-    (ABD Emtia Vadeli Islemler Ticaret Komisyonu) her hafta yayinladigi,
-    tamamen ucretsiz/halka acik 'Commitment of Traders' (COT) raporundan
-    S&P 500 E-mini vadeli islemlerinde BUYUK SPEKULATORLERIN (hedge fund'lar
-    - 'noncommercial' pozisyonlar) net long/short yigilmasini okur. Asiri
-    tek yonlu yigilma (extreme net long VEYA net short), genelde bir
-    'crowded trade' / olasi ters donus riskini isaret eder (kontrarian
-    gosterge). Haftalik veri oldugu icin 12 saat cache'lenir."""
-    def _fetch():
-        r = requests.get(
-            "https://publicreporting.cftc.gov/resource/6dca-aqww.json",
-            params={
-                "$limit": 1,
-                "$order": "report_date_as_yyyy_mm_dd DESC",
-                "contract_market_name": "E-MINI S&P 500",
-            },
-            timeout=10,
-            headers={"User-Agent": "dfinans-live-backend/1.0"},
-        )
-        r.raise_for_status()
-        rows = r.json()
-        if not rows:
-            raise RuntimeError("CFTC COT verisi bos döndü.")
-        row = rows[0]
-        long_all = safe_float(row.get("noncomm_positions_long_all"))
-        short_all = safe_float(row.get("noncomm_positions_short_all"))
-        net = long_all - short_all
-        total = long_all + short_all
-        net_pct = (net / total * 100.0) if total else 0.0
-        if net_pct > 15:
-            status = "ASIRI_NET_LONG - buyuk spekulatorler asiri iyimser (crowded long, ters donus riski)"
-        elif net_pct < -15:
-            status = "ASIRI_NET_SHORT - buyuk spekulatorler asiri kotumser (crowded short, short squeeze riski)"
-        else:
-            status = "DENGELI"
-        return {
-            "contract": "E-MINI S&P 500",
-            "report_date": row.get("report_date_as_yyyy_mm_dd", "")[:10],
-            "large_speculator_long": int(long_all),
-            "large_speculator_short": int(short_all),
-            "net_long_pct_of_total": round(net_pct, 1),
-            "status": status,
-            "note": "CFTC'nin haftalik ucretsiz COT raporundan buyuk spekulator (hedge fund) net pozisyonlanmasi - asiri tek yonlu yigilma kontrarian bir ters donus riski tasir.",
-            "time": now_text(),
-        }
-    try:
-        return _cache_get_or_fetch("cot_positioning_signal", 43200, _fetch)
-    except Exception as exc:
-        return {"status": "BİLİNMİYOR", "error": str(exc), "time": now_text()}
-
-
-def get_institutional_signals_bias(action: str) -> Dict[str, Any]:
-    """Getiri egrisi + kredi spreadi + bakir/altin orani + reel faiz proxy'si +
-    CFTC COT buyuk spekulator pozisyonlanmasini TEK bir kucuk bias'ta
-    birlestirir - bunlarin hepsi kuresel/genel piyasa gostergeleridir (tek
-    bir sembole ozel degil), bu yuzden tum BUY/SELL kararlarina (kripto dahil)
-    uygulanir. Her biri kucuk (+-2/+-3) etki eder, toplamda asiri baskin
-    olmamasi icin +-8 ile sinirlanir; herhangi biri veri saglayamazsa
-    sessizce atlanir (fail-open)."""
-    if action not in ("BUY", "SELL"):
-        return {"bias": 0, "notes": []}
-    bias = 0
-    notes: List[str] = []
-    try:
-        yc = get_yield_curve_signal()
-        if not yc.get("error") and "TERS_DONMUS" in yc.get("status", ""):
-            if action == "BUY":
-                bias -= 3
-                notes.append(f"[Getiri Eğrisi] Ters dönmüş ({yc.get('spread_10y_minus_3m')} puan) - resesyon riski BUY için olumsuz.")
-            else:
-                bias += 2
-                notes.append(f"[Getiri Eğrisi] Ters dönmüş - resesyon riski SELL'i hafif destekler.")
-    except Exception:
-        pass
-    try:
-        cs = get_credit_spread_signal()
-        if not cs.get("error"):
-            if cs.get("status", "").startswith("GENISLIYOR"):
-                if action == "BUY":
-                    bias -= 2
-                    notes.append("[Kredi Spreadi] Genişliyor (HYG zayıflıyor) - kredi stresi BUY için olumsuz.")
-                else:
-                    bias += 1
-                    notes.append("[Kredi Spreadi] Genişliyor - risk-off SELL'i hafif destekler.")
-            elif cs.get("status", "").startswith("DARALIYOR") and action == "BUY":
-                bias += 1
-                notes.append("[Kredi Spreadi] Daralıyor - güçlü risk iştahı BUY'ı destekler.")
-    except Exception:
-        pass
-    try:
-        cg = get_copper_gold_ratio_signal()
-        if not cg.get("error"):
-            if "DUSUYOR" in cg.get("status", ""):
-                if action == "BUY":
-                    bias -= 2
-                    notes.append("[Bakır/Altın Oranı] Düşüyor - büyüme korkusu BUY için olumsuz.")
-                else:
-                    bias += 1
-                    notes.append("[Bakır/Altın Oranı] Düşüyor - resesyon sinyali SELL'i hafif destekler.")
-            elif "YUKSELIYOR" in cg.get("status", "") and action == "BUY":
-                bias += 1
-                notes.append("[Bakır/Altın Oranı] Yükseliyor - büyüme iyimserliği BUY'ı destekler.")
-    except Exception:
-        pass
-    try:
-        cot = get_cot_positioning_signal()
-        if not cot.get("error"):
-            if "ASIRI_NET_LONG" in cot.get("status", "") and action == "BUY":
-                bias -= 2
-                notes.append(f"[COT Pozisyonlanma] Büyük spekülatörler aşırı net long (%{cot.get('net_long_pct_of_total')}) - crowded trade riski, yeni BUY temkinli olmalı.")
-            elif "ASIRI_NET_SHORT" in cot.get("status", "") and action == "SELL":
-                bias -= 2
-                notes.append(f"[COT Pozisyonlanma] Büyük spekülatörler aşırı net short (%{cot.get('net_long_pct_of_total')}) - short squeeze riski, yeni SELL temkinli olmalı.")
-    except Exception:
-        pass
-    bias = max(-8, min(8, bias))
-    return {"bias": bias, "notes": notes}
 
 
 def get_macro_risk_bias(symbol: str, action: str) -> Dict[str, Any]:
@@ -8886,11 +7697,7 @@ def compute_correlation_matrix(symbols: List[str]) -> List[Dict[str, Any]]:
 # Kullanicinin talebi: 'etkin risk limti ekle' (etkin risk limiti). Ayni yonde/
 # korele varliklarda ustuste pozisyon acildiginda gercek risk maruziyetinin
 # fark edilmeden artmasini onlemek icin esikler.
-# GUNCELLEME ('gerçek yatırımcı olsan nasıl kurardın' -> 'senin istediğin
-# gibi kur'): 'BTC/ETH/SOL ayni anda LONG ise bu aslinda tek bir buyuk BTC
-# bahsi gibidir' mantigiyla esik %40 -> %30'a cekildi - korele varliklara
-# asiri yigilma daha erken caydirilir/kucultulur.
-PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT = float(os.getenv("PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT", "30.0"))
+PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT = float(os.getenv("PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT", "40.0"))
 
 
 def get_total_portfolio_value_usd() -> float:
@@ -9498,11 +8305,6 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
     # acilabiliyor, STK gibi tamamen Cmt/Paz kapali degil.
     _is_weekend_scan = broker == "IBKR" and datetime.utcnow().weekday() >= 5
     for symbol in symbols:
-        if normalize_symbol(symbol).upper() in AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS:
-            # Kullanicinin talebi: 'işlem yapmayalım dediğimiz hisseleri
-            # taranmaya alma' - bu sembol icin hicbir AI karari/log uretilmez,
-            # dongu tamamen atlanir (bkz. AUTO_TRADER_FULLY_EXCLUDED_SYMBOLS).
-            continue
         if _is_weekend_scan:
             _sym_asset_type = get_ibkr_symbol_market_info(symbol).get("asset_type", asset_type)
             if _sym_asset_type == "STK":
@@ -9560,21 +8362,6 @@ def _auto_trader_run_symbol(
     portfolio_risk_qty_scale = 1.0
     kelly_qty_scale = 1.0
 
-    if broker == "BINANCE_FUTURES" and "_" in symbol:
-        # Kullanicinin talebi ('son zamanda ciddi zarar ettik... arastir')
-        # ile bulundu: BTCUSDT_261225 gibi VADELI/tarihli (quarterly delivery)
-        # futures kontratlari - normal perpetual (BTCUSDT) sozlesmelerden
-        # farkli olarak vade sonuna yaklastikca spot'tan sapan bir bazis
-        # (contango/backwardation) fiyati tasir ve likiditesi cok daha
-        # dusuktur. 19 Agustos'ta bu sekilde acilan bir BTCUSDT_261225 SHORT
-        # pozisyonu -17.47 USD (-%7.02) zararla kapandi ve bu TEK islem
-        # sonraki her rapor doneminde (2/3/5/14/30 gun) toplam zarar
-        # rakamlarinin buyuk kismini olusturmaya devam etti. Sistem SADECE
-        # perpetual (vadesiz) futures kontratlari icin tasarlandigi icin,
-        # sembolde alt cizgi (vade/teslim tarihi eki) varsa yeni islem
-        # KOSULSUZ atlanir - nasil watchlist'e girdiginden bagimsiz olarak.
-        return
-
     if broker == "IBKR":
         # Cok-borsali havuz destegi: her sembolun kendi borsa/para birimi vardir
         # (ör. AAPL->SMART/USD, SHEL->LSE/GBP, 700->SEHK/HKD). Global auto-trader
@@ -9601,22 +8388,14 @@ def _auto_trader_run_symbol(
         assert_ibkr_market_allowed(exchange, currency, symbol)
 
         # IBKR icin iki bagimsiz sinyal kullanilir: (1) fiyat momentumu (change_24h),
-        # (2) emir defteri bid/ask boyut dengesi (order_flow_signal), (3) orta/
-        # uzun vadeli (1 hafta + 1 ay ayni yonde) trend co-sinyali (bkz.
-        # get_multi_timeframe_co_signal). Kullanicinin talebi: 'momentumda bir
-        # gun uc gun bir hafta bir ay vs bakacaktik hani' - onceden sadece (1)
-        # ve (2) vardi, NVDA gibi 1 hafta/1 ay net trendli ama anlik (24s)
-        # degisimi duz olan semboller 'net sinyal yok' (WAIT) olarak
-        # atlanıyordu. Simdi ucu de esit agirlikta: NOTR olmayanlar (BUY/SELL
-        # diyenler) AYNI yonde ise islem acilir (ne kadar cok teyit o kadar
-        # yuksek confidence); herhangi ikisi ZIT yonde ise (biri BUY biri
-        # SELL) celiskili sinyal nedeniyle islem acilmaz.
+        # (2) emir defteri bid/ask boyut dengesi (order_flow_signal). Ikisi ayni yonde
+        # BUY/SELL derse islem acilir; biri WAIT/NEUTRAL ise digeri tek basina yeterlidir
+        # (boylece tek sinyal her zaman zorunlu tutulmaz, "hic islem acmiyor" sorunu onlenir),
+        # ama ikisi ZIT yon gosterirse (biri BUY biri SELL) islem acilmaz - celiskili sinyal.
         snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency, contract_month=contract_month)
         price = safe_float(snap.get("price"))
         change = safe_float(snap.get("change_24h"))
         order_flow = str(snap.get("order_flow_signal", "NEUTRAL")).upper()
-        mtf_co = get_multi_timeframe_co_signal(symbol, market, "IBKR")
-        mtf_co_signal = str(mtf_co.get("signal", "NEUTRAL")).upper()
 
         momentum_signal = "WAIT"
         if change > 0.6:
@@ -9624,48 +8403,26 @@ def _auto_trader_run_symbol(
         elif change < -0.6:
             momentum_signal = "SELL"
 
-        _signal_votes = [s for s in (momentum_signal, order_flow, mtf_co_signal) if s in ("BUY", "SELL")]
-        _distinct_votes = set(_signal_votes)
-
-        if len(_distinct_votes) > 1:
+        if momentum_signal in ["BUY", "SELL"] and order_flow in ["BUY", "SELL"] and momentum_signal != order_flow:
             action = "WAIT"
             confidence = 50
             reason = (
                 f"IBKR sinyalleri çelişiyor: momentum {momentum_signal} (piyasa 24s değişimi %{change:.2f}, pozisyon kârıyla KARIŞTIRILMAMALI), "
-                f"emir akışı {order_flow}, uzun vadeli trend {mtf_co_signal} -> işlem açılmadı."
+                f"emir akışı {order_flow} -> işlem açılmadı."
             )
         else:
-            action = _signal_votes[0] if _signal_votes else "WAIT"
+            action = momentum_signal if momentum_signal in ["BUY", "SELL"] else (order_flow if order_flow in ["BUY", "SELL"] else "WAIT")
             confidence = min(90, int(55 + abs(change) * 11))
-            _num_confirms = len(_signal_votes)
-            if _num_confirms >= 2:
-                confidence = min(95, confidence + 10 * (_num_confirms - 1))
-            if _num_confirms == 3:
-                reason = (
-                    f"IBKR üçlü teyit: momentum {momentum_signal} (24s değişim %{change:.2f}), "
-                    f"emir akışı {order_flow}, uzun vadeli trend ({mtf_co.get('reason','')}) hepsi aynı yönde."
-                )
-            elif momentum_signal in ["BUY", "SELL"] and order_flow == momentum_signal:
+            if momentum_signal in ["BUY", "SELL"] and order_flow == momentum_signal:
+                confidence = min(95, confidence + 10)
                 reason = (
                     f"IBKR çift teyit: momentum {momentum_signal} (24s değişim %{change:.2f}) "
                     f"ve emir akışı da {order_flow} yönünde."
-                )
-            elif momentum_signal in ["BUY", "SELL"] and mtf_co_signal == momentum_signal:
-                reason = (
-                    f"IBKR çift teyit: momentum {momentum_signal} (24s değişim %{change:.2f}) "
-                    f"ve uzun vadeli trend de aynı yönde ({mtf_co.get('reason','')})."
-                )
-            elif order_flow in ["BUY", "SELL"] and mtf_co_signal == order_flow:
-                reason = (
-                    f"IBKR çift teyit: emir akışı {order_flow} ve uzun vadeli trend de aynı yönde "
-                    f"({mtf_co.get('reason','')})."
                 )
             elif momentum_signal in ["BUY", "SELL"]:
                 reason = f"IBKR momentum sinyali: 24s değişim %{change:.2f} ({momentum_signal}), emir akışı nötr."
             elif order_flow in ["BUY", "SELL"]:
                 reason = f"IBKR emir akışı sinyali: bid/ask dengesi {order_flow} yönünde, momentum nötr."
-            elif mtf_co_signal in ["BUY", "SELL"]:
-                reason = f"IBKR uzun vadeli trend sinyali: {mtf_co.get('reason','')} (anlık momentum/emir akışı nötr)."
             else:
                 reason = f"IBKR: net sinyal yok (24s değişim %{change:.2f})."
 
@@ -9882,52 +8639,6 @@ def _auto_trader_run_symbol(
         if macro_risk["notes"]:
             reason = (reason + " " + " ".join(macro_risk["notes"])).strip()
 
-        # Kullanicinin talebi: 'genel piyasa yapisini okuyamiyoruz, dunya
-        # genelinde her ulkeyi agirlandirip bir dunya borsa/finans endeksi
-        # cikarsin'. Bu, SADECE ABD'ye bakan get_macro_risk_bias/market_cycle
-        # gibi katmanlardan farkli olarak gercekten kuresel (Cin/Avrupa/
-        # Japonya/Hindistan/Ingiltere/Hong Kong dahil) piyasa yonunu dikkate
-        # alir - tum sembollere (kripto dahil) uygulanir.
-        global_macro = get_global_macro_bias(action)
-        if global_macro["bias"] != 0:
-            confidence = max(0, min(95, confidence + global_macro["bias"]))
-        if global_macro["notes"]:
-            reason = (reason + " " + " ".join(global_macro["notes"])).strip()
-
-        # Kullanicinin talebi: 'fed karari piyasayi nasil etkiler, iran krizi
-        # petrol fiyatlarini nasil etkiler' - GDELT (ucretsiz, halka acik)
-        # haber taramasindan Fed/Iran/petrol/banka/resesyon basliklarinin son
-        # 3 gunluk haber tonu kucuk bir ek bias olarak eklenir (gurultulu
-        # olabilecegi icin etkisi kasitli olarak kucuk tutulur).
-        geo_risk = get_geo_news_topics_bias(action)
-        if geo_risk["bias"] != 0:
-            confidence = max(0, min(95, confidence + geo_risk["bias"]))
-        if geo_risk["notes"]:
-            reason = (reason + " " + " ".join(geo_risk["notes"])).strip()
-
-        # Kullanicinin talebi: 'nvda opsiyonlari dun cok atti, vadeli ve
-        # opsiyonlardaki degisime bakarak payda islem yapabilir miyiz' -
-        # opsiyon islemi ACILMAZ, sadece put/call hacim orani hisse (STK)
-        # BUY/SELL kararina ek 'akilli para' sinyali olarak eklenir.
-        options_flow = get_options_flow_bias(symbol, action, asset_type)
-        if options_flow["bias"] != 0:
-            confidence = max(0, min(95, confidence + options_flow["bias"]))
-        if options_flow["notes"]:
-            reason = (reason + " " + " ".join(options_flow["notes"])).strip()
-
-        # Kullanicinin talebi: 'uluslararasi kuruluslar/buyuk yatirimcilar
-        # neye bakiyor' - getiri egrisi (yield curve), kredi spreadi
-        # (HYG/IEF), bakir/altin orani ("Dr. Copper"), reel faiz proxy'si
-        # (TIP) ve CFTC'nin haftalik ucretsiz COT raporundaki buyuk
-        # spekulator (hedge fund) net pozisyonlanmasini kucuk bir bias
-        # olarak ekler - hepsi kuresel/genel piyasa gostergesi oldugu icin
-        # tum sembollere (kripto dahil) uygulanir.
-        institutional = get_institutional_signals_bias(action)
-        if institutional["bias"] != 0:
-            confidence = max(0, min(95, confidence + institutional["bias"]))
-        if institutional["notes"]:
-            reason = (reason + " " + " ".join(institutional["notes"])).strip()
-
         # Kullanicinin talebi: genel piyasa dususlerinde nakitte beklemek yerine
         # guvenli limana (altin/petrol) yonelme veya dipten toparlanan
         # varliklarda firsat degerlendirme.
@@ -9989,32 +8700,6 @@ def _auto_trader_run_symbol(
         if kelly_scale_info.get("notes"):
             reason = (reason + " " + " ".join(kelly_scale_info["notes"])).strip()
         kelly_qty_scale = kelly_scale_info.get("qty_scale", 1.0)
-
-        # Kullanicinin talebi (27 Agustos, 'nerede hata yaptik' analizi):
-        # yukaridaki 4 boyut-buyutme katmani (market_cycle x atr x
-        # portfolio_risk x kelly) CARPIMSAL calisiyor - hepsi ayni anda
-        # buyutme yonunde hizalanirsa (ör. guclu trend + dusuk volatilite +
-        # gecmiste kazandiran sembol) bilesik carpim, her katmanin kendi tek
-        # basina makul ust sinirindan cok daha buyuk bir sonuc uretebiliyordu
-        # (bkz. 24 Agustos BTCUSDT SHORT ornegi: tek islem normal boyutun
-        # ~2.6 kati acildi ve -8.08 USD'lik zararla 5 gunluk 26 diger islemin
-        # net K/Z'sini tek basina sildi). Burada bilesik carpim
-        # MAX_COMBINED_QTY_SCALE'i asarsa, 4 katman da AYNI oranda asagi
-        # cekilir (goreceli agirliklari korunur, sadece toplam tavan asilmaz).
-        # Kucultme yonunde (carpim < 1.0) HICBIR sinir yok - bu sadece yukari
-        # birikmeyi keser.
-        _raw_combined_qty_scale = market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale * kelly_qty_scale
-        if _raw_combined_qty_scale > MAX_COMBINED_QTY_SCALE > 0:
-            _cap_correction = MAX_COMBINED_QTY_SCALE / _raw_combined_qty_scale
-            market_cycle_qty_scale *= _cap_correction
-            atr_qty_scale *= _cap_correction
-            portfolio_risk_qty_scale *= _cap_correction
-            kelly_qty_scale *= _cap_correction
-            reason = (
-                reason
-                + f" [Boyut Tavanı] Bileşik büyütme çarpanı ({_raw_combined_qty_scale:.2f}x) "
-                f"MAX_COMBINED_QTY_SCALE ({MAX_COMBINED_QTY_SCALE:.1f}x) sınırına indirildi."
-            ).strip()
 
         # Kullanicinin talebi: 'sektör rotasyonu ekle' - ayni sektordeki lider
         # varlik belirgin hareket ettiyse ama bu sembol henuz takip etmediyse
@@ -10163,46 +8848,13 @@ def _auto_trader_run_symbol(
                             qty = 0
                 else:
                     spot_is_position_add = bool(existing_position and safe_float(existing_position.get("quantity")) > 0)
-                    # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde
-                    # tespit edildi - pozisyon buyutme (piramitleme) mevcut pozisyonun
-                    # KARDA mi ZARARDA mi olduguna bakmadan yapiliyordu, bu da klasik
-                    # 'averaging down' (zarardaki pozisyona ekleyerek zarari buyutme)
-                    # riskini olusturuyordu. Artik SADECE karda olan pozisyonlara
-                    # ekleme (piramitleme) yapilabilir - zarardaki pozisyona asla eklenmez.
-                    if spot_is_position_add and price > 0:
-                        _spot_add_profit_pct = spot_position_profit_pct(existing_position, price)
-                        if _spot_add_profit_pct <= 0:
-                            spot_skip_reason = (
-                                f"Pozisyon büyütme atlandı: mevcut pozisyon zararda (%{_spot_add_profit_pct:.1f}), "
-                                f"zarardaki pozisyona eklenmez (averaging down engeli)."
-                            )
-                            qty = 0
-                    # Kullanicinin talebi: 'rejime karsi islemi sert engelle' - uzun
-                    # vadeli AYI rejimine tam ters yonde yeni BUY/buyutme kosulsuz engellenir.
-                    _spot_cycle_block_msg = _hard_block_against_market_cycle(symbol, "BUY", market)
-                    # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
-                    # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
-                    _spot_chop_block_msg = None if spot_skip_reason else _hard_block_weak_trend_chop(symbol, market, "BINANCE_SPOT")
-                    # Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde etmek icin
-                    # ne yapmaliyiz' - kisa/orta/uzun vadeli momentum HEPSI ters yondeyse
-                    # (akintiya karsi islem) yeni pozisyon acma koşulsuz engellenir.
-                    _spot_momentum_block_msg = None if (spot_skip_reason or _spot_chop_block_msg) else _hard_block_counter_momentum(symbol, "BUY", market, "BINANCE_SPOT")
-                    if not spot_skip_reason and _spot_cycle_block_msg:
-                        spot_skip_reason = f"Spot işlem atlandı: {_spot_cycle_block_msg}"
-                        qty = 0
-                    elif not spot_skip_reason and _spot_chop_block_msg:
-                        spot_skip_reason = f"Spot işlem atlandı: {_spot_chop_block_msg}"
-                        qty = 0
-                    elif not spot_skip_reason and _spot_momentum_block_msg:
-                        spot_skip_reason = f"Spot işlem atlandı: {_spot_momentum_block_msg}"
-                        qty = 0
-                    elif not spot_skip_reason and spot_is_position_add and db_position_added_today("BINANCE_SPOT", symbol):
+                    if spot_is_position_add and db_position_added_today("BINANCE_SPOT", symbol):
                         spot_skip_reason = (
                             "Zaten açık spot pozisyon var ve bugün bu sembolde bir pozisyon büyütme işlemi "
                             "zaten yapıldı (günde en fazla 1 kez büyütme kuralı)."
                         )
                         qty = 0
-                    elif not spot_skip_reason and price > 0:
+                    elif price > 0:
                         available_usdt = get_spot_available_usdt()
                         if available_usdt > 0:
                             pct = spot_auto_trader_size_pct(symbol) * market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale * kelly_qty_scale
@@ -10330,26 +8982,6 @@ def _auto_trader_run_symbol(
                     # kesirli miktar kullanilir. IBKR IDEALPRO kesirli forex
                     # miktarini native olarak destekler.
                     qty = round(IBKR_FOREX_NOTIONAL_USD / price, 2)
-                    if qty < IBKR_FOREX_MIN_LOT_UNITS:
-                        # KULLANICININ TALEBI ('şu anda sistem emir açabiliyormu'
-                        # teshisi): canli loglarda IBKR'in "Error 399: ... below
-                        # the EUR/GBP/NZD 20000 IdealPro minimum and will be
-                        # routed as an odd lot order" uyarisi goruldu - bu
-                        # odd-lot emirler API uzerinden HICBIR ZAMAN dolmuyor,
-                        # sessizce 'Inactive' kaliyordu (yigin halinde asla
-                        # gerceklesmeyen 'emir gonderildi' izlenimi). Hesap
-                        # kucuk oldugu icin (bkz. IBKR_FOREX_MIN_LOT_UNITS
-                        # yorumu) bu minimumu karsilamak mumkun degil - bu
-                        # yuzden asla dolmayacak emir gonderilmeden atlaniyor.
-                        reason = (
-                            reason
-                            + f" (IBKR forex emri atlandı: {symbol} için hesap "
-                            f"büyüklüğü IDEALPRO'nun {IBKR_FOREX_MIN_LOT_UNITS:.0f} "
-                            f"birimlik minimum lot şartını karşılamıyor - daha "
-                            f"küçük 'odd lot' emirler IBKR tarafından asla "
-                            f"gerçekleştirilmiyor.)"
-                        ).strip()
-                        qty = 0
 
                 if do_live:
                     # Sabit miktarli (ör. 1 hisse) emir, hesaptaki diger pozisyonlarin
@@ -10372,7 +9004,7 @@ def _auto_trader_run_symbol(
                     # LSE/SEHK gibi yabanci borsalarda DEGIL, kullanicinin talebiyle - ve
                     # SADECE normal seans saatleri icindeyken, 1 tam hisseye yetecek kadar
                     # fon olmadiginda kesirli (ör. %20-%30 hisse) emir gonderilebilir.
-                    ibkr_fractional_order = (asset_type == "CRYPTO" and action == "SELL")
+                    ibkr_fractional_order = (asset_type in ("CRYPTO", "FOREX") and action == "SELL")
                     # GUNCELLEME (canli kanit): 'RTH icindeyken SMART hisselerde kesirli
                     # emir calisir' teorisi YANLIS cikti - USO'da normal seans saatleri
                     # icinde bile saatlerce tekrar tekrar Error 10243 (Fractional-sized
@@ -10380,16 +9012,9 @@ def _auto_trader_run_symbol(
                     # acilmadi (kullanicinin 'USO kapanmıyor sanki, günlükte kâr gözüküyor
                     # ama portföyde yok' sikayeti buradan kaynaklaniyordu - aslinda hic
                     # ACILMAMISTI). Bu hesap/API konfigurasyonu STK icin kesirli emri HICBIR
-                    # kosulda desteklemiyor; sadece CRYPTO'da (IBKR PAXOS) native kesirli
-                    # destegi kanitlandigi icin o korunuyor.
-                    # GUNCELLEME 2 (kullanicinin 'hala işlem açılmadı' teshisi, canli kanit):
-                    # FOREX'in de kesirli miktari native destekledigi varsayimi YANLIS
-                    # cikti - canli loglarda GBPUSD/NZDUSD/EURUSD BUY emirlerinde tekrar
-                    # tekrar "Error 10318: This order doesn't support fractional quantity
-                    # trading" alindi (ör. qty=547.8256), emir her seferinde Cancelled ile
-                    # reddedildi. FOREX artik CRYPTO gibi degil, STK gibi ele alinir -
-                    # miktar HER ZAMAN tam sayiya (butun birim, ör. 547 GBP) yuvarlanir.
-                    ibkr_allow_fractional_here = asset_type == "CRYPTO"
+                    # kosulda desteklemiyor; sadece CRYPTO/FOREX'te (IBKR PAXOS/IDEALPRO)
+                    # native kesirli destegi kanitlandigi icin onlar korunuyor.
+                    ibkr_allow_fractional_here = asset_type in ("CRYPTO", "FOREX")
                     # KULLANICININ TALEBI (bugun NVDA %3 yukselirken kacirildi -
                     # 'yetersiz alim gucu' hatasi): STK'de 1 tam hisseye yetecek
                     # fon olmadiginda, miktar-bazli kesirli emir yerine (Error
@@ -10400,20 +9025,6 @@ def _auto_trader_run_symbol(
                     ibkr_cash_qty_amount: Optional[float] = None
                     if action == "BUY" and price > 0:
                         available_funds = get_ibkr_available_funds()
-                        # KULLANICININ TESHISI ('nvda da neden işlem açmamış'): tek
-                        # basina bu kontrol, ayni dongude ONCEKI sembol(ler) icin
-                        # az once gonderilmis ama henuz IBKR tarafindan
-                        # 'gerceklesmemis'(Inactive/Submitted) BUY emirlerinin
-                        # tuttugu tutari dusmuyordu - bu yuzden NVDA/GLD/AMZN/AAPL/
-                        # TSLA/MSFT gibi coklu sembol ayni anda 'uygun' gorunup
-                        # hesabin gercek alim gucunun kat kat uzerinde emir
-                        # yigilmasina yol aciyordu (hicbiri asla gerceklesmiyordu,
-                        # cunku IBKR toplamda karsilanamayan emirleri sonsuza kadar
-                        # Inactive tutuyor). Once bu sembol DISINDAKI acik BUY
-                        # emirlerinin rezerve ettigi tutar dusuluyor.
-                        _reserved_by_others = _ibkr_reserved_amount_for_open_buy_orders(exclude_symbol=symbol)
-                        if _reserved_by_others > 0:
-                            available_funds = max(0.0, available_funds - _reserved_by_others)
                         # KRITIK DUZELTME: price, LSE hisselerinde (ULVR/SHEL/RIO/AZN/
                         # HSBA) pence/GBX biriminde donuyor (GBP degil) ve GBP/HKD gibi
                         # ABD-disi para birimlerinde dogrudan USD fon ile karsilastirma
@@ -10484,14 +9095,13 @@ def _auto_trader_run_symbol(
                                 if qty > 0:
                                     ibkr_fractional_order = True
                             else:
-                                _qty_before_floor = qty
                                 qty = math.floor(qty)
                                 if qty < 1:
                                     if ibkr_allow_fractional_here:
                                         # Zaten hedeflenen miktar 1 hisseden kucuk (ör. AI
                                         # 0.3 hisselik bir tutar hesaplamis) - fon yeterliyse
                                         # dogrudan kesirli emir gonder, hatayla iptal etme.
-                                        fractional_qty = math.floor((_qty_before_floor if _qty_before_floor > 0 else qty) * 10000) / 10000.0
+                                        fractional_qty = math.floor((base_qty if base_qty > 0 else qty) * 10000) / 10000.0
                                         if fractional_qty > 0 and fractional_qty * price_usd <= safe_budget + 1e-9:
                                             qty = fractional_qty
                                             ibkr_fractional_order = True
@@ -10506,13 +9116,13 @@ def _auto_trader_run_symbol(
                                                 "time": now_text(),
                                             }
                                     else:
-                                        if asset_type == "STK" and currency.upper() == "USD" and (_qty_before_floor if _qty_before_floor > 0 else qty) * price_usd >= 1.0:
+                                        if asset_type == "STK" and currency.upper() == "USD" and (base_qty if base_qty > 0 else qty) * price_usd >= 1.0:
                                             # Ayni Cash Quantity mekanizmasi burada da
                                             # denenir: hedeflenen pozisyon zaten 1
                                             # hisseden kucuk (ör. AI 0.3 hisselik tutar
                                             # hesaplamis) - hatayla iptal etmek yerine
                                             # notional tutarla emir denenir.
-                                            ibkr_cash_qty_amount = round((_qty_before_floor if _qty_before_floor > 0 else qty) * price_usd, 2)
+                                            ibkr_cash_qty_amount = round((base_qty if base_qty > 0 else qty) * price_usd, 2)
                                             reason = (
                                                 reason
                                                 + f" ({ibkr_cash_qty_amount:.2f} USD tutarında kesirli (cash quantity) emir denenecek.)"
@@ -10531,31 +9141,15 @@ def _auto_trader_run_symbol(
                     # yapiliyor mu kontrol et - kullanicinin talebi: ayni yonde ekleme
                     # sembol basina gunde en fazla 1 kez yapilabilir.
                     ibkr_is_position_add = False
-                    _ibkr_existing_long_position = None
                     if action == "BUY" and qty > 0:
                         try:
                             for p in ibkr_positions_snapshot():
                                 if str(p.get("symbol", "")).upper() == symbol and str(p.get("side", "")).upper() == "LONG":
                                     ibkr_is_position_add = True
-                                    _ibkr_existing_long_position = p
                                     break
                         except Exception:
                             ibkr_is_position_add = False
-                        # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde
-                        # tespit edildi - averaging down (zarardaki pozisyona ekleme) riskini
-                        # onlemek icin SADECE karda olan pozisyonlara buyutme yapilabilir.
-                        _ibkr_add_profit_pct = (
-                            ibkr_position_profit_pct(_ibkr_existing_long_position)
-                            if ibkr_is_position_add and _ibkr_existing_long_position else 0.0
-                        )
-                        if ibkr_is_position_add and _ibkr_add_profit_pct <= 0:
-                            reason = (
-                                reason
-                                + f" (Pozisyon büyütme atlandı: mevcut pozisyon zararda (%{_ibkr_add_profit_pct:.1f}), "
-                                f"zarardaki pozisyona eklenmez (averaging down engeli).)"
-                            ).strip()
-                            qty = 0
-                        elif ibkr_is_position_add and db_position_added_today("IBKR", symbol):
+                        if ibkr_is_position_add and db_position_added_today("IBKR", symbol):
                             reason = (
                                 reason
                                 + " (Pozisyon büyütme atlandı: bu sembolde bugün zaten bir büyütme yapıldı, günde en fazla 1 kez.)"
@@ -10593,28 +9187,6 @@ def _auto_trader_run_symbol(
                                 reason
                                 + f" (Açığa satış kapatılıyor (buy to cover): {symbol} short pozisyonu kapatılıyor.)"
                             ).strip()
-                    # Kullanicinin talebi: 'rejime karsi islemi sert engelle' - short
-                    # kapatma (buy to cover) DEGILSE (yani yeni LONG acma ya da mevcut
-                    # LONG uzerine ekleme ise), uzun vadeli BOGA/AYI rejimine tam ters
-                    # yonde ise kosulsuz engelle (bkz. _hard_block_against_market_cycle).
-                    if action == "BUY" and qty > 0 and not pre_close_short_position:
-                        _cycle_block_msg = _hard_block_against_market_cycle(symbol, action, market)
-                        if _cycle_block_msg:
-                            reason = (reason + f" (IBKR emri atlandı: {_cycle_block_msg})").strip()
-                            qty = 0
-                        # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
-                        # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
-                        _chop_block_msg = None if qty == 0 else _hard_block_weak_trend_chop(symbol, market, "IBKR")
-                        if _chop_block_msg:
-                            reason = (reason + f" (IBKR emri atlandı: {_chop_block_msg})").strip()
-                            qty = 0
-                        # Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde etmek
-                        # icin ne yapmaliyiz' - kisa/orta/uzun vadeli momentum HEPSI
-                        # ters yondeyse (akintiya karsi islem) engellenir.
-                        _momentum_block_msg = None if qty == 0 else _hard_block_counter_momentum(symbol, "BUY", market, "IBKR")
-                        if _momentum_block_msg:
-                            reason = (reason + f" (IBKR emri atlandı: {_momentum_block_msg})").strip()
-                            qty = 0
                     # AI'nin SELL karariyla mevcut acik (LONG) bir IBKR pozisyonunu kapatip
                     # kapatmadigini anlamak icin emirden ONCE mevcut pozisyonu (varsa) kaydediyoruz.
                     # Boylece emir basariyla dolarsa gerceklesen kar/zarari hesaplayip
@@ -10674,29 +9246,6 @@ def _auto_trader_run_symbol(
                                 and exchange == "SMART"
                                 and symbol in IBKR_SHORTABLE_SYMBOLS
                             )
-                            # Kullanicinin talebi: 'rejime karsi islemi sert engelle' -
-                            # yeni SHORT acmak, uzun vadeli BOGA rejimine tam ters ise
-                            # kosulsuz engellenir.
-                            if ibkr_can_short:
-                                _cycle_block_msg = _hard_block_against_market_cycle(symbol, "SELL", market)
-                                if _cycle_block_msg:
-                                    ibkr_can_short = False
-                                    reason = (reason + f" (Açığa satış atlandı: {_cycle_block_msg})").strip()
-                            # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
-                            # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
-                            if ibkr_can_short:
-                                _chop_block_msg = _hard_block_weak_trend_chop(symbol, market, "IBKR")
-                                if _chop_block_msg:
-                                    ibkr_can_short = False
-                                    reason = (reason + f" (Açığa satış atlandı: {_chop_block_msg})").strip()
-                            # Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde
-                            # etmek icin ne yapmaliyiz' - kisa/orta/uzun vadeli momentum
-                            # HEPSI yukari yondeyse (ralliye karsi short) engellenir.
-                            if ibkr_can_short:
-                                _momentum_block_msg = _hard_block_counter_momentum(symbol, "SELL", market, "IBKR")
-                                if _momentum_block_msg:
-                                    ibkr_can_short = False
-                                    reason = (reason + f" (Açığa satış atlandı: {_momentum_block_msg})").strip()
                             if ibkr_can_short:
                                 try:
                                     available_funds_for_short = get_ibkr_available_funds()
@@ -10830,103 +9379,24 @@ def _auto_trader_run_symbol(
                                     qty = 0
                                     ibkr_cash_qty_amount = None
                             if (qty > 0 or ibkr_cash_qty_amount) and exchange.upper() in IBKR_NON_US_EXCHANGES:
-                                # Kullanicinin talebi (GUNCELLEME): once ABD-disi borsalarda
-                                # (LSE: SHEL/HSBA/RIO/ULVR, ayrica IBIS/SBF/SEHK: BMW/SAP gibi)
-                                # ekstra teyit sarti getirilmisti, ama 30+ gunluk analizde
-                                # sonuc hala net - 11 LSE islemi de zararla kapandi (toplam
-                                # -43$+), BMW de %-6'ya yaklasip zarar-kesin esigine dayandi.
-                                # Ekstra teyit yeterli olmadigi icin kullanici artik TUM
-                                # ABD-disi borsalarda yeni ALIM emrini TAMAMEN durdurmayi
-                                # istedi - mevcut acik pozisyonlar (grandfathered) etkilenmez,
-                                # sadece YENI pozisyon acilmasi engellenir.
-                                reason = (
-                                    reason
-                                    + f" (IBKR emri atlandı: ABD-dışı borsa ({exchange.upper()}) - "
-                                    f"geçmişte tekrarlanan büyük zararlar nedeniyle bu borsalarda "
-                                    f"yeni pozisyon açma tamamen durduruldu.)"
-                                ).strip()
-                                qty = 0
-                                ibkr_cash_qty_amount = None
-                            if (qty > 0 or ibkr_cash_qty_amount) and asset_type == "STK":
-                                # Kullanicinin talebi ('emir iletim zamanına kadar emir
-                                # iletme'): ABD hisseleri pre-market/after-hours
-                                # penceresinin (04:00-20:00 ET) tamamen DISINDAYSA emir
-                                # HIC GONDERILMEZ - saatler once gonderilip IBKR'de
-                                # 'Inactive' kuyrukta beklemek yerine (bkz. Error 399
-                                # 'will not be placed until 04:00 US/Eastern' + onceki
-                                # duzeltmedeki emir yigilmasi riski), gercek iletim
-                                # penceresi baslayana kadar dongu bu sembolu atlar.
-                                _too_early_msg = _us_stock_order_too_early(exchange)
-                                if _too_early_msg:
-                                    reason = (reason + f" ({_too_early_msg})").strip()
+                                # Kullanicinin talebi: 30 gunluk portfoy-genelinde analizde
+                                # kayiplarin buyuk cogunlugu LSE (Londra: SHEL, HSBA, RIO,
+                                # ULVR) hisselerinden geldigi, ayrica IBIS/SBF/SEHK gibi diger
+                                # ABD-disi borsalarda da (BMW, SAP) ayni 'seans-disi/gece
+                                # fiyat atlamasi (gap)' riskinin gecerli oldugu gorulduu icin -
+                                # TUM ABD-disi borsalarda yeni ALIM icin normal esigin
+                                # uzerinde ekstra net teyit sarti getiriliyor (RISK_OFF
+                                # kapisindan bagimsiz, HER ZAMAN uygulanir).
+                                _lse_min_confirmations = _effective_min_confirmations + IBKR_LSE_EXTRA_CONFIRMATIONS
+                                if cum_confirm["net"] < _lse_min_confirmations:
+                                    reason = (
+                                        reason
+                                        + f" (IBKR emri atlandı: ABD-dışı borsa ({exchange.upper()}) - "
+                                        f"geçmişte tekrarlanan zararlar nedeniyle normalin üzerinde teyit "
+                                        f"gerekiyor (net {cum_confirm['net']}/{_lse_min_confirmations}).)"
+                                    ).strip()
                                     qty = 0
                                     ibkr_cash_qty_amount = None
-                    if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
-                        # KULLANICININ TALEBI ('ai karar merkezinde nvda emir iletildi
-                        # diyor ama işlem açılmadı'): piyasa kapaliyken (ör. hafta
-                        # sonu) her karar dongusunde (30sn'de bir) AYNI sembol icin
-                        # YENI bir emir gonderiliyordu - onceki emir henuz IBKR'de
-                        # PendingSubmit/Submitted olarak beklerken (hicbir zaman
-                        # iptal edilmeden) - bu, ayni yonde onlarca YIGILMIS acik
-                        # emir olusturuyordu. Piyasa acilinca (Pazartesi NYSE)
-                        # bunlarin BIRDEN FAZLASI ayni anda dolabilir ve istenenin
-                        # kat kat fazlasi miktar/pozisyon acilmasina yol acabilirdi
-                        # (canli hesapta gercek risk). Artik ayni sembol+yon icin
-                        # zaten acik (Done olmayan) bir emir varsa YENI emir
-                        # gonderilmeden atlanir.
-                        _existing_open_order = None
-                        try:
-                            _target_symbol_norm = normalize_symbol(symbol).upper()
-                            for _oo in ibkr_open_orders_snapshot():
-                                # Forex kontratlarinda ib_insync 'symbol' alani SADECE
-                                # baz para birimini dondurur (ör. EURUSD icin 'EUR'),
-                                # cift karsilastirmasi hatali eslesmeye yol acmasin diye
-                                # forex icin sembol+para birimi birlestirilir.
-                                _oo_symbol = str(_oo.get("symbol", "")).upper()
-                                if str(_oo.get("exchange", "")).upper() == "IDEALPRO":
-                                    _oo_symbol = (_oo_symbol + str(_oo.get("currency", "")).upper())
-                                if (
-                                    _oo_symbol == _target_symbol_norm
-                                    and str(_oo.get("side", "")).upper() == action
-                                    # KULLANICININ TALEBI ('nvda gibi hisseler... pay
-                                    # toplayabilirsin' teshisi sirasinda tespit edildi):
-                                    # 'INACTIVE' burada TERMINAL/BITMIS sayiliyordu, ama
-                                    # daha once kanitlandigi gibi (bkz. ibkr_place_market_order
-                                    # yorumlari) IBKR bir emri sadece piyasa/seans henuz
-                                    # acilmadigi icin 'Inactive' yapabiliyor (Error 399:
-                                    # 'will not be placed at the exchange until ...') - bu
-                                    # GERCEKTEN ACIK, sadece kuyrukta bekleyen bir emir.
-                                    # ib_insync'in kendi OrderStatus.DoneStates = {'Filled',
-                                    # 'Cancelled','ApiCancelled'} - INACTIVE hic yok. Bu yuzden
-                                    # INACTIVE'i terminal sayan eski mantik, her 30sn'lik
-                                    # dongude AYNI sembole ONLARCA yeni 1-hisse emri
-                                    # acilmasina (disk/DB sismesi + alim gucu tukenmesi) yol
-                                    # aciyordu. Artik SADECE gercekten bitmis durumlar
-                                    # (Filled/Cancelled/ApiCancelled) yeni emre izin veriyor.
-                                    and str(_oo.get("status", "")).upper() not in ("FILLED", "CANCELLED", "APICANCELLED")
-                                    and safe_float(_oo.get("filled", 0)) < safe_float(_oo.get("amount", 0))
-                                ):
-                                    _existing_open_order = _oo
-                                    break
-                        except Exception:
-                            _existing_open_order = None
-                        if _existing_open_order:
-                            execution = {
-                                "simulated": True,
-                                "broker": "IBKR",
-                                "symbol": symbol,
-                                "side": action,
-                                "quantity": 0,
-                                "message": (
-                                    f"Zaten açık (henüz dolmamış) bir {action} emri var "
-                                    f"(order#{_existing_open_order.get('orderId')}, kalan "
-                                    f"{_existing_open_order.get('remaining')}) - yığılmış "
-                                    f"tekrar emir gönderilmedi."
-                                ),
-                                "time": now_text(),
-                            }
-                            qty = 0
-                            ibkr_cash_qty_amount = None
                     if (qty > 0 or ibkr_cash_qty_amount) and "error" not in execution:
                         # ABD-disi para biriminde (GBP/HKD vb.) alim yapiliyorsa, emirden once
                         # o para biriminde yeterli nakit olup olmadigini kontrol et; yetersizse
@@ -10952,7 +9422,6 @@ def _auto_trader_run_symbol(
                             allow_fractional=ibkr_fractional_order,
                             contract_month=contract_month,
                             cash_qty=ibkr_cash_qty_amount,
-                            limit_price_hint=price,
                         )
                         # Gercek bir emir denendi (fill/cancel farketmeksizin) - kullanilabilir
                         # fon degisebilir, sonraki sembol icin bayat deger kullanilmasin diye
@@ -11117,37 +9586,10 @@ def _auto_trader_run_symbol(
                         ).strip()
                         qty = 0
                         pre_close_futures_position = None
-                # Kullanicinin talebi: 'rejime karsi islemi sert engelle' - kapatma
-                # (pre_close_futures_position) DEGILSE (yani yeni pozisyon acma ya da
-                # ayni yonde buyutme ise), uzun vadeli BOGA/AYI rejimine tam ters
-                # yonde ise kosulsuz engellenir.
-                if qty > 0 and not pre_close_futures_position:
-                    _futures_cycle_block_msg = _hard_block_against_market_cycle(symbol, action, market)
-                    if _futures_cycle_block_msg:
-                        reason = (reason + f" (Futures emri atlandı: {_futures_cycle_block_msg})").strip()
-                        qty = 0
-                # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' - yatay/
-                # gurultulu (chop, zayif ADX) piyasada yeni pozisyon acma engellenir.
-                if qty > 0 and not pre_close_futures_position:
-                    _futures_chop_block_msg = _hard_block_weak_trend_chop(symbol, market, "BINANCE_FUTURES")
-                    if _futures_chop_block_msg:
-                        reason = (reason + f" (Futures emri atlandı: {_futures_chop_block_msg})").strip()
-                        qty = 0
-                # Kullanicinin talebi: 'piyasayi daha iyi okuyup kar elde etmek icin
-                # ne yapmaliyiz' - 19 Agustos'ta BTCUSDT/ETHUSDT/BTCUSDT_261225 SHORT
-                # pozisyonlari fiyat zaten yukari giderken acilip zarar etti. Kisa/orta/
-                # uzun vadeli momentum HEPSI ters yondeyse (akintiya karsi islem) yeni
-                # pozisyon acma koşulsuz engellenir.
-                if qty > 0 and not pre_close_futures_position:
-                    _futures_momentum_block_msg = _hard_block_counter_momentum(symbol, action, market, "BINANCE_FUTURES")
-                    if _futures_momentum_block_msg:
-                        reason = (reason + f" (Futures emri atlandı: {_futures_momentum_block_msg})").strip()
-                        qty = 0
                 # Ayni yonde mevcut acik pozisyon uzerine ekleme (piramitleme) yapiliyor mu
                 # kontrol et - kullanicinin talebi: ayni yonde ekleme sembol basina
                 # gunde en fazla 1 kez yapilabilir.
                 futures_is_position_add = False
-                _futures_existing_position_for_add = None
                 if qty > 0 and not pre_close_futures_position:
                     try:
                         for p in get_futures_positions():
@@ -11157,25 +9599,10 @@ def _auto_trader_run_symbol(
                                 p_side = str(p.get("side", "")).upper()
                                 if (p_side == "LONG" and action == "BUY") or (p_side == "SHORT" and action == "SELL"):
                                     futures_is_position_add = True
-                                    _futures_existing_position_for_add = p
                                 break
                     except Exception:
                         futures_is_position_add = False
-                    # Kullanicinin talebi: 'kar elde etmek icin ne yapabiliriz' analizinde
-                    # tespit edildi - averaging down (zarardaki pozisyona ekleme) riskini
-                    # onlemek icin SADECE karda olan pozisyonlara buyutme yapilabilir.
-                    _futures_add_profit_pct = (
-                        binance_position_profit_pct(_futures_existing_position_for_add)
-                        if futures_is_position_add and _futures_existing_position_for_add else 0.0
-                    )
-                    if futures_is_position_add and _futures_add_profit_pct <= 0:
-                        reason = (
-                            reason
-                            + f" (Pozisyon büyütme atlandı: mevcut pozisyon zararda (%{_futures_add_profit_pct:.1f}), "
-                            f"zarardaki pozisyona eklenmez (averaging down engeli).)"
-                        ).strip()
-                        qty = 0
-                    elif futures_is_position_add and db_position_added_today("BINANCE_FUTURES", symbol):
+                    if futures_is_position_add and db_position_added_today("BINANCE_FUTURES", symbol):
                         reason = (
                             reason
                             + " (Pozisyon büyütme atlandı: bu sembolde bugün zaten bir büyütme yapıldı, günde en fazla 1 kez.)"
@@ -12196,23 +10623,16 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             enforce_min_reward_risk=False,
         )
         ibkr_take_profit_pct = dynamic_tp["take_profit_pct"]
-        # Kullanicinin talebi: 'atr çok yüksek, en fazla yüzde 2'de kapatılsın' -
-        # ATR-bazli buyutulmus hedef IBKR_ATR_TAKE_PROFIT_CAP_PCT'yi asamaz.
-        if IBKR_ATR_TAKE_PROFIT_CAP_PCT > 0:
-            ibkr_take_profit_pct = min(ibkr_take_profit_pct, IBKR_ATR_TAKE_PROFIT_CAP_PCT)
-        # Kullanicinin talebi (GUNCELLEME 2): kullanici trailing stop'u ONCE
-        # sadece Binance icin istedi (kazananlarin daha fazla kosmasini
-        # saglamak icin), sonra 'IBKR'de de yap' diyerek IBKR'de de
-        # etkinlestirilmesini istedi. Daha once (GUNCELLEME 1) SAP/GLD
-        # ornegiyle IBKR'de trailing kafa karistirici bulunup kapatilmisti
-        # (use_trailing=False) - kullanicinin yeni acik talebiyle bu tekrar
-        # ACILDI (use_trailing=True, varsayilan). Artik IBKR'de de sabit
-        # hedefe ulasildiginda hemen kapatmak yerine, zirveden
-        # TRAILING_GIVEBACK_PCT kadar geri cekilme olana kadar pozisyon
-        # acik kalir (Binance Futures/Spot ile ayni mekanizma).
+        # Kullanicinin talebi (GUNCELLEME): IBKR'de trailing kafa karistirici
+        # bulundu (SAP/GLD %2-3 karda idi ama zirveden %1.2 geri cekilme
+        # beklendigi icin kapanmiyordu) - IBKR'de artik hedefe ulasilinca
+        # HEMEN kapatilir (use_trailing=False). Binance Futures/Spot'ta
+        # trailing (zirveden TRAILING_GIVEBACK_PCT kadar geri cekilme
+        # bekleme) aynen devam eder (bkz. resolve_trailing_take_profit).
         entry_price_for_trail = safe_float(position.get("avgCost") or position.get("entry_price"))
         hit_take_profit = resolve_trailing_take_profit(
             "IBKR", symbol_check, entry_price_for_trail, profit_pct, ibkr_take_profit_pct,
+            use_trailing=False,
         )
         hit_stop_loss = effective_stop_loss_pct > 0 and profit_pct <= -effective_stop_loss_pct
         if not hit_take_profit and not hit_stop_loss:
@@ -12249,7 +10669,6 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
             result = ibkr_place_market_order(
                 symbol, close_side, qty, asset_type, exchange, currency,
                 request_id=f"ibkr-{'tp' if hit_take_profit else 'sl'}-{symbol}-{int(time.time())}",
-                limit_price_hint=safe_float(position.get("mark_price") or position.get("price")),
             )
         except Exception as e:
             result = {"simulated": False, "broker": "IBKR", "symbol": symbol, "error": str(e), "time": now_text()}
@@ -12290,7 +10709,7 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
                 close_reason="TAKE_PROFIT" if hit_take_profit else "STOP_LOSS",
                 detail=(
                     f"%{ibkr_take_profit_pct:.1f} kâr hedefi tetiklendi." if hit_take_profit
-                    else f"%{effective_stop_loss_pct:.1f} zarar-kes tetiklendi."
+                    else f"%{IBKR_STOP_LOSS_PCT:.1f} zarar-kes tetiklendi."
                 ),
             )
             maybe_open_chain_order("IBKR", symbol, qty, exit_price)
@@ -12798,7 +11217,7 @@ def maybe_open_chain_order(broker: str, symbol: str, closed_qty: float, exit_pri
                 chain_qty = math.floor((available_funds * 0.95) / exit_price)
             if chain_qty < 1:
                 return None
-            execution = ibkr_place_market_order(symbol, "BUY", chain_qty, asset_type, exchange, currency, limit_price_hint=exit_price)
+            execution = ibkr_place_market_order(symbol, "BUY", chain_qty, asset_type, exchange, currency)
         else:
             return None
 
@@ -14490,121 +12909,10 @@ def health():
         "binance_proxy_mode": bool(BINANCE_PROXY_BASE_URL),
         "binance_proxy_base_url": BINANCE_PROXY_BASE_URL,
         "ibkr_enabled": IBKR_ENABLED,
+        "ibkr_us_only": IBKR_US_ONLY,
         "ibkr_connected": bool(IBKR_RUNTIME.get("connected")),
         "auto_trader_enabled": AUTO_TRADER.enabled,
     })
-
-
-@app.route("/admin/db-stats", methods=["GET"])
-def admin_db_stats():
-    """Salt-okunur teshis: /data volume dolmustu ('database or disk is full'),
-    silmeden/degistirmeden ONCE hangi tablonun ne kadar yer kapladigini ve
-    ne tur hatalarin/tekrar eden kayitlarin birikip disk doldurdugunu ogrenmek
-    icin kullanilir. Sadece SELECT calistirir, hicbir veri degistirmez/silmez."""
-    report: Dict[str, Any] = {"tables": {}}
-    try:
-        conn = sqlite3.connect(f"file:{RUNTIME_DB_PATH}?mode=ro", uri=True)
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [r[0] for r in cur.fetchall()]
-        ts_columns = ["created_at", "timestamp", "ts", "opened_at", "closed_at", "logged_at"]
-        for t in tables:
-            if t.startswith("sqlite_"):
-                continue
-            info: Dict[str, Any] = {}
-            try:
-                cur.execute(f"SELECT COUNT(*) FROM {t}")
-                info["row_count"] = cur.fetchone()[0]
-            except Exception as e:
-                info["row_count_error"] = str(e)
-            cur.execute(f"PRAGMA table_info({t})")
-            cols = [r[1] for r in cur.fetchall()]
-            ts_col = next((c for c in ts_columns if c in cols), None)
-            if ts_col:
-                try:
-                    cur.execute(f"SELECT MIN({ts_col}), MAX({ts_col}) FROM {t}")
-                    row = cur.fetchone()
-                    info["oldest"] = row[0]
-                    info["newest"] = row[1]
-                except Exception:
-                    pass
-            report["tables"][t] = info
-        # Genel hata/basarisiz emir istatistikleri - kullanicinin 'hataları
-        # öğren' talebi icin: trade_journal'daki status dagilimi.
-        try:
-            cur.execute("SELECT status, COUNT(*) FROM trade_journal GROUP BY status ORDER BY COUNT(*) DESC")
-            report["trade_journal_status_counts"] = cur.fetchall()
-        except Exception as e:
-            report["trade_journal_status_counts_error"] = str(e)
-        try:
-            cur.execute(
-                "SELECT symbol, status, COUNT(*) c FROM trade_journal "
-                "GROUP BY symbol, status HAVING c > 20 ORDER BY c DESC LIMIT 30"
-            )
-            report["duplicate_heavy_symbols"] = cur.fetchall()
-        except Exception as e:
-            report["duplicate_heavy_symbols_error"] = str(e)
-        conn.close()
-        report["ok"] = True
-    except Exception as e:
-        report["ok"] = False
-        report["error"] = str(e)
-    return jsonify(report)
-
-
-@app.route("/admin/db-maintenance", methods=["POST"])
-def admin_db_maintenance():
-    """ACIL BAKIM: Railway kalici volume'u (/data, 500MB kota) dolmustu -
-    '/ibkr/buy-max-affordable' cagrisi 'database or disk is full' hatasi
-    veriyordu (kullanicinin 'nvda düştü tüm paraya nvda al' talebi bu yuzden
-    calismadi). Bu endpoint hizli/tek seferlik disk temizligi icin: buyuk
-    log/gecmis tablolarindan eski satirlari siler, sonra VACUUM ile dosyayi
-    fiilen kucultur. Body ile 'keep_days' (varsayilan 14) ayarlanabilir."""
-    body = request.get_json(silent=True) or {}
-    keep_days = int(body.get("keep_days", 14))
-    do_vacuum = bool(body.get("vacuum", False))
-    cutoff = (datetime.utcnow() - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
-    report: Dict[str, Any] = {"cutoff": cutoff, "deleted": {}}
-    try:
-        conn = sqlite3.connect(RUNTIME_DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [r[0] for r in cur.fetchall()]
-        # Zaman damgasi kolonu olan (buyuyerek disk dolduran) tablolar icin
-        # eski satirlari sil - kolon adlari tabloya gore degisebiliyor.
-        ts_columns = ["created_at", "timestamp", "ts", "opened_at", "closed_at", "logged_at"]
-        for t in tables:
-            if t.startswith("sqlite_"):
-                continue
-            cur.execute(f"PRAGMA table_info({t})")
-            cols = [r[1] for r in cur.fetchall()]
-            ts_col = next((c for c in ts_columns if c in cols), None)
-            if not ts_col:
-                continue
-            try:
-                cur.execute(f"DELETE FROM {t} WHERE {ts_col} < ?", (cutoff,))
-                report["deleted"][t] = cur.rowcount
-                conn.commit()
-            except Exception as e:
-                report["deleted"][t] = f"error: {e}"
-        # NOT: VACUUM, dosyayi yeniden yazmak icin DB boyutu kadar EK disk
-        # alani gerektirir - disk zaten doluyken (ilk denemede yasandigi gibi)
-        # bu 502/worker-crash'e yol aciyor. Varsayilan olarak KAPALI; silinen
-        # satirlarin sayfalari zaten SQLite'in ic serbest listesine (freelist)
-        # dusuyor ve sonraki INSERT'ler dosyayi buyutmeden bu sayfalari
-        # yeniden kullanabiliyor - bu da 'disk full' sorununu VACUUM'suz da
-        # cozuyor. Yeterli bos alan varsa vacuum=true ile fiziksel kucultme
-        # ayrica talep edilebilir.
-        if do_vacuum:
-            cur.execute("VACUUM")
-            conn.commit()
-        conn.close()
-        report["ok"] = True
-        report["vacuumed"] = do_vacuum
-    except Exception as e:
-        report["ok"] = False
-        report["error"] = str(e)
-    return jsonify(report)
 
 
 @app.route("/ibkr/health", methods=["GET"])
@@ -14647,6 +12955,7 @@ def ibkr_health():
         "failed_attempts": failed_attempts,
         "circuit_breaker_open": circuit_breaker_open,
         "force_disabled": IBKR_FORCE_DISABLED,
+        "us_only": IBKR_US_ONLY,
         "manual_disconnect_active": manual_disconnect_active,
         "manual_disconnect_until": manual_disconnect_until,
         "manual_disconnect_reason": manual_disconnect_reason,
@@ -14937,62 +13246,6 @@ def goal_tracker_endpoint():
         return jsonify(get_goal_progress())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
-
-
-@app.route("/debug/ibkr-market-data-test", methods=["GET"])
-def debug_ibkr_market_data_test():
-    """GECICI teşhis endpoint'i: hesapta gercek CANLI (real-time, mode=1)
-    piyasa veri aboneligi olup olmadigini dogrudan test eder. Sembol icin
-    once mode=1 (live) denenir, IBKR'in geri dondugu ticker.marketDataType
-    degeri (1=live, 2=frozen, 3=delayed, 4=delayed-frozen) raporlanir.
-    Kullanicinin 'aslında canlı fiyat alıyorduk' iddiasini net olarak
-    dogrulamak/reddetmek icin. Islem bitince bu endpoint kaldirilacak."""
-    symbol = request.args.get("symbol", "AAPL").upper()
-
-    def _run(ib, ibs):
-        errors = []
-
-        def _on_error(reqId, errorCode, errorString, contract):
-            errors.append({"reqId": reqId, "code": errorCode, "msg": errorString})
-
-        ib.errorEvent += _on_error
-        try:
-            try:
-                ib.reqMarketDataType(1)  # 1 = live/real-time istegi
-            except Exception as e:
-                errors.append({"code": "reqMarketDataType", "msg": str(e)})
-            contract = build_ibkr_contract(ibs, symbol, "STK", "SMART", "USD")
-            qualified = ib.qualifyContracts(contract)
-            if not qualified:
-                return {"error": "contract doğrulanamadı", "errors": errors}
-            ticker = ib.reqMktData(qualified[0], "", False, False)
-            ib.sleep(3.0)
-            result = {
-                "symbol": symbol,
-                "market_data_type": getattr(ticker, "marketDataType", None),
-                "market_data_type_meaning": {
-                    1: "LIVE (canlı, gerçek zamanlı)",
-                    2: "FROZEN (dondurulmuş, son kapanış)",
-                    3: "DELAYED (15-20 dk gecikmeli)",
-                    4: "DELAYED_FROZEN",
-                }.get(getattr(ticker, "marketDataType", None), "bilinmiyor"),
-                "last": _clean_float(getattr(ticker, "last", 0)),
-                "bid": _clean_float(getattr(ticker, "bid", 0)),
-                "ask": _clean_float(getattr(ticker, "ask", 0)),
-                "close": _clean_float(getattr(ticker, "close", 0)),
-                "market_price": _clean_float(ticker.marketPrice()),
-                "ib_errors_during_request": errors,
-            }
-            ib.cancelMktData(qualified[0])
-            return result
-        finally:
-            ib.errorEvent -= _on_error
-
-    try:
-        data = ibkr_execute(_run)
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/debug/force-tp-check", methods=["GET"])
@@ -15406,29 +13659,6 @@ def account_summary_alias():
         return jsonify({"ok": False, "data": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 200
 
 
-@app.route("/admin/ibkr-account-values", methods=["GET"])
-def admin_ibkr_account_values():
-    """GECICI TESHIS: kullanicinin 'nvda da neden işlem açmamış' sorusu -
-    marketable fiyatli BUY LMT emirleri RTH icinde bile surekli 'Inactive'
-    kaliyor, whyHeld bos donuyor. accountSummary() sadece SABIT bir tag
-    setiyle sinirli (bkz. get_ibkr_cash_balance yorumu) - PDT (Pattern Day
-    Trader) kisitlamasi gibi durumlar 'DayTradesRemaining' benzeri
-    tag'lerle SADECE accountValues() uzerinden gorunebilir. Bu salt-okunur
-    endpoint TUM accountValues() satirlarini (filtre yok) dondurur."""
-    def _run(ib, _):
-        rows = []
-        for v in ib.accountValues(IBKR_ACCOUNT or ""):
-            if IBKR_ACCOUNT and v.account != IBKR_ACCOUNT:
-                continue
-            rows.append({"tag": v.tag, "currency": v.currency, "value": v.value, "account": v.account})
-        return rows
-    try:
-        rows = ibkr_execute(_run)
-        return jsonify({"ok": True, "data": rows, "count": len(rows), "last_update": now_text()})
-    except Exception as e:
-        return jsonify({"ok": False, "data": [], "error": str(e), "last_update": now_text()}), 200
-
-
 @app.route("/market-summary", methods=["GET"])
 def market_summary():
     symbol = request.args.get("symbol", "ETHUSDT").upper().replace("/", "")
@@ -15825,12 +14055,20 @@ def ibkr_auto_trader_start():
     with IBKR_AUTO_LOCK:
         IBKR_AUTO_TRADER.enabled = True
         IBKR_AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", IBKR_AUTO_TRADER.symbol))
+        if IBKR_US_ONLY:
+            _info = get_ibkr_symbol_market_info(IBKR_AUTO_TRADER.symbol)
+            if str(_info.get("region", "US")).upper() not in {"US", "US_FUTURES", "CRYPTO"}:
+                IBKR_AUTO_TRADER.symbol = "AAPL"
         if "symbols" in body:
             raw_symbols = body.get("symbols")
             if isinstance(raw_symbols, list):
-                IBKR_AUTO_TRADER.symbols = [normalize_symbol(s) for s in raw_symbols if str(s).strip()]
+                IBKR_AUTO_TRADER.symbols = filter_ibkr_symbols_us_only(
+                    [normalize_symbol(s) for s in raw_symbols if str(s).strip()]
+                )
             else:
-                IBKR_AUTO_TRADER.symbols = _parse_symbol_list(str(raw_symbols))
+                IBKR_AUTO_TRADER.symbols = filter_ibkr_symbols_us_only(
+                    _parse_symbol_list(str(raw_symbols))
+                )
         IBKR_AUTO_TRADER.asset_type = str(body.get("asset_type", IBKR_AUTO_TRADER.asset_type)).upper()
         IBKR_AUTO_TRADER.exchange = str(body.get("exchange", IBKR_AUTO_TRADER.exchange)).upper()
         IBKR_AUTO_TRADER.currency = str(body.get("currency", IBKR_AUTO_TRADER.currency)).upper()
@@ -16035,108 +14273,6 @@ def valuation_bubble_analysis_endpoint():
         return jsonify(payload)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "assets": [], "time": now_text()}), 200
-
-
-@app.route("/global-market-report", methods=["GET"])
-def global_market_report_endpoint():
-    """Kullanicinin talebi: 'yapay zeka dunyadaki her seyi tarayip genel bir
-    piyasa analizi cikarsin - dunya genelinde balon var mi, abd dis borcu,
-    fed karari, iran krizi/petrol, kur etkisi, para hangi ulkeye/sektore
-    gidiyor, dunya finans endeksi gibi'. Bu tek endpoint mevcut TUM makro
-    analiz katmanlarini (dunya endeksi, balon/cokus riski, sektor rotasyonu,
-    aktif senaryolar, jeopolitik haber tonu) BIRLESTIRIP okunabilir Turkce bir
-    ozet metin + ham veriler olarak dondurur - /valuation-bubble-analysis'ten
-    farki, kuresel (sadece ABD degil) endeks + jeopolitik/haber katmanini da
-    icermesi ve tek bir anlatiya (narrative) donusturmesidir."""
-    try:
-        world = get_world_market_index()
-        valuation = get_valuation_bubble_analysis()
-        geo = get_geo_news_topics_signal()
-        sector_scenarios = get_sector_scenario_analysis()
-        yield_curve = get_yield_curve_signal()
-        credit_spread = get_credit_spread_signal()
-        copper_gold = get_copper_gold_ratio_signal()
-        real_yield = get_real_yield_proxy_signal()
-        cot = get_cot_positioning_signal()
-
-        lines: List[str] = []
-        lines.append("🌍 DÜNYA PİYASA ANALİZİ")
-        lines.append("")
-
-        w_regime = world.get("regime", "NEUTRAL")
-        w_5d = world.get("world_change_5d_pct")
-        w_1m = world.get("world_change_1m_pct")
-        if world.get("error"):
-            lines.append("• Dünya endeksi verisi şu an alınamadı.")
-        else:
-            regime_text = {"RISK_ON": "RİSK-AÇIK (iyimser)", "RISK_OFF": "RİSK-KAPALI (temkinli/kaçış)", "NEUTRAL": "NÖTR"}.get(w_regime, w_regime)
-            lines.append(f"• Küresel Piyasa Rejimi: {regime_text} (ağırlıklı 5g %{w_5d:+.2f}, 1 ay %{w_1m:+.2f})")
-            toward = world.get("money_flowing_toward", [])
-            away = world.get("money_flowing_away_from", [])
-            if toward:
-                lines.append("• Para akışının güçlü olduğu bölgeler (1 ay): " + ", ".join(f"{c['name']} (%{c['change_1m_pct']:+.1f})" for c in toward))
-            if away:
-                lines.append("• Zayıf/kaçış yaşanan bölgeler (1 ay): " + ", ".join(f"{c['name']} (%{c['change_1m_pct']:+.1f})" for c in away))
-
-        lines.append("")
-        crash_level = valuation.get("crash_risk_level", "BİLİNMİYOR")
-        lines.append(f"• Genel Balon/Çöküş Riski: {crash_level} - {valuation.get('summary', '')}")
-        lines.append(f"  (VIX {valuation.get('vix')}, Korku/Açgözlülük Endeksi {valuation.get('fear_greed_index')}, {valuation.get('overheat_count')} varlık aşırı ısınmış)")
-
-        lines.append("")
-        active_scenarios = [s for s in sector_scenarios.get("scenarios", []) if s.get("status") == "AKTİF"]
-        if active_scenarios:
-            lines.append("• Şu An AKTİF Sayılan Senaryolar (gerçek veriyle teyitli):")
-            for s in active_scenarios:
-                lines.append(f"  - {s.get('title')}: {s.get('narrative', '')[:200]}")
-        else:
-            lines.append("• Şu an gerçek veriyle teyitli, 'AKTİF' durumda özel bir kriz senaryosu yok.")
-
-        lines.append("")
-        if geo.get("error"):
-            lines.append("• Jeopolitik/haber tonu verisi şu an alınamadı (GDELT erişim/hız sınırı).")
-        else:
-            lines.append(f"• Küresel Haber Tonu (Fed/İran/petrol/banka/resesyon, son 3 gün): {geo.get('sentiment')} (ort. ton {geo.get('overall_tone')})")
-            for t in geo.get("topics", []):
-                lines.append(f"  - {t.get('topic')}: ton {t.get('avg_tone')} ({t.get('article_count')} haber)")
-
-        lines.append("")
-        lines.append("• 📊 Kurumsal/Büyük Yatırımcı Göstergeleri:")
-        if not yield_curve.get("error"):
-            lines.append(f"  - Getiri Eğrisi (3ay-10yıl): {yield_curve.get('status')} (spread: {yield_curve.get('spread_10y_minus_3m')} puan)")
-        if not credit_spread.get("error"):
-            lines.append(f"  - Kredi Spreadi (HYG vs IEF): {credit_spread.get('status')} (göreceli %{credit_spread.get('relative_performance_pct')})")
-        if not copper_gold.get("error"):
-            lines.append(f"  - Bakır/Altın Oranı ('Dr. Copper'): {copper_gold.get('status')} (20g %{copper_gold.get('change_20d_pct')})")
-        if not real_yield.get("error"):
-            lines.append(f"  - Reel Faiz Proxy'si (TIP): {real_yield.get('status')} (20g %{real_yield.get('tip_etf_20d_change_pct')})")
-        if not cot.get("error"):
-            lines.append(f"  - CFTC COT (S&P500 büyük spekülatör pozisyonu, {cot.get('report_date')}): {cot.get('status')} (net long %{cot.get('net_long_pct_of_total')})")
-
-        lines.append("")
-        lines.append(
-            "Not: Bu, sayısal piyasa verisi (ülke endeksleri, VIX, altın/petrol/DXY, sektör "
-            "ETF'leri, getiri eğrisi, kredi spreadi, CFTC COT raporu) ve ücretsiz halka açık haber "
-            "taramasından (GDELT) otomatik üretilmiş bir özet analizdir; yatırım tavsiyesi değildir. "
-            "Sistem bu verileri otomatik alım-satım kararlarına da (küçük bias'lar olarak) dahil eder."
-        )
-
-        return jsonify({
-            "ok": True,
-            "summary_text": "\n".join(lines),
-            "world_market_index": world,
-            "valuation_bubble_analysis": valuation,
-            "geopolitical_risk": geo,
-            "yield_curve": yield_curve,
-            "credit_spread": credit_spread,
-            "copper_gold_ratio": copper_gold,
-            "real_yield_proxy": real_yield,
-            "cot_positioning": cot,
-            "active_scenarios": active_scenarios,
-            "time": now_text(),
-        })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
 
 
 @app.route("/market-signals/external", methods=["GET"])
@@ -16693,17 +14829,10 @@ def performance_stats_route():
     days = int(safe_float(days_param)) if days_param else None
     broker = request.args.get("broker", "ALL")
     include_mandatory = str(request.args.get("include_mandatory", "0")).lower() in ("1", "true", "yes")
-    include_legacy = str(request.args.get("include_legacy_dated_contracts", "0")).lower() in ("1", "true", "yes")
     try:
-        rows = db_all_position_closures(
-            days=days, broker=broker, include_mandatory_holdings=include_mandatory,
-            include_legacy_dated_contracts=include_legacy,
-        )
+        rows = db_all_position_closures(days=days, broker=broker, include_mandatory_holdings=include_mandatory)
         stats = compute_performance_stats(rows)
-        stats["filter"] = {
-            "days": days, "broker": broker, "include_mandatory_holdings": include_mandatory,
-            "include_legacy_dated_contracts": include_legacy,
-        }
+        stats["filter"] = {"days": days, "broker": broker, "include_mandatory_holdings": include_mandatory}
         stats["time"] = now_text()
         return jsonify(stats)
     except Exception as e:
@@ -16721,21 +14850,14 @@ def strategy_analysis_route():
     days = int(safe_float(days_param)) if days_param else 30
     broker = request.args.get("broker", "ALL")
     include_mandatory = str(request.args.get("include_mandatory", "0")).lower() in ("1", "true", "yes")
-    include_legacy = str(request.args.get("include_legacy_dated_contracts", "0")).lower() in ("1", "true", "yes")
     try:
-        rows = db_all_position_closures(
-            days=days, broker=broker, include_mandatory_holdings=include_mandatory,
-            include_legacy_dated_contracts=include_legacy,
-        )
+        rows = db_all_position_closures(days=days, broker=broker, include_mandatory_holdings=include_mandatory)
         base_stats = compute_performance_stats(rows)
         strategy = compute_strategy_analysis(rows, base_stats)
         response = {
             "performance": base_stats,
             "strategy": strategy,
-            "filter": {
-                "days": days, "broker": broker, "include_mandatory_holdings": include_mandatory,
-                "include_legacy_dated_contracts": include_legacy,
-            },
+            "filter": {"days": days, "broker": broker, "include_mandatory_holdings": include_mandatory},
             "time": now_text(),
         }
         return jsonify(response)
