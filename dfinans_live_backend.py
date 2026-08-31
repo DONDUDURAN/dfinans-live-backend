@@ -57,6 +57,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY",
 BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
 LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
 IBKR_ENABLED = os.getenv("IBKR_ENABLED", "false").lower() == "true"  # Disabled by default; VPS connectivity issues
+IBKR_FORCE_DISABLED = os.getenv("IBKR_FORCE_DISABLED", "false").lower() == "true"
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = int(os.getenv("IBKR_PORT", "7497"))
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "21"))
@@ -511,6 +512,8 @@ IBKR_RUNTIME: Dict[str, Any] = {
     "failed_attempts": 0,
     "last_fail_time": 0,
     "circuit_breaker_open": False,
+    "manual_disconnect_until_epoch": 0.0,
+    "manual_disconnect_reason": "",
 }
 IBKR_LOCK = threading.RLock()  # RLock: ibkr_execute + ensure_ibkr_connection ayni thread'de ic ice kilit alabiliyor
 # Portfoy-genel gunluk devre kesici (circuit breaker): esik yuzdesi ve
@@ -3298,6 +3301,15 @@ def load_ib_insync():
 def require_ibkr_enabled():
     if not IBKR_ENABLED:
         raise RuntimeError("IBKR devre dışı. Railway Variables içine IBKR_ENABLED=true eklenmeli.")
+    if IBKR_FORCE_DISABLED:
+        raise RuntimeError("IBKR bağlantısı zorla kapalı (IBKR_FORCE_DISABLED=true).")
+    paused_until = safe_float(IBKR_RUNTIME.get("manual_disconnect_until_epoch"), 0.0)
+    if paused_until > time.time():
+        until_text = datetime.fromtimestamp(paused_until).strftime("%Y-%m-%d %H:%M:%S")
+        reason = str(IBKR_RUNTIME.get("manual_disconnect_reason", "") or "").strip()
+        if reason:
+            raise RuntimeError(f"IBKR bağlantısı manuel kapalı ({until_text}) - sebep: {reason}")
+        raise RuntimeError(f"IBKR bağlantısı manuel kapalı ({until_text}).")
 
 
 def _ibkr_disconnect_locked() -> None:
@@ -14612,6 +14624,13 @@ def ibkr_health():
         reconnect_count = int(IBKR_RUNTIME.get("reconnect_count", 0))
         failed_attempts = int(IBKR_RUNTIME.get("failed_attempts", 0))
         circuit_breaker_open = bool(IBKR_RUNTIME.get("circuit_breaker_open"))
+        manual_disconnect_until_epoch = safe_float(IBKR_RUNTIME.get("manual_disconnect_until_epoch"), 0.0)
+        manual_disconnect_reason = str(IBKR_RUNTIME.get("manual_disconnect_reason", "") or "")
+    manual_disconnect_active = manual_disconnect_until_epoch > time.time()
+    manual_disconnect_until = (
+        datetime.fromtimestamp(manual_disconnect_until_epoch).strftime("%Y-%m-%d %H:%M:%S")
+        if manual_disconnect_active else ""
+    )
     payload = {
         "ok": connected,
         "broker": "IBKR",
@@ -14627,9 +14646,66 @@ def ibkr_health():
         "reconnect_count": reconnect_count,
         "failed_attempts": failed_attempts,
         "circuit_breaker_open": circuit_breaker_open,
+        "force_disabled": IBKR_FORCE_DISABLED,
+        "manual_disconnect_active": manual_disconnect_active,
+        "manual_disconnect_until": manual_disconnect_until,
+        "manual_disconnect_reason": manual_disconnect_reason,
         "time": now_text(),
     }
     return jsonify(payload), (200 if connected else 503)
+
+
+@app.route("/ibkr/disconnect", methods=["POST"])
+def ibkr_disconnect():
+    """IBKR bağlantısını anında keser ve belirli süre yeniden bağlanmayı engeller."""
+    body = request.get_json(silent=True) or {}
+    block_minutes = max(0.0, safe_float(body.get("block_minutes"), 240.0))
+    reason = str(body.get("reason", "") or "").strip() or "Manuel kapatma"
+    pause_until = time.time() + (block_minutes * 60.0) if block_minutes > 0 else 0.0
+
+    with IBKR_LOCK:
+        _ibkr_disconnect_locked()
+        IBKR_RUNTIME["manual_disconnect_until_epoch"] = pause_until
+        IBKR_RUNTIME["manual_disconnect_reason"] = reason
+        IBKR_RUNTIME["last_error"] = (
+            f"IBKR bağlantısı manuel kapatıldı ({int(block_minutes)} dk bloke)."
+            if block_minutes > 0 else "IBKR bağlantısı manuel kapatıldı."
+        )
+
+    with IBKR_AUTO_LOCK:
+        IBKR_AUTO_TRADER.enabled = False
+        IBKR_AUTO_TRADER.last_error = "IBKR auto trader manuel olarak durduruldu."
+        IBKR_AUTO_TRADER.last_update = now_text()
+        IBKR_AUTO_TRADER.updated_at_epoch = time.time()
+
+    return jsonify({
+        "ok": True,
+        "connected": False,
+        "manual_disconnect_active": block_minutes > 0,
+        "manual_disconnect_until": (
+            datetime.fromtimestamp(pause_until).strftime("%Y-%m-%d %H:%M:%S")
+            if block_minutes > 0 else ""
+        ),
+        "manual_disconnect_reason": reason,
+        "ibkr_auto_trader_enabled": False,
+        "last_update": now_text(),
+    })
+
+
+@app.route("/ibkr/reconnect-enable", methods=["POST"])
+def ibkr_reconnect_enable():
+    """Manuel bağlantı blokunu kaldırır; sonraki istekte IBKR yeniden bağlanabilir."""
+    with IBKR_LOCK:
+        IBKR_RUNTIME["manual_disconnect_until_epoch"] = 0.0
+        IBKR_RUNTIME["manual_disconnect_reason"] = ""
+        if "manuel kapatıldı" in str(IBKR_RUNTIME.get("last_error", "")).lower():
+            IBKR_RUNTIME["last_error"] = ""
+    return jsonify({
+        "ok": True,
+        "manual_disconnect_active": False,
+        "message": "IBKR yeniden bağlanmaya açıldı.",
+        "last_update": now_text(),
+    })
 
 
 @app.route("/symbols", methods=["GET"])
@@ -16729,6 +16805,11 @@ def position_closures_test_email():
 @app.route("/ibkr-status", methods=["GET"])
 def ibkr_status_alias():
     return ibkr_health()
+
+
+@app.route("/disconnect-ibkr", methods=["POST"])
+def ibkr_disconnect_alias():
+    return ibkr_disconnect()
 
 
 @app.route("/ibkr-price", methods=["GET"])
