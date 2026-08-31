@@ -395,12 +395,15 @@ def assert_ibkr_us_only_trade_allowed(
 
 
 def filter_ibkr_symbols_us_only(symbols: List[str]) -> List[str]:
+    def _norm(value: Any) -> str:
+        return str(value or "").upper().replace("/", "").replace("-", "").strip()
+
     if not IBKR_US_ONLY:
-        return [normalize_symbol(s) for s in symbols if str(s).strip()]
+        return [_norm(s) for s in symbols if _norm(s)]
     allowed_regions = {"US", "US_FUTURES", "CRYPTO"}
     filtered: List[str] = []
     for raw in symbols:
-        sym = normalize_symbol(raw)
+        sym = _norm(raw)
         if not sym:
             continue
         info = get_ibkr_symbol_market_info(sym)
