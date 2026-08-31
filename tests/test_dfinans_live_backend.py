@@ -651,3 +651,46 @@ def test_large_trade_flow_bias_ibkr_fails_open(backend_module, monkeypatch):
     result = backend_module.get_large_trade_flow_bias("AAPL", "IBKR", "BUY")
     assert result == {"bias": 0, "notes": []}
     assert called["count"] == 0
+
+
+def test_get_ibkr_cash_balances_snapshot_aggregates_and_filters(backend_module, monkeypatch):
+    monkeypatch.setattr(
+        backend_module,
+        "ibkr_account_summary_snapshot",
+        lambda: [
+            {"tag": "CashBalance", "currency": "EUR", "value": "500"},
+            {"tag": "CashBalance", "currency": "EUR", "value": "67.14"},
+            {"tag": "CashBalance", "currency": "GBP", "value": "36.69"},
+            {"tag": "CashBalance", "currency": "USD", "value": "8.91"},
+            {"tag": "NetLiquidation", "currency": "USD", "value": "900"},
+        ],
+    )
+
+    balances = backend_module.get_ibkr_cash_balances_snapshot(min_abs_balance=10)
+
+    assert balances == {"EUR": pytest.approx(567.14), "GBP": pytest.approx(36.69)}
+
+
+def test_ibkr_convert_currency_to_usd_places_forex_sell(backend_module, monkeypatch):
+    captured = {}
+    invalidations = []
+
+    def _fake_order(**kwargs):
+        captured.update(kwargs)
+        return {"status": "Submitted", "symbol": kwargs["symbol"], "side": kwargs["side"]}
+
+    monkeypatch.setattr(backend_module, "ibkr_place_market_order", _fake_order)
+    monkeypatch.setattr(backend_module, "_invalidate_cache", lambda key: invalidations.append(key))
+
+    result = backend_module.ibkr_convert_currency_to_usd("eur", 123.45)
+
+    assert captured["symbol"] == "EURUSD"
+    assert captured["side"] == "SELL"
+    assert captured["quantity"] == pytest.approx(123.45)
+    assert captured["asset_type"] == "FOREX"
+    assert captured["exchange"] == "IDEALPRO"
+    assert captured["currency"] == "USD"
+    assert result["source_currency"] == "EUR"
+    assert result["source_amount"] == pytest.approx(123.45)
+    assert "ibkr_cash_balance_EUR" in invalidations
+    assert "ibkr_cash_balance_USD" in invalidations

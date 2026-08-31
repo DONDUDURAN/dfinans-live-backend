@@ -4317,6 +4317,56 @@ def get_ibkr_cash_balance(currency: str) -> float:
     return _cache_get_or_fetch(f"ibkr_cash_balance_{cur}", 20, _fetch)
 
 
+def get_ibkr_cash_balances_snapshot(min_abs_balance: float = 0.0) -> Dict[str, float]:
+    """IBKR hesap ozetinden para birimi bazinda CashBalance satirlarini toplar.
+    min_abs_balance > 0 verilirse mutlak bakiyesi esik altinda kalan para
+    birimleri filtrelenir."""
+    rows = ibkr_account_summary_snapshot()
+    balances: Dict[str, float] = {}
+    for r in rows:
+        if str(r.get("tag", "")) != "CashBalance":
+            continue
+        cur = str(r.get("currency", "")).upper().strip()
+        if not cur:
+            continue
+        amount = safe_float(r.get("value"), 0.0)
+        balances[cur] = balances.get(cur, 0.0) + amount
+    if min_abs_balance > 0:
+        threshold = abs(min_abs_balance)
+        balances = {k: v for k, v in balances.items() if abs(v) >= threshold}
+    return balances
+
+
+def ibkr_convert_currency_to_usd(source_currency: str, amount: float) -> Dict[str, Any]:
+    """Belirli bir para birimini IDEALPRO uzerinden USD'ye cevirir.
+    source_currency=EUR ise EURUSD paritesinde SELL miktari kadar emir yollar."""
+    cur = str(source_currency or "").upper().strip()
+    qty = safe_float(amount, 0.0)
+    if len(cur) != 3 or not cur.isalpha():
+        raise RuntimeError("source_currency 3 harfli para birimi kodu olmalı (örn. EUR).")
+    if cur == "USD":
+        raise RuntimeError("USD bakiyesi için dönüşüm emri gönderilmez.")
+    if qty <= 0:
+        raise RuntimeError("Dönüştürülecek miktar 0'dan büyük olmalı.")
+
+    request_id = str(uuid.uuid4())
+    result = ibkr_place_market_order(
+        symbol=f"{cur}USD",
+        side="SELL",
+        quantity=qty,
+        asset_type="FOREX",
+        exchange="IDEALPRO",
+        currency="USD",
+        request_id=request_id,
+        allow_fractional=True,
+    )
+    _invalidate_cache(f"ibkr_cash_balance_{cur}")
+    _invalidate_cache("ibkr_cash_balance_USD")
+    result["source_currency"] = cur
+    result["source_amount"] = qty
+    return result
+
+
 def ensure_ibkr_currency_funds(target_currency: str, needed_amount: float) -> Dict[str, Any]:
     """Hedef para biriminde (ör. GBP/HKD) bir hisse alimi yapabilmek icin nakit
     yetersizse, USD nakitten IDEALPRO uzerinden otomatik doviz cevrimi (FX market
@@ -16368,6 +16418,90 @@ def ibkr_buy_max_affordable():
         }), 500
 
 
+@app.route("/ibkr/convert-non-usd-to-usd", methods=["POST"])
+def ibkr_convert_non_usd_to_usd():
+    """IBKR hesapta USD dışındaki pozitif nakitleri IDEALPRO ile USD'ye çevirir.
+    Varsayılan dry_run=True: sadece hangi dönüşümlerin yapılacağını döndürür.
+    Gerçek emir için body: {"dry_run": false} gönderilmelidir."""
+    body = request.get_json(silent=True) or {}
+    min_balance = max(0.0, safe_float(body.get("min_balance"), 1.0))
+    dry_run = safe_bool(body.get("dry_run"), True)
+    whitelist_raw = body.get("currencies", [])
+    whitelist = {
+        str(c).upper().strip()
+        for c in (whitelist_raw if isinstance(whitelist_raw, list) else [])
+        if str(c).strip()
+    }
+
+    try:
+        balances = get_ibkr_cash_balances_snapshot(min_abs_balance=min_balance)
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": f"Cash bakiyeleri alınamadı: {e}",
+            "last_update": now_text(),
+        }), 500
+
+    candidates: List[Dict[str, Any]] = []
+    for cur, amount in balances.items():
+        if cur == "USD":
+            continue
+        if amount <= 0:
+            continue
+        if whitelist and cur not in whitelist:
+            continue
+        if len(cur) != 3 or not cur.isalpha():
+            continue
+        candidates.append({
+            "symbol": f"{cur}USD",
+            "source_currency": cur,
+            "source_amount": round(amount, 6),
+            "side": "SELL",
+            "asset_type": "FOREX",
+            "exchange": "IDEALPRO",
+            "currency": "USD",
+        })
+
+    if dry_run:
+        return jsonify({
+            "ok": True,
+            "dry_run": True,
+            "min_balance": min_balance,
+            "planned_orders": candidates,
+            "planned_count": len(candidates),
+            "message": "Gerçek emir için dry_run=false gönderin.",
+            "last_update": now_text(),
+        })
+
+    executed: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for plan in candidates:
+        cur = str(plan.get("source_currency", ""))
+        qty = safe_float(plan.get("source_amount"), 0.0)
+        try:
+            result = ibkr_convert_currency_to_usd(cur, qty)
+            executed.append(result)
+        except Exception as e:
+            failed.append({
+                "source_currency": cur,
+                "source_amount": qty,
+                "error": str(e),
+            })
+
+    status_code = 200 if not failed else 207
+    return jsonify({
+        "ok": len(failed) == 0,
+        "dry_run": False,
+        "min_balance": min_balance,
+        "planned_count": len(candidates),
+        "executed_count": len(executed),
+        "failed_count": len(failed),
+        "executed": executed,
+        "failed": failed,
+        "last_update": now_text(),
+    }), status_code
+
+
 @app.route("/close-position", methods=["POST"])
 def close_position():
     body = request.get_json(force=True) or {}
@@ -16639,6 +16773,12 @@ def ibkr_price_alias():
             "source": "IBKR",
             "last_update": now_text(),
         }), 200
+
+
+@app.route("/convert-all-to-usd", methods=["POST"])
+def ibkr_convert_all_to_usd_alias():
+    # Mobil uygulama tarafinda IBKR prefix'i olmadan da cagirilabilmesi icin alias.
+    return ibkr_convert_non_usd_to_usd()
 
 
 @app.route("/order", methods=["POST"])
