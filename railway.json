@@ -1,8 +1,30 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "deploy": {
-    "startCommand": "sh -c 'gunicorn dfinans_live_backend:app --bind 0.0.0.0:${PORT:-5055} --worker-class gthread --workers 1 --threads 16 --timeout 30'",
-    "restartPolicyMaxRetries": 5,
-    "restartPolicyWindowMs": 60000
+    "startCommand": "sh -c 'gunicorn dfinans_live_backend:app --bind 0.0.0.0:${PORT:-5055} --worker-class gthread --workers 1 --threads 16 --timeout 30'"
+  },
+  "services": {
+    "backend": {
+      "build": {
+        "dockerfile": "Dockerfile"
+      },
+      "port": 5055
+    },
+    "ibkr-gateway": {
+      "build": {
+        "dockerfile": "ibkr-gateway-image/Dockerfile"
+      },
+      "port": 4003,
+      "environment": {
+        "TWS_USERID": "${IBKR_USERID}",
+        "TWS_PASSWORD": "${IBKR_PASSWORD}",
+        "TWS_ACCOUNT": "${IBKR_ACCOUNT}",
+        "ISERVER_ACCOUNT": "${IBKR_ACCOUNT}",
+        "IBC_MODE": "gateway",
+        "IBC_GATEWAY": "true",
+        "IBC_FIX_USESSL": "false",
+        "IBC_FIX_SOCKETPORT": "4003"
+      }
+    }
   }
 }
