@@ -1,0 +1,39 @@
+version: '3.8'
+services:
+  backend:
+    build: .
+    ports:
+      - "5055:5055"
+    environment:
+      - PORT=5055
+      - BINANCE_LIVE_API_KEY=${BINANCE_LIVE_API_KEY}
+      - BINANCE_LIVE_SECRET_KEY=${BINANCE_LIVE_SECRET_KEY}
+      - IBKR_ENABLED=true
+      - IBKR_FORCE_DISABLED=false
+      - IBKR_HOST=ibkr-gateway
+      - IBKR_PORT=4003
+      - IBKR_CLIENT_ID=21
+      - IBKR_LIVE_TRADING=true
+      - AUTO_TRADER_ENABLED=true
+      - AUTO_TRADER_MODE=live
+    depends_on:
+      - ibkr-gateway
+    networks:
+      - dfinans-net
+
+  ibkr-gateway:
+    # Kullanıcı TWS'i kendi makinesinde çalıştırabilir veya
+    # Interactive Brokers TWS docker image'ı kullanabilir
+    # Şu anda: lokal TWS gateway'e bağlantı için bridge
+    image: alpine:latest
+    command: /bin/sh -c "while true; do sleep 3600; done"
+    ports:
+      - "4003:4003"
+    networks:
+      - dfinans-net
+    # NOT: Gerçek TWS kurulumu için, host networking veya 
+    # Interactive Brokers resmi image'ı gerekir
+
+networks:
+  dfinans-net:
+    driver: bridge
