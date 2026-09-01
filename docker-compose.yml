@@ -11,7 +11,7 @@ services:
       - IBKR_ENABLED=true
       - IBKR_FORCE_DISABLED=false
       - IBKR_HOST=ibkr-gateway
-      - IBKR_PORT=4001
+      - IBKR_PORT=4003
       - IBKR_CLIENT_ID=21
       - IBKR_LIVE_TRADING=true
       - AUTO_TRADER_ENABLED=true
@@ -24,16 +24,21 @@ services:
   ibkr-gateway:
     build:
       context: .
-      dockerfile: ibgateway.Dockerfile
+      dockerfile: ibkr-gateway-image/Dockerfile
     ports:
-      - "4001:4001"
+      - "4003:4003"
     environment:
-      - TWSUSER=${IBKR_USERID:-demo}
-      - TWSPASS=${IBKR_PASSWORD:-demopass}
-      - TRADING_MODE=live
+      - TWS_USERID=${IBKR_USERID:-demo}
+      - TWS_PASSWORD=${IBKR_PASSWORD:-demopass}
+      - TWS_ACCOUNT=${IBKR_ACCOUNT:-}
+      - ISERVER_ACCOUNT=${IBKR_ACCOUNT:-}
+      - IBC_MODE=gateway
+      - IBC_GATEWAY=true
+      - IBC_FIX_USESSL=false
+      - IBC_FIX_SOCKETPORT=4003
     networks:
       - dfinans-net
-    # IBKR Gateway (waytrade/ibkr-gateway) - accepts API connections on 4001
+    # IBKR Gateway (ib-gateway-docker) - accepts API connections on 4003
 
 networks:
   dfinans-net:

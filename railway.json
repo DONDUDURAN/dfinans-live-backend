@@ -12,13 +12,18 @@
     },
     "ibkr-gateway": {
       "build": {
-        "dockerfile": "ibgateway.Dockerfile"
+        "dockerfile": "ibkr-gateway-image/Dockerfile"
       },
-      "port": 4001,
+      "port": 4003,
       "environment": {
-        "TWSUSER": "${IBKR_USERID}",
-        "TWSPASS": "${IBKR_PASSWORD}",
-        "TRADING_MODE": "live"
+        "TWS_USERID": "${IBKR_USERID}",
+        "TWS_PASSWORD": "${IBKR_PASSWORD}",
+        "TWS_ACCOUNT": "${IBKR_ACCOUNT}",
+        "ISERVER_ACCOUNT": "${IBKR_ACCOUNT}",
+        "IBC_MODE": "gateway",
+        "IBC_GATEWAY": "true",
+        "IBC_FIX_USESSL": "false",
+        "IBC_FIX_SOCKETPORT": "4003"
       }
     }
   }

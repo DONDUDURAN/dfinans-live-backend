@@ -20,8 +20,8 @@ System artık **IBKR Gateway** için hazır. Sistemde 3 seçeneğin var:
    - Root Directory: `ibkr-gateway-image`
 
 5. **Port configuration**:
-   - Exposed Port: `4001`
-   - Private Port: `4001`
+   - Exposed Port: `4003`
+   - Private Port: `4003`
 
 6. **Environment Variables ekle**:
    ```
@@ -31,7 +31,7 @@ System artık **IBKR Gateway** için hazır. Sistemde 3 seçeneğin var:
    IBC_MODE=gateway
    IBC_GATEWAY=true
    IBC_FIX_USESSL=false
-   IBC_FIX_SOCKETPORT=4001
+   IBC_FIX_SOCKETPORT=4003
    ```
 
 7. **Deploy et** → Bekle (~5-10 dakika)
