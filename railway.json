@@ -14,7 +14,11 @@
       "build": {
         "dockerfile": "ibkr-gateway-image/Dockerfile"
       },
-      "port": 4003,
+      "port": 6080,
+      "deploy": {
+        "healthcheckPath": "/",
+        "healthcheckTimeout": 300
+      },
       "environment": {
         "TWS_USERID": "${IBKR_USERID}",
         "TWS_PASSWORD": "${IBKR_PASSWORD}",
