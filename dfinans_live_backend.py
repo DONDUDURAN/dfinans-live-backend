@@ -57,7 +57,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY",
 BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
 LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
 IBKR_ENABLED = os.getenv("IBKR_ENABLED", "false").lower() == "true"  # Disabled by default; VPS connectivity issues
-IBKR_FORCE_DISABLED = os.getenv("IBKR_FORCE_DISABLED", "false").lower() == "true"
+IBKR_FORCE_DISABLED = True  # Hard-disable IBKR - block all paths
 IBKR_US_ONLY = os.getenv("IBKR_US_ONLY", "true").lower() == "true"
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = int(os.getenv("IBKR_PORT", "7497"))
@@ -146,6 +146,14 @@ app = Flask(__name__)
 CORS(app)
 
 
+@app.before_request
+def block_ibkr_endpoints_when_disabled():
+    """Block all IBKR-related endpoints."""
+    path = request.path.lower().rstrip("/")
+    if "ibkr" in path:
+        return jsonify({"ok": False, "error": "IBKR bağlantısı kapalı."}), 503
+
+
 @app.after_request
 def apply_no_cache_headers(response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -210,6 +218,7 @@ class AutoTraderState:
 
 
 AUTO_TRADER = AutoTraderState()
+AUTO_TRADER.enabled = False  # Hard-disable IBKR auto-trader
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
 
@@ -556,6 +565,7 @@ PORTFOLIO_CIRCUIT_BREAKER_STATE: Dict[str, Any] = {"triggered_date": None, "trig
 KEEPALIVE_THREAD_STARTED = False
 AUTO_THREAD_STARTED = False
 IBKR_WORKER_THREAD_STARTED = False
+IBKR_WATCHDOG_THREAD_STARTED = False
 # Tum IBKR (ib_insync) islemleri, kac tane paralel Flask/gunicorn thread'i olursa
 # olsun, DAIMA bu TEK kuyruk uzerinden TEK bir adanmis worker thread'de calisir.
 # ib_insync'in IB client'i, connect edildigi thread'in asyncio event loop'una
@@ -9952,11 +9962,13 @@ def _shadow_watchlist_loop() -> None:
 
 def start_background_workers_once():
     global KEEPALIVE_THREAD_STARTED, AUTO_THREAD_STARTED, IBKR_WORKER_THREAD_STARTED, IBKR_WATCHDOG_THREAD_STARTED, SHADOW_WATCHLIST_THREAD_STARTED
-    if not IBKR_WORKER_THREAD_STARTED:
+    # Skip IBKR worker thread if force-disabled
+    if not IBKR_WORKER_THREAD_STARTED and not IBKR_FORCE_DISABLED:
         t0 = threading.Thread(target=_ibkr_worker_thread_main, daemon=True)
         t0.start()
         IBKR_WORKER_THREAD_STARTED = True
-    if not KEEPALIVE_THREAD_STARTED:
+    # Skip IBKR keepalive thread if force-disabled
+    if not KEEPALIVE_THREAD_STARTED and not IBKR_FORCE_DISABLED:
         t1 = threading.Thread(target=_ibkr_keepalive_loop, daemon=True)
         t1.start()
         KEEPALIVE_THREAD_STARTED = True
@@ -9964,7 +9976,8 @@ def start_background_workers_once():
         t2 = threading.Thread(target=_auto_trader_loop, daemon=True)
         t2.start()
         AUTO_THREAD_STARTED = True
-    if not IBKR_WATCHDOG_THREAD_STARTED:
+    # Skip IBKR watchdog thread if force-disabled
+    if not IBKR_WATCHDOG_THREAD_STARTED and not IBKR_FORCE_DISABLED:
         t3 = threading.Thread(target=_ibkr_stuck_watchdog_loop, daemon=True)
         t3.start()
         IBKR_WATCHDOG_THREAD_STARTED = True
