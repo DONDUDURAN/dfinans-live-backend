@@ -10640,8 +10640,13 @@ def enforce_ibkr_take_profit_stop_loss(channel: str = "auto_take_profit") -> Opt
         # zorluyordu; SAP/GLD gibi pozisyonlar hic kapanmiyordu (bkz. BTC
         # ile ayni sorun, Binance icin de ayni sebeple kapatilmisti).
         dynamic_tp = compute_dynamic_take_profit_pct(
-            symbol_check, position_asset_type, "IBKR", ibkr_take_profit_pct, effective_stop_loss_pct,
+            symbol_check,
+            position_asset_type,
+            "IBKR",
+            ibkr_take_profit_pct,
+            effective_stop_loss_pct,
             enforce_min_reward_risk=False,
+            enforce_atr_target=False,
         )
         ibkr_take_profit_pct = dynamic_tp["take_profit_pct"]
         # Kullanicinin talebi (GUNCELLEME): IBKR'de trailing kafa karistirici
