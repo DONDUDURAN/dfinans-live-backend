@@ -1,5 +1,8 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "dockerfile": "ibkr-gateway-image/Dockerfile"
+  },
   "services": {
     "backend": {
       "build": {
