@@ -3,6 +3,7 @@ name: Build ibkr-gateway custom image
 on:
   push:
     paths:
+      - "ibgateway.Dockerfile"
       - "ibkr-gateway-image/**"
       - ".github/workflows/build-ibkr-gateway-image.yml"
   workflow_dispatch: {}
@@ -30,6 +31,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: ibkr-gateway-image
+          context: .
+          file: ibgateway.Dockerfile
           push: true
           tags: ${{ steps.vars.outputs.tag }}

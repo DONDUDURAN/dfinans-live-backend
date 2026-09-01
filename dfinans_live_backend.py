@@ -59,10 +59,10 @@ LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "fals
 IBKR_ENABLED = os.getenv("IBKR_ENABLED", "true").lower() == "true"  # Re-enabled for USD/US markets only
 IBKR_FORCE_DISABLED = False  # Re-enable IBKR
 IBKR_US_ONLY = True  # STRICT: US markets only
-# Railway internal networking: ibkr-gateway service connects as ibkr-gateway:4003
-# Local: 127.0.0.1:7497 (TWS) or ibkr-gateway:4003 (docker-compose)
-IBKR_HOST = os.getenv("IBKR_HOST", "ibkr-gateway" if os.getenv("RAILWAY_ENVIRONMENT_NAME") else "127.0.0.1")
-IBKR_PORT = int(os.getenv("IBKR_PORT", "4003" if os.getenv("RAILWAY_ENVIRONMENT_NAME") else "7497"))
+# Railway internal networking: ibkr-gateway service connects as ibkr-gateway.railway.internal:4001
+# Local: 127.0.0.1:7497 (TWS) or ibkr-gateway:4001 (docker-compose)
+IBKR_HOST = os.getenv("IBKR_HOST", "ibkr-gateway.railway.internal" if os.getenv("RAILWAY_ENVIRONMENT_NAME") else "127.0.0.1")
+IBKR_PORT = int(os.getenv("IBKR_PORT", "4001" if os.getenv("RAILWAY_ENVIRONMENT_NAME") else "7497"))
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "21"))
 IBKR_ACCOUNT = os.getenv("IBKR_ACCOUNT", "")
 IBKR_KEEPALIVE_SEC = int(os.getenv("IBKR_KEEPALIVE_SEC", "20"))
