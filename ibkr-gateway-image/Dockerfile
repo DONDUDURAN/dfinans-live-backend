@@ -1,14 +1,13 @@
-# Custom wrapper image on top of gnzsnz/ib-gateway-docker's stable image.
+# Custom wrapper image on top of gnzsnz/ib-gateway-docker's LATEST image.
+#
+# Using 'latest' (Gateway 10.50.1e + IBC 3.24.2) instead of 'stable'
+# (Gateway 10.45.1j + IBC 3.24.1). IBC 3.24.2 is designed for Gateway 10.48+
+# and handles the write-access confirmation dialog that causes Error 321.
 #
 # Key fix: patches /home/ibgateway/Jts/jts.ini.tmpl at BUILD TIME to add
 # ApiReadOnly=0 under [Logon]. Every container restart, apply_settings()
-# creates jts.ini from this template — so ApiReadOnly=0 is permanent
-# without needing a volume or runtime hooks.
-#
-# Background: the gnzsnz template has no ApiReadOnly setting, so TWS
-# defaults to Read-Only mode on every fresh container start, causing
-# all order attempts to fail with Error 321.
-FROM ghcr.io/gnzsnz/ib-gateway:stable
+# creates jts.ini from this template — so ApiReadOnly=0 is permanent.
+FROM ghcr.io/gnzsnz/ib-gateway:latest
 
 USER root
 RUN apt-get update -y && \
