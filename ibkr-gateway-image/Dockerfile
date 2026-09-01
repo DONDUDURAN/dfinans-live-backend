@@ -23,3 +23,7 @@ RUN sed -i '/^\[Logon\]/a ApiReadOnly=0' /home/ibgateway/Jts/jts.ini.tmpl && \
     grep "ApiReadOnly" /home/ibgateway/Jts/jts.ini.tmpl
 
 USER ibgateway
+
+# Disable Docker health check so Railway doesn't time out waiting for an HTTP response.
+# The IBKR Gateway only exposes TCP ports (4001/4003), not HTTP.
+HEALTHCHECK NONE
