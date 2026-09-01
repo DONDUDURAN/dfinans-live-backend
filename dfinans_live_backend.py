@@ -213,9 +213,15 @@ AUTO_TRADER = AutoTraderState()
 AUTO_TRADER.enabled = True  # Re-enable IBKR auto-trader
 AUTO_TRADER.broker = "IBKR"
 AUTO_TRADER.symbol = "NVDA"
+AUTO_TRADER.symbols = ["NVDA"]  # STRICT: only NVDA
 AUTO_TRADER.asset_type = "STK"
+AUTO_TRADER.market = "STK"
 AUTO_TRADER.exchange = "SMART"
 AUTO_TRADER.currency = "USD"
+AUTO_TRADER.mode = "live"  # Live trading
+AUTO_TRADER.quantity = 1  # Buy 1 share at a time
+AUTO_TRADER.interval_sec = 60  # Check every 60 seconds
+AUTO_TRADER.min_confidence = 50  # Lower threshold for more trades
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
 
