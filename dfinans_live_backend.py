@@ -56,17 +56,17 @@ PORT = int(os.getenv("PORT", os.getenv("DFINANS_BACKEND_PORT", "5055")))
 BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY", ""))
 BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
 LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
-IBKR_ENABLED = os.getenv("IBKR_ENABLED", "false").lower() == "true"  # Disabled by default; VPS connectivity issues
-IBKR_FORCE_DISABLED = True  # Hard-disable IBKR - block all paths
-IBKR_US_ONLY = os.getenv("IBKR_US_ONLY", "true").lower() == "true"
+IBKR_ENABLED = os.getenv("IBKR_ENABLED", "true").lower() == "true"  # Re-enabled for USD/US markets only
+IBKR_FORCE_DISABLED = False  # Re-enable IBKR
+IBKR_US_ONLY = True  # STRICT: US markets only
 IBKR_HOST = os.getenv("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = int(os.getenv("IBKR_PORT", "7497"))
 IBKR_CLIENT_ID = int(os.getenv("IBKR_CLIENT_ID", "21"))
 IBKR_ACCOUNT = os.getenv("IBKR_ACCOUNT", "")
 IBKR_KEEPALIVE_SEC = int(os.getenv("IBKR_KEEPALIVE_SEC", "20"))
-IBKR_LIVE_TRADING = os.getenv("IBKR_LIVE_TRADING", "false").lower() == "true"
-AUTO_TRADER_ENABLED = os.getenv("AUTO_TRADER_ENABLED", "false").lower() == "true"
-AUTO_TRADER_MODE = os.getenv("AUTO_TRADER_MODE", "paper").lower()
+IBKR_LIVE_TRADING = os.getenv("IBKR_LIVE_TRADING", "true").lower() == "true"  # Live trading enabled
+AUTO_TRADER_ENABLED = os.getenv("AUTO_TRADER_ENABLED", "true").lower() == "true"  # Re-enabled
+AUTO_TRADER_MODE = os.getenv("AUTO_TRADER_MODE", "live").lower()  # Live trading mode
 RUNTIME_DB_PATH = os.getenv("DFINANS_RUNTIME_DB_PATH", "/data/dfinans_runtime.db" if os.path.isdir("/data") else "/tmp/dfinans_runtime.db")
 BINANCE_PROXY_BASE_URL = os.getenv("BINANCE_PROXY_BASE_URL", "").rstrip("/")
 BINANCE_PROXY_TOKEN = os.getenv("BINANCE_PROXY_TOKEN", "")
@@ -146,14 +146,6 @@ app = Flask(__name__)
 CORS(app)
 
 
-@app.before_request
-def block_ibkr_endpoints_when_disabled():
-    """Block all IBKR-related endpoints."""
-    path = request.path.lower().rstrip("/")
-    if "ibkr" in path:
-        return jsonify({"ok": False, "error": "IBKR bağlantısı kapalı."}), 503
-
-
 @app.after_request
 def apply_no_cache_headers(response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -218,7 +210,12 @@ class AutoTraderState:
 
 
 AUTO_TRADER = AutoTraderState()
-AUTO_TRADER.enabled = False  # Hard-disable IBKR auto-trader
+AUTO_TRADER.enabled = True  # Re-enable IBKR auto-trader
+AUTO_TRADER.broker = "IBKR"
+AUTO_TRADER.symbol = "NVDA"
+AUTO_TRADER.asset_type = "STK"
+AUTO_TRADER.exchange = "SMART"
+AUTO_TRADER.currency = "USD"
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
 
