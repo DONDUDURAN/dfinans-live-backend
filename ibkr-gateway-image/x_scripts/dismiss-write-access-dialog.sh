@@ -9,32 +9,35 @@
 # This script monitors for the dialog using xdotool and presses Enter to
 # dismiss it, allowing the client to proceed with write access.
 #
-# Activated via Railway env var: X_SCRIPTS=/home/ibgateway/x_scripts
+# Activated via Railway env var: X_SCRIPTS=x_scripts
+# IMPORTANT: run_scripts() calls bash synchronously, so we MUST
+# detach the loop to background and exit immediately.
 
 export DISPLAY=:1
 
-echo "[dismiss-write-access] Starting dialog monitor loop"
+echo "[dismiss-write-access] Launching dialog monitor in background"
 
+nohup bash -c '
+export DISPLAY=:1
+echo "[dismiss-write-access] Monitor loop started (PID $$)"
 while true; do
-    # Look for the write-access confirmation dialog
     WIN_ID=$(xdotool search --name "API client needs write access" 2>/dev/null | head -1)
-
     if [ -n "$WIN_ID" ]; then
-        echo "[dismiss-write-access] Found dialog (window $WIN_ID), pressing Enter to dismiss"
+        echo "[dismiss-write-access] Found dialog (window $WIN_ID), pressing Enter"
         xdotool windowactivate --sync "$WIN_ID" 2>/dev/null
-        sleep 0.3
-        # Press Enter — on this dialog, Enter activates the default (Close) button.
-        # We also try Tab+Enter to move focus to the second button if needed.
+        sleep 0.5
         xdotool key --window "$WIN_ID" Return 2>/dev/null
         sleep 1
-        # Double-check it's gone; if still open, try Escape
         WIN_ID2=$(xdotool search --name "API client needs write access" 2>/dev/null | head -1)
         if [ -n "$WIN_ID2" ]; then
-            echo "[dismiss-write-access] Dialog still open, trying Escape"
             xdotool key --window "$WIN_ID2" Escape 2>/dev/null
         fi
         sleep 2
     fi
-
     sleep 3
 done
+' > /tmp/dismiss-write-access.log 2>&1 &
+
+echo "[dismiss-write-access] Monitor started in background (PID $!)"
+# Exit immediately so run_scripts() is not blocked
+exit 0
