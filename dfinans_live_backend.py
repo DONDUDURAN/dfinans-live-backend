@@ -13036,6 +13036,22 @@ def ibkr_reconnect_enable():
     })
 
 
+@app.route("/ibkr/circuit-breaker-reset", methods=["POST"])
+def ibkr_circuit_breaker_reset():
+    """Force reset IBKR circuit breaker and clear failure counter."""
+    with IBKR_LOCK:
+        IBKR_RUNTIME["circuit_breaker_open"] = False
+        IBKR_RUNTIME["failed_attempts"] = 0
+        IBKR_RUNTIME["last_fail_time"] = 0
+    return jsonify({
+        "ok": True,
+        "circuit_breaker_open": False,
+        "failed_attempts": 0,
+        "message": "IBKR circuit breaker reset.",
+        "last_update": now_text(),
+    })
+
+
 @app.route("/symbols", methods=["GET"])
 def symbols():
     market = request.args.get("market", "FUTURES").upper()
