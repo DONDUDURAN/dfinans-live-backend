@@ -10,4 +10,4 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
-CMD ["sh", "-c", "gunicorn dfinans_live_backend:app --bind 0.0.0.0:${PORT:-5055}"]
+CMD ["sh", "-c", "gunicorn dfinans_live_backend:app --bind 0.0.0.0:${PORT:-5055} --worker-class gthread --workers 1 --threads 16 --timeout 30"]

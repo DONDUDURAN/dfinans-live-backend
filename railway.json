@@ -1,8 +1,5 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
-  "deploy": {
-    "startCommand": "sh -c 'gunicorn dfinans_live_backend:app --bind 0.0.0.0:${PORT:-5055} --worker-class gthread --workers 1 --threads 16 --timeout 30'"
-  },
   "services": {
     "backend": {
       "build": {
