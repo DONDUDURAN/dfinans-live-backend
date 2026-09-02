@@ -113,6 +113,36 @@ struct TCPortfolioResponse: Codable {
     let data: TCPortfolioTotals?
 }
 
+struct TCActionResponse: Codable {
+    let success: Bool?
+    let message: String?
+    let error: String?
+}
+
+private extension View {
+    @ViewBuilder
+    func platformAutocapitalizationDisabled() -> some View {
+        #if canImport(UIKit)
+        if #available(iOS 15.0, *) {
+            self.textInputAutocapitalization(.never)
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func platformDecimalKeyboard() -> some View {
+        #if canImport(UIKit)
+        self.keyboardType(.decimalPad)
+        #else
+        self
+        #endif
+    }
+}
+
 struct TCEngineStatus: Codable {
     let enabled: Bool
     let last_update: String
@@ -169,10 +199,10 @@ final class TradingCenterViewModel: ObservableObject {
     // Örnek: http://192.168.1.40:5055
     @Published var baseURL: String = "https://dfinans-live-backend-production-b43e.up.railway.app"
 
-    @Published var selectedBroker: String = "Binance"
+    @Published var selectedBroker: String = "IBKR"  // Terminal ile senkronize edilecek
     @Published var selectedMarket: String = "FUTURES"
-    @Published var selectedSymbol: String = "ETHUSDT"
-    @Published var symbols: [String] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+    @Published var selectedSymbol: String = "AAPL"
+    @Published var symbols: [String] = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ", "BTCUSD", "ETHUSD"]
 
     @Published var health: TCHealth?
     @Published var marketSummary: TCMarketSummary?
@@ -370,11 +400,11 @@ final class TradingCenterViewModel: ObservableObject {
                 ibkrBody["asset_type"] = assetType
                 ibkrBody["exchange"] = "SMART"
                 ibkrBody["currency"] = "USD"
-                let _: [String: JSONValue] = try await post("/ibkr/manual-order", body: ibkrBody)
+                let _: TCActionResponse = try await post("/ibkr/manual-order", body: ibkrBody)
             } else {
                 var binanceBody = body
-                binanceBody["reduceOnly"] = false
-                let _: [String: JSONValue] = try await post("/manual-order", body: binanceBody)
+                binanceBody["market"] = selectedMarket.lowercased() == "spot" ? "spot" : "usdtm"
+                let _: TCActionResponse = try await post("/place-order", body: binanceBody)
             }
             statusText = "Manuel \(side) emri backend'e gönderildi."
             await loadAll()
@@ -532,7 +562,7 @@ struct TradingCenterView: View {
                 }
 
                 TextField("http://Mac-IP:5055", text: $vm.baseURL)
-                    .textInputAutocapitalization(.never)
+                    .platformAutocapitalizationDisabled()
                     .autocorrectionDisabled(true)
                     .padding(12)
                     .background(Color.black.opacity(0.25))
@@ -781,7 +811,7 @@ struct TradingCenterView: View {
 
                 HStack {
                     TextField("Miktar", text: $vm.quantityText)
-                        .keyboardType(.decimalPad)
+                        .platformDecimalKeyboard()
                         .padding(12)
                         .background(Color.black.opacity(0.25))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -798,7 +828,7 @@ struct TradingCenterView: View {
                     .buttonStyle(TradeButtonStyle(kind: .sell))
                 }
 
-                Text("Gerçek emir için backend tarafında LIVE_TRADING=true olmalı. Kapalıysa emir simülasyon loguna düşer.")
+                Text("Gerçek emir için backend tarafında LIVE_TRADING=true olmalı. Binance seçiliyken seçili piyasa üzerinden gerçek emir gönderilir.")
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.60))
             }
