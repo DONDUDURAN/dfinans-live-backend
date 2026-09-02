@@ -195,11 +195,13 @@ struct TCGoalTracker: Codable {
 @MainActor
 final class TradingCenterViewModel: ObservableObject {
     private let forcedBackendURL = "https://dfinans-live-backend-production-b43e.up.railway.app"
-    // Mac IP adresini burada değiştir.
-    // Örnek: http://192.168.1.40:5055
     @Published var baseURL: String = "https://dfinans-live-backend-production-b43e.up.railway.app"
 
-    @Published var selectedBroker: String = "IBKR"  // Terminal ile senkronize edilecek
+    @Published var selectedBroker: String = UserDefaults.standard.string(forKey: "selectedBroker") ?? "IBKR" {
+        didSet {
+            UserDefaults.standard.set(selectedBroker, forKey: "selectedBroker")
+        }
+    }
     @Published var selectedMarket: String = "FUTURES"
     @Published var selectedSymbol: String = "AAPL"
     @Published var symbols: [String] = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "QQQ", "BTCUSD", "ETHUSD"]
@@ -282,13 +284,16 @@ final class TradingCenterViewModel: ObservableObject {
     }
 
     func loadSymbols() async {
+        print("🔍 loadSymbols() çağrıldı — selectedBroker: '\(selectedBroker)'")
         if selectedBroker == "IBKR" {
             symbols = ibkrSymbols
             if !symbols.contains(selectedSymbol) {
                 selectedSymbol = symbols.first ?? "AAPL"
             }
+            print("✅ IBKR symbols set: \(symbols)")
             return
         }
+        print("⚠️ Binance branch — \(selectedMarket)")
         do {
             let response: TCSymbolsResponse = try await get("/symbols?market=\(selectedMarket)")
             if !response.symbols.isEmpty {
