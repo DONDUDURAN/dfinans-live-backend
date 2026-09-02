@@ -643,10 +643,10 @@ SHADOW_WATCHLIST_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_WATCHLIST_TAKE_PROFIT
 SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT", "6.0"))
 SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
 SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "1.2"))
-BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "2.0"))
-BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "3.0"))
-IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "2.0"))
-IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "4.0"))
+BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "6.0"))
+BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "2.0"))
+IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "6.0"))
+IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "2.0"))
 # Kullanicinin talebi: son 1 haftalik islem gecmisi analiz edilince (bkz.
 # /position-closures) SHEL ve HSBA (ikisi de LSE/Londra hisseleri) 3'er kez
 # ust uste zarar-kesildigi, hemen ardindan tekrar acilip yine zarar ettigi
@@ -2329,6 +2329,37 @@ def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     top_symbols = sorted(by_symbol_pnl.items(), key=lambda kv: kv[1], reverse=True)[:5]
     worst_symbols = sorted(by_symbol_pnl.items(), key=lambda kv: kv[1])[:5]
 
+    # Sharpe Ratio ve Sortino Ratio hesapla (profesyonel metrikler)
+    pnl_returns = [safe_float(r.get("realized_pnl")) for r in rows]
+    if len(pnl_returns) > 1:
+        mean_return = sum(pnl_returns) / len(pnl_returns)
+        std_dev = math.sqrt(sum((x - mean_return) ** 2 for x in pnl_returns) / len(pnl_returns)) if len(pnl_returns) > 1 else 0
+        
+        # Sharpe Ratio (risk-free rate = 0)
+        sharpe_ratio = (mean_return / std_dev) if std_dev > 0 else 0.0
+        
+        # Sortino Ratio (downside deviation)
+        downside_returns = [x for x in pnl_returns if x < 0]
+        downside_std = math.sqrt(sum(x ** 2 for x in downside_returns) / len(pnl_returns)) if downside_returns else std_dev
+        sortino_ratio = (mean_return / downside_std) if downside_std > 0 else 0.0
+        
+        # Risk of Ruin (0-100% olasılık)
+        if avg_loss > 0 and avg_win > 0 and win_rate > 0:
+            win_prob = win_rate / 100.0
+            loss_prob = 1.0 - win_prob
+            ratio = avg_win / avg_loss if avg_loss > 0 else 1.0
+            if ratio > 0 and loss_prob > 0:
+                risk_of_ruin = ((loss_prob / win_prob) ** 10) if win_prob > 0 else 0  # Simplest form
+                risk_of_ruin = min(100.0, risk_of_ruin * 100.0)
+            else:
+                risk_of_ruin = 0.0
+        else:
+            risk_of_ruin = 0.0
+    else:
+        sharpe_ratio = 0.0
+        sortino_ratio = 0.0
+        risk_of_ruin = 0.0
+
     return {
         "total_trades": total_trades,
         "wins": len(wins),
@@ -2339,6 +2370,9 @@ def compute_performance_stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "avg_win": avg_win,
         "avg_loss": avg_loss,
         "max_drawdown": round(max_drawdown, 2),
+        "sharpe_ratio": round(sharpe_ratio, 2),
+        "sortino_ratio": round(sortino_ratio, 2),
+        "risk_of_ruin_pct": round(risk_of_ruin, 2),
         "best_trade": {
             "symbol": best_trade.get("symbol"), "broker": best_trade.get("broker"),
             "pnl": round(safe_float(best_trade.get("realized_pnl")), 2),
@@ -8420,7 +8454,25 @@ def _auto_trader_run_symbol(
             momentum_signal = "BUY"
         elif change < -0.6:
             momentum_signal = "SELL"
-
+        
+        # RSI ve teknik analiz kontrol (entry timing iyileştirmesi)
+        rsi_signal = "NEUTRAL"
+        rsi_note = ""
+        try:
+            technical_data = get_symbol_technical_data(symbol, market)
+            rsi = technical_data.get("rsi", 50)
+            sma20 = technical_data.get("sma_20", 0)
+            sma50 = technical_data.get("sma_50", 0)
+            
+            if rsi < 30:
+                rsi_signal = "BUY"
+                rsi_note = f" (RSI {rsi}: aşırı satım → BUY gücü artar)"
+            elif rsi > 70:
+                rsi_signal = "SELL"
+                rsi_note = f" (RSI {rsi}: aşırı alım → SELL riski)"
+        except Exception:
+            pass  # RSI hesaplamaya yetecek veri yoksa pass
+        
         if momentum_signal in ["BUY", "SELL"] and order_flow in ["BUY", "SELL"] and momentum_signal != order_flow:
             action = "WAIT"
             confidence = 50
@@ -8431,18 +8483,22 @@ def _auto_trader_run_symbol(
         else:
             action = momentum_signal if momentum_signal in ["BUY", "SELL"] else (order_flow if order_flow in ["BUY", "SELL"] else "WAIT")
             confidence = min(90, int(55 + abs(change) * 11))
+            # RSI uyumlu ise confidence arttır
+            if action in ["BUY", "SELL"] and rsi_signal == action:
+                confidence = min(98, confidence + 12)
             if momentum_signal in ["BUY", "SELL"] and order_flow == momentum_signal:
                 confidence = min(95, confidence + 10)
                 reason = (
                     f"IBKR çift teyit: momentum {momentum_signal} (24s değişim %{change:.2f}) "
-                    f"ve emir akışı da {order_flow} yönünde."
+                    f"ve emir akışı da {order_flow} yönünde{rsi_note}."
                 )
             elif momentum_signal in ["BUY", "SELL"]:
-                reason = f"IBKR momentum sinyali: 24s değişim %{change:.2f} ({momentum_signal}), emir akışı nötr."
+                reason = f"IBKR momentum sinyali: 24s değişim %{change:.2f} ({momentum_signal}), emir akışı nötr{rsi_note}."
             elif order_flow in ["BUY", "SELL"]:
-                reason = f"IBKR emir akışı sinyali: bid/ask dengesi {order_flow} yönünde, momentum nötr."
+                reason = f"IBKR emir akışı sinyali: bid/ask dengesi {order_flow} yönünde, momentum nötr{rsi_note}."
             else:
-                reason = f"IBKR: net sinyal yok (24s değişim %{change:.2f})."
+                reason = f"IBKR: net sinyal yok (24s değişim %{change:.2f}){rsi_note}."
+
 
         if snap.get("is_extended_hours"):
             reason = (
@@ -8823,6 +8879,17 @@ def _auto_trader_run_symbol(
     resolve_learning(symbol, price)
 
     with lock:
+        # SECURITY: Maksimum pozisyon boyutu %2 portföy riskine sınırlı
+        # (profesyonel risk yönetimi)
+        if broker == "BINANCE_FUTURES" or broker == "BINANCE_SPOT":
+            available_usdt = get_futures_available_usdt() if broker == "BINANCE_FUTURES" else get_spot_available_usdt()
+            max_risk_amount = (available_usdt * 0.02)  # %2 portföy
+            position_notional = qty * price if price > 0 else qty
+            if position_notional > max_risk_amount > 0:
+                qty_scale_limit = max_risk_amount / position_notional
+                qty = qty * qty_scale_limit
+                reason = (reason + f" [Pozisyon boyutu %2 portföy riski limiti tarafından sınırlandırıldı]").strip()
+        
         # Portfoy-genel gunluk devre kesici: gunluk toplam (gerceklesen + tum
         # acik pozisyonlarin ANLIK gerceklesmemis) kayip esik yuzdesini
         # asarsa, o takvim gunu icin AI'nin YENI BUY/SELL kararlari tamamen
