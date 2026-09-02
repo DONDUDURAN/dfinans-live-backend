@@ -833,11 +833,18 @@ struct TradingCenterView: View {
                     .buttonStyle(TradeButtonStyle(kind: .sell))
                 }
 
-                Text("Gerçek emir için backend tarafında LIVE_TRADING=true olmalı. Binance seçiliyken seçili piyasa üzerinden gerçek emir gönderilir.")
+                Text(manualOrderHelpText)
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.60))
             }
         }
+    }
+
+    private var manualOrderHelpText: String {
+        if vm.selectedBroker == "IBKR" {
+            return "Gerçek emir için backend tarafında LIVE_TRADING=true olmalı. IBKR seçiliyken emir /ibkr/manual-order üzerinden gönderilir."
+        }
+        return "Gerçek emir için backend tarafında LIVE_TRADING=true olmalı. Binance seçiliyken seçili piyasa üzerinden gerçek emir gönderilir."
     }
 
     private var balanceSummaryCard: some View {
