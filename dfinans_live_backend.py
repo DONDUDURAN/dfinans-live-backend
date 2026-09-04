@@ -5432,6 +5432,59 @@ def compute_atr(highs: List[float], lows: List[float], closes: List[float], peri
     return atr
 
 
+def compute_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
+    """Wilder'in ADX (Average Directional Index) formulu - trendin YONU
+    degil, GUCUNU olcer (0-100). Dusuk ADX (<20-25) yonsuz/zikzak ("chop")
+    piyasayi, yuksek ADX (>25) net/guclu bir trendi gosterir. Sistemde
+    yonsuz piyasalarda islem acmayi engelleyen 'chop filtresi' bunu kullanir
+    (bkz. ADX_MIN_TREND_STRENGTH, get_technical_signal_bias). En az
+    2*period+1 bar gerektirir, yetersizse None doner (cagiran taraf fail-open
+    davranir - filtre asla veri eksikligi yuzunden islemi engellemez)."""
+    n = min(len(highs), len(lows), len(closes))
+    if n < (2 * period) + 1:
+        return None
+    plus_dm = [0.0]
+    minus_dm = [0.0]
+    tr_list = [0.0]
+    for i in range(1, n):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+        tr_list.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        ))
+    # Wilder'in smoothed ortalamasi (ATR ile ayni yontem).
+    def _wilder_smooth(values: List[float]) -> List[float]:
+        smoothed = [sum(values[1:period + 1])]
+        for v in values[period + 1:]:
+            smoothed.append(smoothed[-1] - (smoothed[-1] / period) + v)
+        return smoothed
+    smoothed_tr = _wilder_smooth(tr_list)
+    smoothed_plus_dm = _wilder_smooth(plus_dm)
+    smoothed_minus_dm = _wilder_smooth(minus_dm)
+    dx_values = []
+    for tr, pdm, mdm in zip(smoothed_tr, smoothed_plus_dm, smoothed_minus_dm):
+        if tr <= 0:
+            continue
+        plus_di = 100.0 * (pdm / tr)
+        minus_di = 100.0 * (mdm / tr)
+        di_sum = plus_di + minus_di
+        dx = 100.0 * (abs(plus_di - minus_di) / di_sum) if di_sum > 0 else 0.0
+        dx_values.append(dx)
+    if len(dx_values) < period:
+        return None
+    adx = sum(dx_values[:period]) / period
+    for dx in dx_values[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
+
+
+ADX_MIN_TREND_STRENGTH = float(os.getenv("ADX_MIN_TREND_STRENGTH", "25"))
+
+
 def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60, contract_month: str = "") -> List[Dict[str, float]]:
     """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyati VE hacmini ceker
     (RSI/SMA ve hacim teyidi hesaplamalari icin gecmis veri gerekir). /history
@@ -5505,6 +5558,7 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
         sma20 = compute_sma(closes, 20)
         sma50 = compute_sma(closes, 50)
         atr = compute_atr(highs, lows, closes, 14)
+        adx = compute_adx(highs, lows, closes, 14)
         # Kullanicinin talebi: 'RSI/SMA aşırı-uç sinyali sadece yumuşak puan
         # (bias) - dipte SHORT/zirvede LONG açmayı engellemiyor'. MACD
         # histogramı burada da hesaplanip donus teyidi (RSI asiri uc + MACD
@@ -5536,6 +5590,7 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
             "sma_50": round(sma50, 4) if sma50 is not None else None,
             "atr_14": round(atr, 6) if atr is not None else None,
             "atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
+            "adx_14": round(adx, 2) if adx is not None else None,
             "last_close": round(closes[-1], 6),
             "last_closed_volume": round(last_closed_volume, 2),
             "avg_volume_20": round(avg_volume, 2) if avg_volume else None,
@@ -5727,6 +5782,22 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
             elif volume_ratio <= 0.5:
                 bias -= 4
                 notes.append(f"Hacim ortalamanın {volume_ratio}x altında (düşük katılım): hareket teyitsiz, güvenilirliği düşük.")
+
+        # Kullanicinin talebi: 'gercek yatirimci gibi davran' - secici/dusuk
+        # frekansli islem felsefesinin bir parcasi olarak yonsuz ("chop")
+        # piyasalarda islem acmayi engelleyen ADX (trend gucu) filtresi.
+        # ADX < ADX_MIN_TREND_STRENGTH ise piyasa net bir trend icinde degil
+        # demektir - bu durumda momentum/RSI gibi sinyaller yanlis alarm
+        # verme egiliminde olur, bu yuzden SERT ENGEL uygulanir (yumusak puan
+        # yeterli degil, cunku zayif trendde herhangi bir yonde giris riskli).
+        # ADX verisi alinamazsa (yetersiz gecmis) fail-open - islemi engellemez.
+        adx = tech.get("adx_14")
+        if adx is not None and adx < ADX_MIN_TREND_STRENGTH:
+            hard_block = True
+            notes.append(
+                f"SERT ENGEL: ADX(14) {adx:.1f} - piyasa yönsüz/kararsız (\"chop\"), "
+                f"minimum trend gücü eşiğinin ({ADX_MIN_TREND_STRENGTH:.0f}) altında - giriş engellendi."
+            )
     except Exception:
         pass
 
