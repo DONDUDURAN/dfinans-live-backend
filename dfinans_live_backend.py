@@ -841,12 +841,12 @@ IBKR_MIN_MARGIN_FOR_SHORT_USD = float(os.getenv("IBKR_MIN_MARGIN_FOR_SHORT_USD",
 # sistem" - /ibkr/ai-signal daha once SADECE momentum takibi yapiyordu
 # (change_24h > +0.7 -> BUY), yani bir hisse ne kadar cok yukselirse o kadar
 # "AL" sinyali veriyordu - asiri yukselisin ardindan gelebilecek geri
-# cekilme/duzeltme hic degerlendirilmiyordu. Asagidaki esikler asilinca
-# (belirgin yukselis + RSI(14) asiri alim) ve genel piyasa rejimi guclu BULL
+# cekilme/duzeltme hic degerlendirilmiyordu. RSI(14) asiri alim esigi asilinca
+# (gunluk kapanislar uzerinden - haftalarca surmus bir ralliyi de yakalar,
+# tek gunluk buyuk siramaya bagli degildir) ve genel piyasa rejimi guclu BULL
 # DEGILSE, sinyal SELL'e (short adayi) ceviriliyor - ayni "chain order" mean-
 # reversion mantigi (bkz. CHAIN_ORDER_*), ama pozisyon KAPANDIKTAN SONRA degil,
 # YENI POZISYON ACILIRKEN de calisiyor.
-IBKR_OVERBOUGHT_MOVE_THRESHOLD_PCT = float(os.getenv("IBKR_OVERBOUGHT_MOVE_THRESHOLD_PCT", "3.0"))
 IBKR_OVERBOUGHT_RSI_THRESHOLD = float(os.getenv("IBKR_OVERBOUGHT_RSI_THRESHOLD", "68"))
 
 # Varlik bazli pozisyon boyutlandirma: her BUY/SELL sinyalinde sabit miktar yerine,
@@ -14412,12 +14412,16 @@ def ibkr_ai_signal():
         if daily_stats and daily_stats.get("rsi") is not None:
             daily_change = daily_stats["change_24h"]
             rsi = daily_stats["rsi"]
-            if daily_change >= IBKR_OVERBOUGHT_MOVE_THRESHOLD_PCT and rsi >= IBKR_OVERBOUGHT_RSI_THRESHOLD:
+            # RSI(14) zaten SURDURULEN/BIRIKMIS bir yukselisi (haftalarca surse
+            # bile) yansitir - "cok artmis" durumu tek bir gunun buyuk siramasina
+            # bagli degildir. daily_change > 0 sarti sadece "hisse zaten dususe
+            # gecmemis, hala yukselis/yatay bolgede" teyidi icin tutuluyor.
+            if rsi >= IBKR_OVERBOUGHT_RSI_THRESHOLD and daily_change > 0:
                 regime_info = get_bull_bear_market_regime("STOCK")
                 regime = regime_info.get("regime", "TRANSITION")
                 if regime != "BULL":
                     signal = "SELL"
-                    confidence = max(0, min(92, int(60 + (daily_change - IBKR_OVERBOUGHT_MOVE_THRESHOLD_PCT) * 4 + (rsi - IBKR_OVERBOUGHT_RSI_THRESHOLD) * 1.2)))
+                    confidence = max(0, min(92, int(58 + (rsi - IBKR_OVERBOUGHT_RSI_THRESHOLD) * 1.5 + daily_change * 2)))
                     reason = (
                         f"Aşırı yükseliş: son günde %{daily_change:.2f} artış + RSI {rsi:.1f} "
                         f"(aşırı alım). Piyasa rejimi {regime} (BULL değil) - geri çekilme "
