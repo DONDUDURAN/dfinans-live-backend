@@ -10707,19 +10707,25 @@ def get_futures_positions() -> List[Dict[str, Any]]:
 
     if BINANCE_PROXY_BASE_URL:
         try:
-            # Try direct /positions endpoint first (VPS proxy has this)
+            # Proxy /positions'in BASARIYLA (istisnasiz) don mesi, bos bir liste
+            # olsa bile GECERLI bir sonuc - "acik futures pozisyonu yok" demektir,
+            # "bulunamadi/hata" degil. Eskiden bos liste yanlislikla hata sayilip
+            # /account-summary'ye, o da basarisiz olunca IP whitelist'i sadece VPS
+            # proxy'sinde olan dogrudan Binance API'ye (401 Invalid API-key/IP)
+            # dusuluyordu - bu da kullaniciya sahte bir 'HATA' pozisyonu olarak
+            # gozukuyordu, halbuki gercek durum sadece 'pozisyon yok' idi.
             legacy_pos = _binance_proxy_request("GET", "/positions")
             rows = _proxy_extract_positions_from_legacy_positions(legacy_pos)
-            if rows:
-                return _enrich_pnl_pct(rows)
-            # If empty, try /portfolio fallback
-            legacy = _binance_proxy_portfolio_payload()
-            rows = _proxy_extract_positions_from_portfolio(legacy)
-            if rows:
-                return _enrich_pnl_pct(rows)
-            raise RuntimeError("Proxy /positions veya /portfolio'dan futures position bulunamadı.")
+            return _enrich_pnl_pct(rows)
         except Exception as proxy_err:
-            pass
+            try:
+                # Proxy /positions cagrisinin kendisi basarisiz oldu (network/5055
+                # servisi coktu vb.) - /account-summary uzerinden ikinci bir deneme.
+                legacy = _binance_proxy_portfolio_payload()
+                rows = _proxy_extract_positions_from_portfolio(legacy)
+                return _enrich_pnl_pct(rows)
+            except Exception:
+                pass
     try:
         data = signed_request("GET", FUTURES_BASE, "/fapi/v2/positionRisk", {})
         positions = []
@@ -15956,6 +15962,13 @@ def status_alias():
         "status": "online",
         "ibkr_connected": ibkr_connected,
         "auto_trader_enabled": auto_enabled,
+        # Mobil uygulamanin sistem sagligi (DFSystemWatchdog) bu 3 alani
+        # okuyor - eskiden burada hic donmuyorlardi, bu yuzden hepsi eksik
+        # sayilip her zaman 'API key/secret eksik - CRITICAL' gosteriliyordu,
+        # backend aslinda tamamen saglikliyken bile.
+        "api_key": bool(BINANCE_API_KEY),
+        "secret": bool(BINANCE_SECRET_KEY),
+        "real_orders_enabled": LIVE_TRADING,
         "time": now_text(),
     })
 
