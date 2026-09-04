@@ -14397,7 +14397,17 @@ def auto_trader_start():
     body = request.get_json(force=True) or {}
     with AUTO_LOCK:
         AUTO_TRADER.enabled = True
-        AUTO_TRADER.broker = str(body.get("broker", AUTO_TRADER.broker)).upper()
+        # GUVENLIK: broker/market/asset_type/exchange/currency BILEREK request
+        # govdesinden okunmuyor ve degistirilemiyor. Bu endpoint SADECE Binance
+        # Futures auto-trader'i kontrol eder; bu alanlar disaridan gelen bir
+        # deger ile "IBKR"/"STK" gibi yanlis bir kimlige donusturulursen daha
+        # once yasadigimiz kritik hataya (crypto sembollerin IBKR mantigiyla
+        # islenmesi, otomatik TP/SL'in hic calismamasi) tekrar yol acabilir.
+        AUTO_TRADER.broker = "BINANCE"
+        AUTO_TRADER.market = "FUTURES"
+        AUTO_TRADER.asset_type = "CRYPTO"
+        AUTO_TRADER.exchange = ""
+        AUTO_TRADER.currency = "USDT"
         AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", AUTO_TRADER.symbol))
         if "symbols" in body:
             raw_symbols = body.get("symbols")
@@ -14405,10 +14415,6 @@ def auto_trader_start():
                 AUTO_TRADER.symbols = [normalize_symbol(s) for s in raw_symbols if str(s).strip()]
             else:
                 AUTO_TRADER.symbols = _parse_symbol_list(str(raw_symbols))
-        AUTO_TRADER.market = str(body.get("market", AUTO_TRADER.market)).upper()
-        AUTO_TRADER.asset_type = str(body.get("asset_type", AUTO_TRADER.asset_type)).upper()
-        AUTO_TRADER.exchange = str(body.get("exchange", AUTO_TRADER.exchange)).upper()
-        AUTO_TRADER.currency = str(body.get("currency", AUTO_TRADER.currency)).upper()
         AUTO_TRADER.mode = "live" if str(body.get("mode", AUTO_TRADER.mode)).lower() == "live" else "paper"
         AUTO_TRADER.quantity = max(0.0, safe_float(body.get("quantity"), AUTO_TRADER.quantity))
         AUTO_TRADER.interval_sec = max(8, int(safe_float(body.get("interval_sec"), AUTO_TRADER.interval_sec)))
@@ -14443,6 +14449,9 @@ def ibkr_auto_trader_start():
     body = request.get_json(force=True) or {}
     with IBKR_AUTO_LOCK:
         IBKR_AUTO_TRADER.enabled = True
+        # GUVENLIK: broker kimligi bu endpoint icin sabit - request govdesinden
+        # asla okunmaz/degistirilmez (bkz. /auto-trader/start'taki ayni koruma).
+        IBKR_AUTO_TRADER.broker = "IBKR"
         IBKR_AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", IBKR_AUTO_TRADER.symbol))
         if IBKR_US_ONLY:
             _info = get_ibkr_symbol_market_info(IBKR_AUTO_TRADER.symbol)
@@ -14503,6 +14512,9 @@ def spot_auto_trader_start():
     body = request.get_json(force=True) or {}
     with SPOT_AUTO_LOCK:
         SPOT_AUTO_TRADER.enabled = True
+        # GUVENLIK: broker kimligi bu endpoint icin sabit - request govdesinden
+        # asla okunmaz/degistirilmez (bkz. /auto-trader/start'taki ayni koruma).
+        SPOT_AUTO_TRADER.broker = "BINANCE_SPOT"
         SPOT_AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", SPOT_AUTO_TRADER.symbol))
         if "symbols" in body:
             raw_symbols = body.get("symbols")
