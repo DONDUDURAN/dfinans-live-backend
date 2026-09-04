@@ -13342,6 +13342,92 @@ def ibkr_health():
     return jsonify(payload), (200 if connected else 503)
 
 
+RAILWAY_API_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "").strip()
+RAILWAY_PROJECT_ID = os.environ.get("RAILWAY_PROJECT_ID", "").strip()
+IBKR_GATEWAY_SERVICE_NAME = os.environ.get("IBKR_GATEWAY_SERVICE_NAME", "ibkr-gateway").strip()
+RAILWAY_GRAPHQL_URL = "https://backboard.railway.com/graphql/v2"
+
+
+def _railway_graphql(query: str, variables: dict) -> dict:
+    """Railway'in genel GraphQL API'sine istek atar (deployment durdurma/yeniden
+    baslatma icin). RAILWAY_API_TOKEN env var'i olmadan calismaz."""
+    if not RAILWAY_API_TOKEN:
+        raise RuntimeError("RAILWAY_API_TOKEN tanımlı değil - Railway kontrolü devre dışı.")
+    if not RAILWAY_PROJECT_ID:
+        raise RuntimeError("RAILWAY_PROJECT_ID tanımlı değil.")
+    resp = requests.post(
+        RAILWAY_GRAPHQL_URL,
+        headers={
+            "Authorization": f"Bearer {RAILWAY_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={"query": query, "variables": variables},
+        timeout=20,
+    )
+    data = resp.json()
+    if data.get("errors"):
+        raise RuntimeError(f"Railway API hatası: {data['errors']}")
+    return data.get("data") or {}
+
+
+def _railway_get_ibkr_gateway_deployment() -> dict:
+    """ibkr-gateway servisinin su anki (en son) deployment id + status bilgisini doner."""
+    query = """
+    query($projectId:String!){
+      project(id:$projectId){
+        environments(first:10){
+          edges{ node{
+            id name
+            serviceInstances(first:30){
+              edges{ node{ serviceId serviceName latestDeployment{ id status } } }
+            }
+          } }
+        }
+      }
+    }
+    """
+    data = _railway_graphql(query, {"projectId": RAILWAY_PROJECT_ID})
+    envs = ((data.get("project") or {}).get("environments") or {}).get("edges") or []
+    for env_edge in envs:
+        env_node = env_edge.get("node") or {}
+        if env_node.get("name") != "production":
+            continue
+        instances = ((env_node.get("serviceInstances") or {}).get("edges")) or []
+        for inst_edge in instances:
+            inst = inst_edge.get("node") or {}
+            if inst.get("serviceName") == IBKR_GATEWAY_SERVICE_NAME:
+                dep = inst.get("latestDeployment") or {}
+                return {"id": dep.get("id"), "status": dep.get("status")}
+    raise RuntimeError(f"'{IBKR_GATEWAY_SERVICE_NAME}' servisi Railway projesinde bulunamadı.")
+
+
+def _railway_stop_ibkr_gateway() -> dict:
+    """IB Gateway container'ini GERCEKTEN durdurur (IBKR sunucusundaki oturumu
+    biraktirmak icin) - sadece bizim python client'imizin baglantisini kesen
+    _ibkr_disconnect_locked()'tan farkli olarak, Gateway process'i tamamen
+    kapanir ve IBKR hesabi mobil/web girisi icin serbest kalir."""
+    dep = _railway_get_ibkr_gateway_deployment()
+    dep_id = dep.get("id")
+    if not dep_id:
+        raise RuntimeError("ibkr-gateway için aktif deployment bulunamadı.")
+    mutation = "mutation($id:String!){ deploymentStop(id:$id) }"
+    _railway_graphql(mutation, {"id": dep_id})
+    return {"deployment_id": dep_id}
+
+
+def _railway_restart_ibkr_gateway() -> dict:
+    """IB Gateway container'ini yeniden baslatir (durdurulmus deployment'i
+    rebuild etmeden ayaga kaldirir). Baslatinca IBKR 2FA onayi tekrar
+    gerekecektir - deploy sonrasi davranisin ayni."""
+    dep = _railway_get_ibkr_gateway_deployment()
+    dep_id = dep.get("id")
+    if not dep_id:
+        raise RuntimeError("ibkr-gateway için aktif deployment bulunamadı.")
+    mutation = "mutation($id:String!){ deploymentRestart(id:$id) }"
+    _railway_graphql(mutation, {"id": dep_id})
+    return {"deployment_id": dep_id}
+
+
 @app.route("/ibkr/disconnect", methods=["POST"])
 def ibkr_disconnect():
     """IBKR bağlantısını anında keser ve belirli süre yeniden bağlanmayı engeller."""
@@ -13382,19 +13468,61 @@ def ibkr_disconnect():
 @app.route("/ibkr/release-session", methods=["POST"])
 def ibkr_release_session_alias():
     """Kullanicinin acil durumda (mobil/web uzerinden manuel islem yapmak icin)
-    IBKR oturumunu Gateway'den gecici olarak serbest birakmasi icin okunabilir
-    isimli alias - /ibkr/disconnect ile ayni mantigi kullanir (N dakika bloke
-    eder, sure dolunca veya /ibkr/resume-session cagrilinca normal otomatik
-    reconnect davranisina doner)."""
-    return ibkr_disconnect()
+    IBKR oturumunu GERCEKTEN serbest birakmasi icin: once /ibkr/disconnect ile
+    ayni mantikla bizim python client'imizi durdurur ve N dakika reconnect
+    engeller, SONRA Railway API uzerinden ibkr-gateway container'ini da
+    gercekten durdurur. Gateway container calisirken IBKR sunucusunda oturum
+    acik kaldigindan (mobil/web ile ayni anda giris IBKR tarafindan engelleniyor),
+    container durmadan gercek bir serbest birakma olmuyordu - bu duzeltiliyor."""
+    inner_response = ibkr_disconnect()
+    payload = inner_response.get_json() if hasattr(inner_response, "get_json") else inner_response[0].get_json()
+    gateway_stopped = False
+    gateway_error = ""
+    try:
+        _railway_stop_ibkr_gateway()
+        gateway_stopped = True
+    except Exception as e:
+        gateway_error = f"{type(e).__name__}: {e}"
+        print(f"[IBKR][release-session] Gateway container durdurulamadi: {gateway_error}")
+    payload["gateway_stopped"] = gateway_stopped
+    payload["gateway_stop_error"] = gateway_error
+    if not gateway_stopped:
+        payload["message"] = (
+            "Bot bağlantısı kesildi ama Gateway container durdurulamadı - "
+            "IBKR mobil/web girişi hâlâ engellenmiş olabilir: " + gateway_error
+        )
+    else:
+        payload["message"] = "IBKR Gateway container durduruldu - artık mobil/web ile giriş yapabilirsin."
+    return jsonify(payload)
 
 
 @app.route("/ibkr/resume-session", methods=["POST"])
 def ibkr_resume_session_alias():
-    """/ibkr/release-session ile birakilan oturumu erken bitirip otomatik
-    yeniden baglanmaya acmak icin okunabilir isimli alias - /ibkr/reconnect-enable
-    ile ayni islevi gorur."""
-    return ibkr_reconnect_enable()
+    """/ibkr/release-session ile birakilan oturumu erken bitirip hem manuel
+    baglanti blokunu kaldirir hem de Railway API ile ibkr-gateway container'ini
+    yeniden baslatir (bu, deploy sonrasinda oldugu gibi IBKR 2FA onayi
+    gerektirecektir - kullaniciya telefonundan onaylamasi hatirlatilmali)."""
+    inner_response = ibkr_reconnect_enable()
+    payload = inner_response.get_json() if hasattr(inner_response, "get_json") else inner_response[0].get_json()
+    gateway_restarted = False
+    gateway_error = ""
+    try:
+        _railway_restart_ibkr_gateway()
+        gateway_restarted = True
+    except Exception as e:
+        gateway_error = f"{type(e).__name__}: {e}"
+        print(f"[IBKR][resume-session] Gateway container yeniden baslatilamadi: {gateway_error}")
+    payload["gateway_restarted"] = gateway_restarted
+    payload["gateway_restart_error"] = gateway_error
+    if gateway_restarted:
+        payload["message"] = (
+            "IBKR Gateway yeniden başlatılıyor - birkaç dakika içinde telefonundan "
+            "2FA onayı gelecek, onaylayınca bot yeniden bağlanacak. "
+            "Auto-trader'ı ayrıca başlatmayı unutma."
+        )
+    else:
+        payload["message"] = "Manuel blok kaldırıldı ama Gateway yeniden başlatılamadı: " + gateway_error
+    return jsonify(payload)
 
 
 @app.route("/ibkr/reconnect-enable", methods=["POST"])
