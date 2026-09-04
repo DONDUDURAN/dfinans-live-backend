@@ -13373,6 +13373,24 @@ def ibkr_disconnect():
     })
 
 
+@app.route("/ibkr/release-session", methods=["POST"])
+def ibkr_release_session_alias():
+    """Kullanicinin acil durumda (mobil/web uzerinden manuel islem yapmak icin)
+    IBKR oturumunu Gateway'den gecici olarak serbest birakmasi icin okunabilir
+    isimli alias - /ibkr/disconnect ile ayni mantigi kullanir (N dakika bloke
+    eder, sure dolunca veya /ibkr/resume-session cagrilinca normal otomatik
+    reconnect davranisina doner)."""
+    return ibkr_disconnect()
+
+
+@app.route("/ibkr/resume-session", methods=["POST"])
+def ibkr_resume_session_alias():
+    """/ibkr/release-session ile birakilan oturumu erken bitirip otomatik
+    yeniden baglanmaya acmak icin okunabilir isimli alias - /ibkr/reconnect-enable
+    ile ayni islevi gorur."""
+    return ibkr_reconnect_enable()
+
+
 @app.route("/ibkr/reconnect-enable", methods=["POST"])
 def ibkr_reconnect_enable():
     """Manuel bağlantı blokunu kaldırır; sonraki istekte IBKR yeniden bağlanabilir."""
