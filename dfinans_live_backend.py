@@ -212,18 +212,29 @@ class AutoTraderState:
 
 
 AUTO_TRADER = AutoTraderState()
-AUTO_TRADER.enabled = True  # Re-enable IBKR auto-trader
-AUTO_TRADER.broker = "IBKR"
-AUTO_TRADER.symbol = "NVDA"
-AUTO_TRADER.symbols = ["NVDA"]  # STRICT: only NVDA
-AUTO_TRADER.asset_type = "STK"
-AUTO_TRADER.market = "STK"
-AUTO_TRADER.exchange = "SMART"
-AUTO_TRADER.currency = "USD"
+AUTO_TRADER.enabled = True
+# KRITIK DUZELTME (2026-09-04): bu blok eskiden (NVDA-only IBKR denemesi
+# doneminden kalma) AUTO_TRADER.broker = "IBKR" olarak birakiyordu, ama asagida
+# (bkz. satir ~467) AUTO_TRADER.symbols hala Binance Futures kripto listesiyle
+# dolduruluyordu - yani bu state hem "IBKR" hem "kripto sembolleri" gibi
+# celiskili bir karisim halindeydi. Sonuc: auto_trader_cycle() icindeki
+# 'if broker == "BINANCE": enforce_binance_take_profit(...)' kontrolu HICBIR
+# ZAMAN True olmadigi icin Binance Futures pozisyonlarinda otomatik kar-al/
+# zarar-kes KONTROLU HIC CALISMIYORDU (bkz. canli ornek: BTCUSDT SHORT %3
+# zarar-kes esigini gecip %4.8'e kadar acik kaldi). Ayrica _auto_trader_run_symbol
+# icinde 'if broker == "IBKR":' dalina girdigi icin kripto sembolleri (AVAXUSDT
+# vb.) yanlislikla IBKR API'sine gonderiliyor, surekli hata veriyordu. Artik
+# broker="BINANCE"/market="FUTURES" dogru sekilde ayarlaniyor.
+AUTO_TRADER.broker = "BINANCE"
+AUTO_TRADER.symbol = "ETHUSDT"
+AUTO_TRADER.asset_type = "CRYPTO"
+AUTO_TRADER.market = "FUTURES"
+AUTO_TRADER.exchange = ""
+AUTO_TRADER.currency = "USDT"
 AUTO_TRADER.mode = "live"  # Live trading
-AUTO_TRADER.quantity = 1  # Buy 1 share at a time
-AUTO_TRADER.interval_sec = 60  # Check every 60 seconds
-AUTO_TRADER.min_confidence = 50  # Lower threshold for more trades
+AUTO_TRADER.quantity = 0.01
+AUTO_TRADER.interval_sec = 20  # Check every 20 seconds (TP/SL de bu dongude kontrol edilir)
+AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "82"))
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
 
