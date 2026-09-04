@@ -1,0 +1,149 @@
+name: STYLIA — EAS Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'stylia-mobile/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'stylia-mobile/**'
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Build platform'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - ios
+          - android
+      profile:
+        description: 'Build profile'
+        required: true
+        default: 'preview'
+        type: choice
+        options:
+          - development
+          - adhoc
+          - preview
+          - production
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Lint on every PR / push
+  # ──────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stylia-mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - run: npx tsc --noEmit
+
+  # ──────────────────────────────────────────────
+  # EAS Preview build (Android APK + iOS AdHoc)
+  # Triggered on push to main
+  # iOS AdHoc requires Apple Developer creds stored in EAS
+  # ──────────────────────────────────────────────
+  build-preview:
+    name: EAS Preview Build
+    runs-on: ubuntu-latest
+    needs: lint
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: stylia-mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      # Android APK — no extra secrets needed
+      - name: Build Android APK (preview)
+        run: eas build --profile preview --platform android --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      # iOS AdHoc — Apple credentials must be stored in EAS secrets
+      # Skip if APPLE_ID secret is not configured
+      - name: Build iOS AdHoc
+        if: ${{ secrets.APPLE_ID != '' }}
+        run: eas build --profile adhoc --platform ios --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+  # ──────────────────────────────────────────────
+  # Manual / workflow_dispatch build
+  # ──────────────────────────────────────────────
+  build-manual:
+    name: Manual EAS Build (${{ github.event.inputs.profile }} / ${{ github.event.inputs.platform }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    defaults:
+      run:
+        working-directory: stylia-mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - name: EAS Build
+        run: |
+          eas build \
+            --profile ${{ github.event.inputs.profile }} \
+            --platform ${{ github.event.inputs.platform }} \
+            --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+  # ──────────────────────────────────────────────
+  # OTA Update — only after native build completes
+  # Avoids pushing incompatible JS to older builds
+  # ──────────────────────────────────────────────
+  ota-update:
+    name: OTA Update (preview)
+    runs-on: ubuntu-latest
+    needs: build-preview          # wait for native build to finish first
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: stylia-mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+      - uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Publish OTA update
+        run: eas update --branch preview --message "Auto update from ${{ github.sha }}"
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
