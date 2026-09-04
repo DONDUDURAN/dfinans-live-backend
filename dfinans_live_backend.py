@@ -9968,13 +9968,50 @@ def _auto_trader_run_symbol(
             execution=execution,
             confirmations=signal_confirmations,
         )
+IBKR_OUTAGE_ALERT_THRESHOLD_SEC = int(os.getenv("IBKR_OUTAGE_ALERT_THRESHOLD_SEC", "600"))
+_IBKR_DISCONNECTED_SINCE_EPOCH = 0.0
+_IBKR_OUTAGE_ALERT_SENT = False
+
+
 def _ibkr_keepalive_loop():
+    global _IBKR_DISCONNECTED_SINCE_EPOCH, _IBKR_OUTAGE_ALERT_SENT
     while True:
         time.sleep(max(8, IBKR_KEEPALIVE_SEC))
         if not IBKR_ENABLED:
             continue
         try:
             ibkr_ping()
+        except Exception:
+            pass
+
+        # Kullanicinin talebi: IBKR baglantisi uzun sure kesikse (2FA oturumu
+        # dusmus, gateway cokmus vb.) kullaniciya sormasini beklemeden
+        # proaktif olarak haber ver - once bunu fark etmek icin uygulamayi
+        # sorgulamasi gerekiyordu.
+        try:
+            is_connected = bool(IBKR_RUNTIME.get("connected"))
+            now_epoch = time.time()
+            if is_connected:
+                _IBKR_DISCONNECTED_SINCE_EPOCH = 0.0
+                _IBKR_OUTAGE_ALERT_SENT = False
+            else:
+                if _IBKR_DISCONNECTED_SINCE_EPOCH == 0.0:
+                    _IBKR_DISCONNECTED_SINCE_EPOCH = now_epoch
+                elif (
+                    not _IBKR_OUTAGE_ALERT_SENT
+                    and (now_epoch - _IBKR_DISCONNECTED_SINCE_EPOCH) >= IBKR_OUTAGE_ALERT_THRESHOLD_SEC
+                ):
+                    _IBKR_OUTAGE_ALERT_SENT = True
+                    down_min = (now_epoch - _IBKR_DISCONNECTED_SINCE_EPOCH) / 60.0
+                    send_alert_email(
+                        subject="[DFinans] IBKR bağlantısı kesik (uzun süredir)",
+                        body=(
+                            f"IBKR Gateway bağlantısı yaklaşık {down_min:.0f} dakikadır KESİK.\n"
+                            f"Muhtemelen 2FA oturumu düşmüş veya Gateway yeniden başlatma "
+                            f"bekliyor olabilir - mobil onay gerekebilir.\n\n"
+                            f"Zaman: {now_text()}"
+                        ),
+                    )
         except Exception:
             pass
 
@@ -13644,6 +13681,66 @@ def profit_summary_endpoint():
         return jsonify(get_profit_summary())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
+
+
+@app.route("/admin/config-healthcheck", methods=["GET"])
+def admin_config_healthcheck_endpoint():
+    """Her deploy sonrasi (veya istendigi zaman) kritik auto-trader
+    konfigurasyonunun beklenen degerlerle eslesip eslesmedigini kontrol eder.
+    Bu segmentte bulunan 'AUTO_TRADER.broker yanlislikla IBKR olarak
+    hardcode edilmis' turu regresyonlarin bir daha fark edilmeden production'a
+    sizmasini onlemek icin eklendi - buyuk bir rewrite/deploy sonrasi bu
+    endpoint'in kontrol edilmesi onerilir."""
+    problems: List[str] = []
+    checks: Dict[str, Any] = {}
+
+    with AUTO_LOCK:
+        auto_broker, auto_market, auto_asset, auto_conf = (
+            AUTO_TRADER.broker, AUTO_TRADER.market, AUTO_TRADER.asset_type, AUTO_TRADER.min_confidence,
+        )
+    checks["auto_trader"] = {"broker": auto_broker, "market": auto_market, "asset_type": auto_asset, "min_confidence": auto_conf}
+    if auto_broker != "BINANCE":
+        problems.append(f"AUTO_TRADER.broker beklenmedik: '{auto_broker}' (beklenen: BINANCE)")
+    if auto_market != "FUTURES":
+        problems.append(f"AUTO_TRADER.market beklenmedik: '{auto_market}' (beklenen: FUTURES)")
+    expected_auto_conf = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "82"))
+    if auto_conf != expected_auto_conf:
+        problems.append(
+            f"AUTO_TRADER.min_confidence ({auto_conf}) env degeriyle ({expected_auto_conf}) eslesmiyor"
+        )
+
+    with SPOT_AUTO_LOCK:
+        spot_broker, spot_conf = SPOT_AUTO_TRADER.broker, SPOT_AUTO_TRADER.min_confidence
+    checks["spot_auto_trader"] = {"broker": spot_broker, "min_confidence": spot_conf}
+    if spot_broker != "BINANCE_SPOT":
+        problems.append(f"SPOT_AUTO_TRADER.broker beklenmedik: '{spot_broker}' (beklenen: BINANCE_SPOT)")
+
+    with IBKR_AUTO_LOCK:
+        ibkr_broker, ibkr_conf = IBKR_AUTO_TRADER.broker, IBKR_AUTO_TRADER.min_confidence
+    checks["ibkr_auto_trader"] = {"broker": ibkr_broker, "min_confidence": ibkr_conf}
+    if ibkr_broker != "IBKR":
+        problems.append(f"IBKR_AUTO_TRADER.broker beklenmedik: '{ibkr_broker}' (beklenen: IBKR)")
+
+    # Risk katmanlarinin kod seviyesinde gercekten var olup olmadigini dogrula
+    # (env var var ama kodda hic okunmuyor olabilir - daha once ADX'te oldugu gibi).
+    checks["risk_layers"] = {
+        "max_combined_qty_scale": MAX_COMBINED_QTY_SCALE,
+        "adx_min_trend_strength": ADX_MIN_TREND_STRENGTH,
+        "daily_max_loss_pct": DAILY_MAX_LOSS_PCT,
+        "weekly_max_loss_pct": WEEKLY_MAX_LOSS_PCT,
+    }
+    with _RISK_CIRCUIT_BREAKER_LOCK:
+        checks["risk_circuit_breaker_tripped"] = RISK_CIRCUIT_BREAKER["tripped"]
+
+    checks["ibkr_connected"] = bool(IBKR_RUNTIME.get("connected"))
+
+    return jsonify({
+        "ok": len(problems) == 0,
+        "healthy": len(problems) == 0,
+        "problems": problems,
+        "checks": checks,
+        "time": now_text(),
+    })
 
 
 @app.route("/risk/circuit-breaker/status", methods=["GET"])
