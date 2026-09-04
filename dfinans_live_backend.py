@@ -1771,6 +1771,39 @@ def _build_and_send_closure_email(
     print(f"[EMAIL] Kapanış maili gönderildi: {symbol} ({close_reason})", flush=True)
 
 
+def send_alert_email(subject: str, body: str) -> None:
+    """Genel amacli uyari maili (pozisyon kapanisina ozel olmayan durumlar
+    icin - orn. gunluk zarar limiti asildi, IBKR baglantisi uzun sure kesik).
+    Asenkron (arka plan thread) calisir, SMTP hatasi olursa sessizce loglanip
+    gecilir - trading akisini asla bloklamaz."""
+    if not NOTIFY_EMAIL_ENABLED:
+        return
+    if not (NOTIFY_EMAIL_SENDER and NOTIFY_EMAIL_PASSWORD and NOTIFY_EMAIL_RECIPIENT):
+        return
+
+    def _send():
+        last_error = None
+        for attempt in range(2):
+            try:
+                msg = MIMEText(body, "plain", "utf-8")
+                msg["Subject"] = subject
+                msg["From"] = NOTIFY_EMAIL_SENDER
+                msg["To"] = NOTIFY_EMAIL_RECIPIENT
+                with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+                    server.starttls()
+                    server.login(NOTIFY_EMAIL_SENDER, NOTIFY_EMAIL_PASSWORD)
+                    server.sendmail(NOTIFY_EMAIL_SENDER, [NOTIFY_EMAIL_RECIPIENT], msg.as_string())
+                print(f"[EMAIL] Uyarı maili gönderildi: {subject}", flush=True)
+                return
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    time.sleep(5)
+        print(f"[EMAIL] Uyarı maili gönderilemedi: {type(last_error).__name__}: {last_error}", flush=True)
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
 def send_position_closure_email(
     broker: str,
     symbol: str,
@@ -9976,6 +10009,24 @@ def _ibkr_stuck_watchdog_loop():
 
 _SPOT_RECONCILE_INTERVAL_SEC = 300
 _SPOT_RECONCILE_LAST_TS = 0.0
+# Kullanicinin talebi: 'gercek yatirimci gibi davran' - tek tek islemler SL ile
+# korunsa da, art arda cok sayida kayip islem hesabi yavas yavas eritebilir.
+# Bu katman GUNLUK/HAFTALIK TOPLAM gerceklesen zarara (hesap degerinin bir
+# yuzdesi olarak) bir tavan koyar; asilirsa TUM auto-traderlar durdurulur.
+# Env ile ayarlanabilir; varsayilanlar tutucu (gunluk %3, haftalik %6).
+DAILY_MAX_LOSS_PCT = float(os.getenv("DAILY_MAX_LOSS_PCT", "3.0"))
+WEEKLY_MAX_LOSS_PCT = float(os.getenv("WEEKLY_MAX_LOSS_PCT", "6.0"))
+_LOSS_BREAKER_CHECK_INTERVAL_SEC = 60
+_LOSS_BREAKER_LAST_TS = 0.0
+RISK_CIRCUIT_BREAKER: Dict[str, Any] = {
+    "tripped": False,
+    "period": "",
+    "reason": "",
+    "tripped_at": "",
+    "realized_pnl_usd": 0.0,
+    "threshold_usd": 0.0,
+}
+_RISK_CIRCUIT_BREAKER_LOCK = threading.Lock()
 # Kullanicinin talebi: IBKR'de 'emir iletildi ama gerceklesmedi' durumunda
 # takili kalan AI karar kayitlarinin, emir sonradan (mesela seans acildiginda)
 # dolunca otomatik olarak 'İŞLEME DÖNÜŞTÜ' gorunmesi icin periyodik kontrol.
@@ -9983,8 +10034,88 @@ _IBKR_ORDER_RECONCILE_INTERVAL_SEC = 30
 _IBKR_ORDER_RECONCILE_LAST_TS = 0.0
 
 
+def check_and_enforce_loss_circuit_breaker() -> None:
+    """Gunluk/haftalik toplam gerceklesen zarar hesabin belirli bir yuzdesini
+    (DAILY_MAX_LOSS_PCT / WEEKLY_MAX_LOSS_PCT) gecerse TUM auto-traderlari
+    (Binance Futures/Spot, IBKR) otomatik durdurur. KASTEN otomatik olarak
+    tekrar acilmaz (yeni gun/hafta baslasa bile) - kullanicinin durumu gozden
+    gecirip ilgili /auto-trader/start (veya /spot,/ibkr) ile MANUEL olarak
+    yeniden baslatmasi gerekir; boylece sessizce/fark edilmeden tekrar risk
+    alinmaz. Zaten tetiklenmisse (RISK_CIRCUIT_BREAKER['tripped']) tekrar
+    kontrol/durdurma yapilmaz (spam onleme)."""
+    with _RISK_CIRCUIT_BREAKER_LOCK:
+        if RISK_CIRCUIT_BREAKER["tripped"]:
+            return
+    try:
+        total_usd = get_total_account_usd()
+        if total_usd <= 0:
+            return
+        rows = db_all_position_closures(days=8, include_mandatory_holdings=False)
+        now = datetime.now()
+        today_key = now.strftime("%Y-%m-%d")
+        week_cutoff = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        today_rows = [r for r in rows if str(r.get("created_at", "")).startswith(today_key)]
+        week_rows = [r for r in rows if str(r.get("created_at", "")) >= week_cutoff]
+        daily_pnl = sum(safe_float(r.get("realized_pnl")) for r in today_rows)
+        weekly_pnl = sum(safe_float(r.get("realized_pnl")) for r in week_rows)
+        daily_threshold = -(DAILY_MAX_LOSS_PCT / 100.0) * total_usd
+        weekly_threshold = -(WEEKLY_MAX_LOSS_PCT / 100.0) * total_usd
+
+        tripped = None
+        if daily_pnl <= daily_threshold:
+            tripped = (
+                "daily",
+                f"Günlük gerçekleşen zarar {daily_pnl:.2f} USD, hesabın %{DAILY_MAX_LOSS_PCT:.1f} "
+                f"limitini ({daily_threshold:.2f} USD) aştı.",
+                daily_pnl, daily_threshold,
+            )
+        elif weekly_pnl <= weekly_threshold:
+            tripped = (
+                "weekly",
+                f"Son 7 günlük gerçekleşen zarar {weekly_pnl:.2f} USD, hesabın %{WEEKLY_MAX_LOSS_PCT:.1f} "
+                f"limitini ({weekly_threshold:.2f} USD) aştı.",
+                weekly_pnl, weekly_threshold,
+            )
+        if not tripped:
+            return
+        period, reason_text, pnl_value, threshold_value = tripped
+        with _RISK_CIRCUIT_BREAKER_LOCK:
+            if RISK_CIRCUIT_BREAKER["tripped"]:
+                return
+            RISK_CIRCUIT_BREAKER.update({
+                "tripped": True,
+                "period": period,
+                "reason": reason_text,
+                "tripped_at": now_text(),
+                "realized_pnl_usd": round(pnl_value, 2),
+                "threshold_usd": round(threshold_value, 2),
+            })
+        for state, lock in ((AUTO_TRADER, AUTO_LOCK), (SPOT_AUTO_TRADER, SPOT_AUTO_LOCK), (IBKR_AUTO_TRADER, IBKR_AUTO_LOCK)):
+            with lock:
+                state.enabled = False
+                state.last_error = f"RISK CIRCUIT BREAKER: {reason_text}"
+                state.last_reason = f"Otomatik olarak durduruldu: {reason_text}"
+                state.last_update = now_text()
+        print(f"[RISK CIRCUIT BREAKER] {reason_text} - tüm auto-traderlar durduruldu.", flush=True)
+        send_alert_email(
+            subject=(
+                f"[DFinans] ACİL: {'Günlük' if period == 'daily' else 'Haftalık'} "
+                f"zarar limiti aşıldı - trading durduruldu"
+            ),
+            body=(
+                f"{reason_text}\n\n"
+                f"Tüm otomatik alım-satım (Binance Futures, Binance Spot, IBKR) DURDURULDU.\n"
+                f"Tekrar başlatmak için uygulamadan manuel olarak yeniden başlatmanız gerekiyor "
+                f"(/risk/circuit-breaker/reset veya ilgili auto-trader start).\n\n"
+                f"Zaman: {now_text()}"
+            ),
+        )
+    except Exception as e:
+        print(f"[RISK CIRCUIT BREAKER] Kontrol hatası: {e}", flush=True)
+
+
 def _auto_trader_loop():
-    global _SPOT_RECONCILE_LAST_TS, _IBKR_ORDER_RECONCILE_LAST_TS
+    global _SPOT_RECONCILE_LAST_TS, _IBKR_ORDER_RECONCILE_LAST_TS, _LOSS_BREAKER_LAST_TS
     while True:
         if (time.time() - _SPOT_RECONCILE_LAST_TS) >= _SPOT_RECONCILE_INTERVAL_SEC:
             _SPOT_RECONCILE_LAST_TS = time.time()
@@ -9998,6 +10129,13 @@ def _auto_trader_loop():
             try:
                 if IBKR_RUNTIME.get("connected"):
                     reconcile_pending_ibkr_order_fills()
+            except Exception:
+                pass
+
+        if (time.time() - _LOSS_BREAKER_LAST_TS) >= _LOSS_BREAKER_CHECK_INTERVAL_SEC:
+            _LOSS_BREAKER_LAST_TS = time.time()
+            try:
+                check_and_enforce_loss_circuit_breaker()
             except Exception:
                 pass
 
@@ -13506,6 +13644,44 @@ def profit_summary_endpoint():
         return jsonify(get_profit_summary())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
+
+
+@app.route("/risk/circuit-breaker/status", methods=["GET"])
+def risk_circuit_breaker_status_endpoint():
+    """Gunluk/haftalik zarar limiti devre kesicisinin (circuit breaker) anlik
+    durumunu doner: tetiklenmis mi, hangi periyotta (gunluk/haftalik),
+    gerceklesen zarar ve esik degeri neydi."""
+    with _RISK_CIRCUIT_BREAKER_LOCK:
+        state = dict(RISK_CIRCUIT_BREAKER)
+    state["ok"] = True
+    state["daily_max_loss_pct"] = DAILY_MAX_LOSS_PCT
+    state["weekly_max_loss_pct"] = WEEKLY_MAX_LOSS_PCT
+    state["time"] = now_text()
+    return jsonify(state)
+
+
+@app.route("/risk/circuit-breaker/reset", methods=["POST"])
+def risk_circuit_breaker_reset_endpoint():
+    """Kullanicinin durumu gozden gecirdikten sonra devre kesiciyi manuel
+    olarak sifirlamasi icin - bu sadece devre kesici bayragini temizler,
+    auto-traderlari TEKRAR BASLATMAZ (kullanici bunu ayrica /auto-trader/start
+    vb. ile bilinçli olarak yapmali - kasitli olarak iki ayri adim)."""
+    with _RISK_CIRCUIT_BREAKER_LOCK:
+        was_tripped = RISK_CIRCUIT_BREAKER["tripped"]
+        RISK_CIRCUIT_BREAKER.update({
+            "tripped": False,
+            "period": "",
+            "reason": "",
+            "tripped_at": "",
+            "realized_pnl_usd": 0.0,
+            "threshold_usd": 0.0,
+        })
+    return jsonify({
+        "ok": True,
+        "was_tripped": was_tripped,
+        "note": "Devre kesici sıfırlandı. Auto-trader'ları tekrar başlatmak için ilgili start endpoint'lerini çağırmanız gerekir.",
+        "time": now_text(),
+    })
 
 
 @app.route("/market-cycle/status", methods=["GET"])
