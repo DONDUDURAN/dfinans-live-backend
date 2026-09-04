@@ -7762,6 +7762,11 @@ def compute_correlation_matrix(symbols: List[str]) -> List[Dict[str, Any]]:
 # fark edilmeden artmasini onlemek icin esikler.
 PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT = float(os.getenv("PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT", "40.0"))
 
+# Pozisyon boyutlandirma katmanlarinin (market_cycle x ATR x portfolio_risk x
+# Kelly) bilesik/carpimsal urunune ust tavan. bkz. _auto_trader_run_symbol
+# icindeki uygulama noktasi (MAX_COMBINED_QTY_SCALE aramasi ile bulunabilir).
+MAX_COMBINED_QTY_SCALE = float(os.getenv("MAX_COMBINED_QTY_SCALE", "1.5"))
+
 
 def get_total_portfolio_value_usd() -> float:
     """Tum hesaplarin (Binance + IBKR) toplam USD degerini dondurur - TRY
@@ -8785,6 +8790,23 @@ def _auto_trader_run_symbol(
         if kelly_scale_info.get("notes"):
             reason = (reason + " " + " ".join(kelly_scale_info["notes"])).strip()
         kelly_qty_scale = kelly_scale_info.get("qty_scale", 1.0)
+
+        # KRITIK GUVENLIK KATMANI (yeniden eklendi - buyuk kod yenilemesinde
+        # kaybolmustu): market_cycle x ATR x portfolio_risk x Kelly katsayilari
+        # ayni yonde (hepsi buyutucu) cakisirsa pozisyon boyutu carpimsal olarak
+        # asiri buyuyebilir. Canli ornek: BTCUSDT SHORT islemi, diger ayni gunku
+        # BTC islemlerine gore ~2.6x daha buyuk acilip -8.08 USD (-%3.92) zarar
+        # ettirmisti - teminat tabani ~206 USD iken digerleri ~80 USD idi. Bu
+        # katman 4 carpanin BILESIK/CARPIMSAL urununu MAX_COMBINED_QTY_SCALE ile
+        # sinirlar; asilirsa orantisal agirliklari koruyarak hepsini asagi
+        # olcekler. Kucultucu yonde (urun < 1.0) hicbir zaman kisitlanmaz.
+        _combined_scale_product = market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale * kelly_qty_scale
+        if _combined_scale_product > MAX_COMBINED_QTY_SCALE:
+            _combined_scale_factor = (MAX_COMBINED_QTY_SCALE / _combined_scale_product) ** 0.25
+            market_cycle_qty_scale *= _combined_scale_factor
+            atr_qty_scale *= _combined_scale_factor
+            portfolio_risk_qty_scale *= _combined_scale_factor
+            kelly_qty_scale *= _combined_scale_factor
 
         # Kullanicinin talebi: 'sektör rotasyonu ekle' - ayni sektordeki lider
         # varlik belirgin hareket ettiyse ama bu sembol henuz takip etmediyse
