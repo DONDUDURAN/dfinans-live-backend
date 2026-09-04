@@ -837,6 +837,18 @@ IBKR_SHORTABLE_SYMBOLS = set(
 )
 IBKR_MIN_MARGIN_FOR_SHORT_USD = float(os.getenv("IBKR_MIN_MARGIN_FOR_SHORT_USD", "5000.0"))
 
+# Kullanicinin talebi: "cok artan hisselerde short degerlendirmesi de yapsin
+# sistem" - /ibkr/ai-signal daha once SADECE momentum takibi yapiyordu
+# (change_24h > +0.7 -> BUY), yani bir hisse ne kadar cok yukselirse o kadar
+# "AL" sinyali veriyordu - asiri yukselisin ardindan gelebilecek geri
+# cekilme/duzeltme hic degerlendirilmiyordu. Asagidaki esikler asilinca
+# (belirgin yukselis + RSI(14) asiri alim) ve genel piyasa rejimi guclu BULL
+# DEGILSE, sinyal SELL'e (short adayi) ceviriliyor - ayni "chain order" mean-
+# reversion mantigi (bkz. CHAIN_ORDER_*), ama pozisyon KAPANDIKTAN SONRA degil,
+# YENI POZISYON ACILIRKEN de calisiyor.
+IBKR_OVERBOUGHT_MOVE_THRESHOLD_PCT = float(os.getenv("IBKR_OVERBOUGHT_MOVE_THRESHOLD_PCT", "3.0"))
+IBKR_OVERBOUGHT_RSI_THRESHOLD = float(os.getenv("IBKR_OVERBOUGHT_RSI_THRESHOLD", "68"))
+
 # Varlik bazli pozisyon boyutlandirma: her BUY/SELL sinyalinde sabit miktar yerine,
 # bosta bekleyen (available) Binance futures USDT bakiyesinin belirli bir yuzdesi
 # kadar pozisyon acilir. BTC icin %25, ETH icin %20, diger tum varliklar icin %10
@@ -14387,6 +14399,36 @@ def ibkr_ai_signal():
             signal = "SELL"
             confidence = min(90, int(57 + abs(change) * 10))
             reason = "IBKR momentum negatif."
+
+        # Asiri yukselis (overbought) kontrolu: sadece gunluk intraday
+        # momentumu degil, gunluk kapanis bazli RSI(14)'u de bakar - bir hisse
+        # cok hizli/cok yukselmisse (ve piyasa genel rejimi guclu BULL degilse)
+        # BUY yerine SHORT adayi olarak SELL sinyaline ceviriyoruz.
+        overbought_note = ""
+        try:
+            daily_stats = get_symbol_daily_change_and_rsi(normalize_symbol(symbol), "IBKR")
+        except Exception:
+            daily_stats = None
+        if daily_stats and daily_stats.get("rsi") is not None:
+            daily_change = daily_stats["change_24h"]
+            rsi = daily_stats["rsi"]
+            if daily_change >= IBKR_OVERBOUGHT_MOVE_THRESHOLD_PCT and rsi >= IBKR_OVERBOUGHT_RSI_THRESHOLD:
+                regime_info = get_bull_bear_market_regime("STOCK")
+                regime = regime_info.get("regime", "TRANSITION")
+                if regime != "BULL":
+                    signal = "SELL"
+                    confidence = max(0, min(92, int(60 + (daily_change - IBKR_OVERBOUGHT_MOVE_THRESHOLD_PCT) * 4 + (rsi - IBKR_OVERBOUGHT_RSI_THRESHOLD) * 1.2)))
+                    reason = (
+                        f"Aşırı yükseliş: son günde %{daily_change:.2f} artış + RSI {rsi:.1f} "
+                        f"(aşırı alım). Piyasa rejimi {regime} (BULL değil) - geri çekilme "
+                        f"beklentisiyle SHORT adayı."
+                    )
+                else:
+                    overbought_note = (
+                        f" [Not: %{daily_change:.2f} artış + RSI {rsi:.1f} aşırı alım seviyesinde "
+                        f"ama piyasa rejimi BULL - trende karşı SHORT riskli kabul edilip atlandı.]"
+                    )
+
         if signal in ["BUY", "SELL"]:
             confidence = max(0, min(95, confidence + learning_bias(signal)))
         return jsonify({
@@ -14399,7 +14441,7 @@ def ibkr_ai_signal():
             "orderbook": synthetic_orderbook(change, "ibkr"),
             "signal": signal,
             "confidence": confidence,
-            "reason": reason,
+            "reason": reason + overbought_note,
             "last_update": now_text(),
             "engine_enabled": ENGINE.enabled,
             "data_source": "ibkr",
