@@ -48,6 +48,12 @@ from urllib.parse import urlencode
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from historical_market_scenarios import (
+    get_historical_market_scenarios,
+    get_historical_scenarios_by_category,
+    search_historical_scenarios,
+    list_historical_scenario_categories,
+)
 
 APP_NAME = "D-finans Live Backend"
 HOST = "0.0.0.0"
@@ -13455,6 +13461,42 @@ def place_futures_order(
             request_id=request_id,
         )
         raise
+
+
+@app.route("/historical-scenarios", methods=["GET"])
+def historical_scenarios():
+    """2000'den beri yasanmis gercek tarihsel piyasa senaryolari (savas, petrol krizi,
+    secimler, merkez bankasi kararlari, pandemi, dogal afet, tekel davalari, dogru cikan
+    kurum/dusunce kurulusu raporlari vb.). Query params:
+      - category: belirli bir kategoriyle filtrele (list_historical_scenario_categories ile
+        mevcut kategorileri gorebilirsiniz)
+      - q: baslik/olay/piyasa tepkisi metninde serbest metin arama
+    """
+    try:
+        category = request.args.get("category", "").strip()
+        query = request.args.get("q", "").strip()
+        if query:
+            items = search_historical_scenarios(query)
+        elif category:
+            items = get_historical_scenarios_by_category(category)
+        else:
+            items = get_historical_market_scenarios()
+        return jsonify({
+            "ok": True,
+            "count": len(items),
+            "categories": list_historical_scenario_categories(),
+            "scenarios": items,
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/historical-scenarios/categories", methods=["GET"])
+def historical_scenarios_categories():
+    try:
+        return jsonify({"ok": True, "categories": list_historical_scenario_categories()})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/health", methods=["GET"])
