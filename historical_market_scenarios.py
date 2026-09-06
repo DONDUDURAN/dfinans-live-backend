@@ -2270,6 +2270,626 @@ HISTORICAL_MARKET_SCENARIOS: List[Dict[str, Any]] = [
             "aynı gün nasıl yukarı çekebildiğinin örneği."
         ),
     },
+    # ---------------------------------------------------------------
+    # Ek: İşsizlik/istihdam (NFP) veri sürprizleri ve siyasetçi/etkili
+    # kişi (ör. Elon Musk) açıklamalarının piyasaya etkisi
+    # ---------------------------------------------------------------
+    {
+        "id": "nfp_shock_jan_2023_blowout",
+        "date": "2023-02-03",
+        "title": "ABD Ocak 2023 Tarım Dışı İstihdam (NFP) Verisinin Beklentileri Fazlasıyla Aşması",
+        "category": "Para Politikası",
+        "event": "ABD Ocak 2023 tarım dışı istihdam verisi 517.000 kişi artışla açıklandı (beklenti ~185.000), işsizlik oranı %3.4 ile 1969'dan beri en düşük seviyeye geriledi.",
+        "market_reaction": (
+            "'İyi haber = kötü haber' mekanizması devreye girdi: çok güçlü istihdam verisi "
+            "Fed'in faizleri daha uzun süre yüksek tutacağı endişesini artırdığı için S&P 500 "
+            "%-1, Nasdaq %-1.6 düştü, tahvil getirileri sert yükseldi, dolar güçlendi; "
+            "işsizlik/istihdam verilerinin ekonomik açıdan 'iyi' olmasının borsa için her "
+            "zaman olumlu olmadığının (Fed politikası beklentisi üzerinden ters işleyebildiğinin) "
+            "tipik bir örneği."
+        ),
+    },
+    {
+        "id": "nfp_shock_aug_2024_weak_recession_fear",
+        "date": "2024-08-02",
+        "title": "ABD Temmuz 2024 İstihdam Verisinin Beklenti Altı Gelmesi ve Resesyon Korkusu",
+        "category": "Para Politikası",
+        "event": "ABD Temmuz 2024 tarım dışı istihdam verisi sadece 114.000 (beklenti ~175.000) ile geldi, işsizlik oranı %4.3'e yükselerek 'Sahm Kuralı' (işsizlikte hızlı artışın resesyon sinyali sayıldığı ekonomik gösterge) tetiklendi.",
+        "market_reaction": (
+            "Zayıf istihdam verisi, aynı hafta içindeki BOJ faiz artışıyla birleşerek "
+            "5 Ağustos 2024'teki yen carry trade çözülmesi/küresel satış dalgasının ana "
+            "tetikleyicilerinden biri oldu (Nikkei tek günde %-12.4, S&P 500 %-3); bu olay "
+            "zayıf istihdam verisinin -tıpkı güçlü veri gibi- ama bu kez 'resesyon riski "
+            "büyüyor' kanalıyla piyasayı sarsabildiğini gösterdi. Fed birkaç hafta sonra "
+            "(Eylül 2024) faiz indirim döngüsüne 50 baz puanlık büyük bir adımla başladı."
+        ),
+    },
+    {
+        "id": "elon_musk_funding_secured_tweet_2018",
+        "date": "2018-08-07",
+        "title": "Elon Musk'ın 'Funding Secured' (Finansman Sağlandı) Tweet'i",
+        "category": "Açıklama/İfade Şoku",
+        "event": "Elon Musk, Tesla'yı hisse başına $420'dan özelleştirmeyi düşündüğünü ve 'finansmanın sağlandığını' Twitter'da duyurdu; iddia sonradan doğru çıkmadı, SEC bu açıklamayı yatırımcı yanıltma (piyasa manipülasyonu) olarak değerlendirdi.",
+        "market_reaction": (
+            "Tesla hissesi tweet sonrası saatler içinde %+11 sıçradı, işlem durdurulmak zorunda "
+            "kaldı; birkaç hafta sonra planın gerçek olmadığı ortaya çıkınca hisse geri düştü, "
+            "SEC Musk ve Tesla'ya toplam $40 milyon ceza kesti ve Musk'ın 'yönetim kurulu "
+            "başkanlığını 3 yıl bırakması + finansal açıklamaların önceden onaylanması' "
+            "şartını getirdi - tek bir yöneticinin sosyal medya paylaşımının SEC düzenlemesini "
+            "tetikleyebildiği ilk büyük örneklerden biri oldu."
+        ),
+    },
+    {
+        "id": "elon_musk_dogecoin_tweets_2021",
+        "date": "2021-01..2021-05",
+        "title": "Elon Musk'ın Dogecoin Tweet'leri ve Kripto Fiyat Oynaklığı",
+        "category": "Açıklama/İfade Şoku",
+        "event": "Elon Musk, 2021 boyunca Twitter'da tekrar tekrar Dogecoin'e (esprili/meme amaçlı başlayan bir kripto para) atıfta bulunan paylaşımlar yaptı (ör. 'Dogecoin is the people's crypto', SNL performansı öncesi/sonrası paylaşımlar).",
+        "market_reaction": (
+            "Dogecoin, Musk'ın her tweet'inde dakikalar içinde %+20-50 arası sert yükselişler "
+            "yaşadı, bazı günlerde piyasa değeri onlarca milyar dolar arttı/azaldı; SNL "
+            "programındaki 'It's a hustle' esprisinden sonra ise %-30'a varan ani düşüş "
+            "yaşandı - tek bir kişinin sosyal medya paylaşımlarının, düşük likiditeli bir "
+            "varlık sınıfında (meme kripto paralar) kurumsal analiz/bilançodan bağımsız "
+            "olarak fiyatı doğrudan hareket ettirebildiğinin aşırı örneği."
+        ),
+    },
+    {
+        "id": "tesla_bitcoin_purchase_and_reversal_2021",
+        "date": "2021-02-08..2021-05-12",
+        "title": "Tesla'nın Bitcoin Alımı ve Sonra Ödeme Kabulünü İptal Etmesi",
+        "category": "Açıklama/İfade Şoku",
+        "event": "Tesla, Şubat 2021'de $1.5 milyarlık Bitcoin satın aldığını ve araç ödemelerinde BTC kabul edeceğini açıkladı; Mayıs 2021'de Musk, madencilik nedeniyle artan fosil yakıt kullanımı endişesiyle BTC ödemesini durdurduklarını duyurdu.",
+        "market_reaction": (
+            "İlk açıklamada Bitcoin fiyatı %+20 sıçrayarak ilk kez $44.000'i gördü (kurumsal "
+            "benimseme anlatısını güçlendirdi); Mayıs'taki geri adım açıklamasında ise BTC "
+            "tek günde %-15'e varan düşüş yaşadı - büyük/tanınmış bir şirketin kripto "
+            "para pozisyonuna dair açıklamalarının, gerçek arz/talep temellerinden bağımsız "
+            "olarak fiyatı yönlendirebildiğinin kurumsal ölçekli bir örneği."
+        ),
+    },
+    {
+        "id": "trump_china_tariff_tweets_2019",
+        "date": "2019-05-05",
+        "title": "Trump'ın Twitter'da Ani Çin Tarife Artışı Duyurusu",
+        "category": "Açıklama/İfade Şoku",
+        "event": "Ticaret müzakerelerinin olumlu gittiği izlenimi varken, Trump 5 Mayıs 2019'da Twitter'da $200 milyarlık Çin mallarına uygulanan tarifeyi %10'dan %25'e çıkaracağını aniden duyurdu.",
+        "market_reaction": (
+            "S&P 500 açıklama sonrası günlerde %-2'nin üzerinde düştü, Çin misilleme tarifeleriyle "
+            "karşılık verdi, küresel piyasalar 'ticaret savaşı yeniden alevleniyor' korkusuyla "
+            "satıldı; bu olay, tek bir sosyal medya paylaşımının haftalarca süren müzakere "
+            "sürecinin kazanımlarını bir günde tersine çevirebildiğinin ve ABD-Çin ticaret "
+            "savaşı döneminde piyasanın Trump'ın Twitter hesabını neredeyse resmi bir "
+            "ekonomik veri kaynağı gibi izlediğinin göstergesi oldu."
+        ),
+    },
+    {
+        "id": "draghi_whatever_it_takes_2012",
+        "date": "2012-07-26",
+        "title": "Draghi'nin 'Whatever It Takes' (Ne Gerekirse) Konuşması",
+        "category": "Açıklama/İfade Şoku",
+        "event": "Avrupa Merkez Bankası Başkanı Mario Draghi, Euro'nun dağılma riskinin konuşulduğu bir dönemde Londra'da yaptığı konuşmada 'ECB, yetkisi dahilinde Euro'yu korumak için gerekeni yapacaktır... ve inanın bana, bu yeterli olacaktır' dedi - somut bir program açıklamadan sadece SÖZLÜ bir taahhütle.",
+        "market_reaction": (
+            "İtalyan/İspanyol tahvil getirileri (o dönem kriz seviyesinde yüksekti) konuşma "
+            "sonrası günlerde sert düştü, Euro güçlendi, Avrupa borsaları ralli yaptı; hiçbir "
+            "somut mekanizma açıklanmamış olmasına rağmen tek bir cümlenin piyasadaki Euro "
+            "bölgesi dağılma korkusunu kalıcı olarak azaltabildiğinin - 'sözlü müdahalenin' "
+            "(verbal intervention) bazen trilyon dolarlık somut programlardan daha etkili "
+            "olabildiğinin merkez bankacılığı tarihindeki en çarpıcı örneği."
+        ),
+    },
+    {
+        "id": "erdogan_interest_rate_comments_2018_2021",
+        "date": "2018-08..2021-11",
+        "title": "Erdoğan'ın Faiz Karşıtı Açıklamaları ve Türkiye Lirası Çöküşleri",
+        "category": "Açıklama/İfade Şoku",
+        "event": "Cumhurbaşkanı Erdoğan'ın tekrarlayan şekilde 'faiz sebep enflasyon sonuçtur' görüşünü kamuoyunda dile getirmesi ve buna paralel merkez bankası başkanlarını görevden alması (2019, 2020, 2021), TL'nin faiz artışlarıyla desteklenmemesi beklentisini güçlendirdi.",
+        "market_reaction": (
+            "Kasım 2021'de Erdoğan'ın faiz indirimi çağrılarının ardından TCMB'nin enflasyon "
+            "yüksekken faiz indirmesi, lirayı birkaç hafta içinde dolar karşısında %-45'e "
+            "varan çöküşe sürükledi; siyasi liderin para politikasına doğrudan kamuoyu önünde "
+            "müdahale söyleminin, merkez bankası bağımsızlığı algısını zedeleyerek bir ulusal "
+            "para biriminde nasıl kalıcı güven kaybına yol açabildiğinin güçlü bir örneği."
+        ),
+    },
+    {
+        "id": "powell_unscripted_comments_market_moves",
+        "date": "2018-10..2023",
+        "title": "Powell'ın Basın Toplantılarındaki Doğaçlama Sözlerinin Piyasayı Hareket Ettirmesi",
+        "category": "Açıklama/İfade Şoku",
+        "event": "Fed Başkanı Powell'ın çeşitli basın toplantılarında sarf ettiği tek cümlelik ifadeler (ör. Ekim 2018'de faizlerin nötr seviyeden 'uzun bir yol var' demesi, Aralık 2018'de faiz sıkılaştırmasının 'otomatik pilotta' olduğunu söylemesi) piyasada anlık sert tepkilere yol açtı.",
+        "market_reaction": (
+            "Ekim 2018'deki 'uzun yol var' yorumunun ardından S&P 500 o çeyrekte %-14 düşen "
+            "sert satış dalgasının parçası oldu; piyasanın FOMC metninden çok, başkanın soru-"
+            "cevap bölümündeki doğaçlama ton/kelime seçimine anlık tepki verdiği tekrarlayan "
+            "bir örüntü haline geldi - bu nedenle 2019 sonrası Fed iletişiminde 'forward "
+            "guidance' (ileriye dönük yönlendirme) dilinin çok daha dikkatli/ölçülü "
+            "kurgulanmasına yol açtı."
+        ),
+    },
+    {
+        "id": "musk_political_statements_tesla_stock_2022_2024",
+        "date": "2022-10..2024-11",
+        "title": "Elon Musk'ın Siyasi Açıklamaları/Trump Desteği ve Tesla Hissesine Etkisi",
+        "category": "Açıklama/İfade Şoku",
+        "event": "Musk'ın Twitter'ı (X) satın alıp yönetmesi ve giderek daha fazla siyasi/parti taraftarı açıklamalar yapması (2024'te Trump'a açık destek ve seçim kampanyasına aktif katılım) yatırımcıların 'CEO'nun dikkati dağılıyor' endişesini artırdı; Trump'ın seçilmesinin ardından Musk hükümette 'Verimlilik Bakanlığı' (DOGE) rolü üstlendi.",
+        "market_reaction": (
+            "Twitter satın alma sürecinde Musk'ın Tesla hisselerini satarak finansman sağlaması "
+            "Tesla hissesinde 2022 sonunda %-65'e varan yıllık düşüşe katkıda bulundu; 2024 "
+            "seçim sonrası ise Musk'ın hükümete yakınlığının Tesla'ya düzenleyici avantaj "
+            "sağlayacağı beklentisiyle hisse %+40'a varan ralli yaptı - aynı kişinin siyasi "
+            "açıklamalarının döneme göre hem sert negatif hem sert pozitif fiyatlamaya yol "
+            "açabildiğinin örneği (2025'te Musk-Trump ilişkisinin bozulması söylentileriyle "
+            "hisse yeniden sert oynaklık yaşadı)."
+        ),
+    },
+    # ---------------------------------------------------------------
+    # Ek: Büyük şirket birleşmeleri/satın almaları, iptal edilen anlaşmalar,
+    # fabrika kapatmaları ve ülke terki/üretim taşıma kararları
+    # ---------------------------------------------------------------
+    {
+        "id": "aol_time_warner_merger_2000_2009",
+        "date": "2000-01..2009-12",
+        "title": "AOL-Time Warner Birleşmesi ve Sonraki Çöküşü",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "Ocak 2000'de açıklanan $165 milyarlık AOL-Time Warner birleşmesi, dot-com balonunun zirvesinde gerçekleşen tarihin en büyük şirket birleşmesiydi; balonun patlamasıyla birlikte birleşme değer yaratmak yerine dev zarara dönüştü, 2009'da şirketler tekrar ayrıldı.",
+        "market_reaction": (
+            "Birleşme açıklandığında her iki hisse de yükseldi ('internet çağının geleceği' "
+            "olarak pazarlandı), ancak 2002'de birleşik şirket $99 milyar değer düşüklüğü "
+            "(o zamanki ABD kurumsal tarihinin en büyük tek seferlik zararı) açıkladı; hisse "
+            "zirvesinden %-90'a varan çöküş yaşadı - balon döneminde yapılan hisse-takas "
+            "birleşmelerinin (stock-for-stock merger) balon patladığında nasıl kalıcı değer "
+            "yıkımına dönüşebildiğinin ders kitabı örneği oldu."
+        ),
+    },
+    {
+        "id": "att_time_warner_merger_battle_2016_2018",
+        "date": "2016-10..2018-06",
+        "title": "AT&T'nin Time Warner'ı Satın Alması ve DOJ Karşı Davası",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "AT&T'nin $85 milyarlık Time Warner satın alma teklifi, ABD Adalet Bakanlığı tarafından rekabeti azaltacağı gerekçesiyle mahkemeye taşındı; AT&T davayı kazanarak birleşmeyi 2018'de tamamladı (ancak 2022'de WarnerMedia'yı ayırıp Discovery ile birleştirerek stratejiden geri döndü).",
+        "market_reaction": (
+            "Dava süresince AT&T hissesi belirsizlik primi taşıdı, mahkeme zaferi sonrası kısa "
+            "süreli ralli yaptı; ancak birleşmenin öngörülen sinerjiler yaratamaması nedeniyle "
+            "AT&T 2022'de WarnerMedia'yı elden çıkarıp temettüsünü kesti - hisse yıllar içinde "
+            "%-50'nin üzerinde değer kaybetti. Büyük 'dikey birleşmelerin' (içerik+dağıtım) "
+            "vaat edilen sinerjiyi her zaman sağlayamayabileceğinin örneği."
+        ),
+    },
+    {
+        "id": "qualcomm_broadcom_blocked_2018",
+        "date": "2018-03",
+        "title": "Trump'ın Broadcom'un Qualcomm'u Satın Almasını Ulusal Güvenlik Gerekçesiyle Engellemesi",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "Singapur merkezli Broadcom'un $117 milyarlık Qualcomm satın alma teklifi, Trump yönetimi tarafından '5G teknolojisinde Çin'e (Huawei) rekabet avantajı kaybı' ulusal güvenlik gerekçesiyle CFIUS kararıyla veto edildi.",
+        "market_reaction": (
+            "Qualcomm hissesi veto haberiyle %-4 düştü (satın alma priminin kaybolması), "
+            "Broadcom hissesi ise sınırlı tepki verdi; olay, yarı iletken sektöründeki büyük "
+            "sınır ötesi birleşmelerin artık salt finansal değil JEOPOLİTİK (ulusal güvenlik/"
+            "teknoloji üstünlüğü) mercekten değerlendirildiğinin - 2018 sonrası ABD-Çin çip "
+            "rekabetinin habercisi olan - erken bir örneği oldu."
+        ),
+    },
+    {
+        "id": "nvidia_arm_deal_collapse_2022",
+        "date": "2020-09..2022-02",
+        "title": "Nvidia'nın Arm Satın Alma Teklifinin Düzenleyici Engellerle Çökmesi",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "Nvidia'nın SoftBank'tan Arm'ı (çip mimarisi lisanslayan İngiliz şirket) $40 milyara satın alma teklifi, ABD/İngiltere/AB/Çin düzenleyicilerinin rekabet endişeleri (Arm'ın tarafsızlığının bozulacağı) nedeniyle 17 ay süren incelemenin ardından Şubat 2022'de resmen iptal edildi.",
+        "market_reaction": (
+            "Anlaşmanın çökmesiyle SoftBank, Arm'ı doğrudan halka arz etmeye (2023, Nasdaq'ta "
+            "$54.5 milyar değerleme ile) yöneldi; Nvidia'nın hissesi anlaşma iptalinden "
+            "büyük ölçüde etkilenmedi (zaten AI çip talebiyle güçlü büyüyordu) ama olay, "
+            "yarı iletken sektöründeki büyük konsolidasyon girişimlerinin küresel düzenleyici "
+            "'çoklu veto' riskiyle (dört ayrı otoritenin herhangi birinin reddetmesi yeterli) "
+            "karşı karşıya olduğunu gösterdi."
+        ),
+    },
+    {
+        "id": "pfizer_allergan_inversion_collapse_2016",
+        "date": "2015-11..2016-04",
+        "title": "Pfizer-Allergan'ın $160 Milyarlık Vergi Kaçış (Inversion) Birleşmesinin İptali",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "Pfizer'ın İrlanda merkezli Allergan'ı satın alarak şirket merkezini vergi avantajı için İrlanda'ya taşımayı (tax inversion) planladığı anlaşma, ABD Hazine Bakanlığı'nın Nisan 2016'da yeni kurallarla bu tür 'vergi kaçış' birleşmelerini fiilen engellemesiyle iptal edildi.",
+        "market_reaction": (
+            "Allergan hissesi iptal haberiyle %-15 düştü (satın alma priminin kaybolması), "
+            "Pfizer hissesi ise %+3 ile hafif olumlu tepki verdi (iptal etme ücreti ödemek "
+            "zorunda kalsa da); olay, ABD hükümetinin düzenleyici gücünü kullanarak salt "
+            "vergiden kaçınmak için tasarlanmış dev birleşmeleri geriye dönük olarak "
+            "engelleyebildiğinin göstergesi oldu."
+        ),
+    },
+    {
+        "id": "foxconn_wisconsin_project_collapse_2018_2021",
+        "date": "2018-07..2021-05",
+        "title": "Foxconn'un Wisconsin Fabrika Projesinin Büyük Ölçüde İptali",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "Trump yönetiminin büyük tanıtımla duyurduğu (2018), Foxconn'un Wisconsin'de $10 milyarlık LCD ekran fabrikası ve 13.000 iş vaadi, eyalet teşviklerine ($3 milyar) rağmen kademeli olarak küçültüldü; nihai yatırım ve istihdam vaat edilenin çok altında (birkaç yüz kişi) kaldı.",
+        "market_reaction": (
+            "Doğrudan büyük bir hisse hareketi yaratmadı (Foxconn Tayvan borsasında işlem "
+            "görüyor, ABD projesi görece küçük bir parçaydı), ancak olay ABD'de 'büyük "
+            "üretim yatırımı teşvik paketlerinin' siyasi vaat ile gerçekleşen sonuç arasındaki "
+            "farkın sembolü haline geldi - yerel ekonomiler ve eyalet bütçeleri için önemli "
+            "bir ders (teşvik verilen yatırımların sözleşme şartlarına bağlanması gerektiği) "
+            "oluşturdu."
+        ),
+    },
+    {
+        "id": "companies_exiting_russia_2022",
+        "date": "2022-03..2022-12",
+        "title": "Yüzlerce Küresel Şirketin Rusya'dan Çekilmesi/Faaliyeti Durdurması",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "Rusya'nın Ukrayna'yı işgalinin ardından McDonald's, Coca-Cola, Renault, Shell, BP, ExxonMobil, IKEA, Starbucks gibi yüzlerce küresel şirket Rusya'daki operasyonlarını durdurdu, sattı veya tamamen terk etti (McDonald's yerel varlıklarını Rus bir işadamına satarak 'Vkusno i tochka' markasına dönüştürdü).",
+        "market_reaction": (
+            "Çekilme kararı açıklayan şirketler (BP $25 milyar, Shell $5 milyar değer düşüklüğü "
+            "açıkladı) tek seferlik büyük zarar yazdı ama hisseleri çoğunlukla sınırlı tepki "
+            "verdi (yatırımcılar itibar riskinin azalmasını, Rusya gelirinin zaten küçük "
+            "paya sahip olmasını olumlu karşıladı); bu olay, jeopolitik krizlerde şirketlerin "
+            "'ESG/itibar baskısı' nedeniyle kısa vadeli finansal kaybı göze alarak hızlı "
+            "çekilme kararı alabildiğinin - 2000 sonrası döneme özgü yeni bir davranış "
+            "kalıbının - en büyük ölçekli örneği oldu."
+        ),
+    },
+    {
+        "id": "gm_plant_closures_2018_2019",
+        "date": "2018-11..2019-03",
+        "title": "General Motors'un Kuzey Amerika'da Beş Fabrikayı Kapatma Kararı",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "GM, sedan talebinin elektrikli/otonom araçlara kayan yatırım önceliği karşısında düşmesi nedeniyle ABD ve Kanada'da beş fabrikayı (Lordstown Ohio dahil) kapatacağını ve ~14.000 kişiyi işten çıkaracağını açıkladı; Trump bu kararı sert eleştirdi.",
+        "market_reaction": (
+            "GM hissesi kapatma duyurusuyla kısa vadede %+4 yükseldi (maliyet tasarrufu/"
+            "verimlilik artışı olarak piyasada olumlu karşılandı - şirket bilançosu için "
+            "iyi, yerel ekonomi için kötü haber ayrımının tipik örneği); Lordstown fabrikası "
+            "sonradan elektrikli kamyon girişimcisi Lordstown Motors'a satıldı (bu şirket "
+            "2023'te iflas etti) - eski üretim tesislerinin 'yeşil dönüşüm' anlatısıyla "
+            "yeniden kullanılma girişimlerinin risklerini de gösteren bir örnek."
+        ),
+    },
+    {
+        "id": "ford_europe_restructuring_2024_2025",
+        "date": "2024-01..2025-06",
+        "title": "Ford'un Avrupa'da Fabrika Kapatma ve İşçi Çıkarma Kararları",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "Ford, Avrupa'da elektrikli araç talebinin beklenenden yavaş büyümesi ve Çinli üreticilerin (BYD gibi) fiyat rekabeti karşısında Almanya (Saarlouis) ve İngiltere'deki fabrikalarda kapatma/küçültme ve binlerce işçi çıkarma kararları aldı.",
+        "market_reaction": (
+            "Ford hissesi Avrupa restrukturizasyon maliyetleri nedeniyle bilanço açıklamalarında "
+            "baskı gördü; olay, geleneksel Batılı otomotiv üreticilerinin elektrikli araca "
+            "geçiş sürecinde Çinli rakiplere karşı rekabet gücü kaybettiğinin ve bunun "
+            "somut istihdam/üretim kararlarına (Avrupa'da küçülme) yansıdığının güncel bir "
+            "örneği oldu."
+        ),
+    },
+    {
+        "id": "apple_supply_chain_diversification_india_vietnam_2020_2024",
+        "date": "2020-2024",
+        "title": "Apple'ın Üretimi Çin'den Hindistan/Vietnam'a Kaydırması ('China+1' Stratejisi)",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "ABD-Çin ticaret gerginliği, COVID döneminde Çin'deki üretim kesintileri (Zhengzhou Foxconn fabrikasındaki 2022 protestoları dahil) ve jeopolitik risk azaltma isteğiyle Apple, iPhone üretiminin önemli bir kısmını Hindistan'a (Foxconn/Tata fabrikaları) ve bazı ürünlerini Vietnam'a kaydırmaya başladı.",
+        "market_reaction": (
+            "Apple hissesi doğrudan bu haberlerle sınırlı hareket etti (kademeli/uzun vadeli "
+            "bir strateji, ani bir şok değil), ancak Hindistan'daki üretim ortakları (Foxconn "
+            "Hindustan, Tata Electronics hisseleri Hindistan borsasında) ve Çin'deki eski "
+            "tedarikçiler zıt yönde etkilendi; bu 'China+1' trendi 2020 sonrası küresel "
+            "tedarik zinciri risk azaltma (de-risking) stratejisinin en görünür örneklerinden "
+            "biri olarak, benzer coğrafi çeşitlendirme kararlarının diğer büyük teknoloji "
+            "şirketlerinde de (Samsung, Google) tekrarlanmasına öncülük etti."
+        ),
+    },
+    {
+        "id": "toshiba_going_private_2023",
+        "date": "2021-04..2023-12",
+        "title": "Toshiba'nın Aktivist Yatırımcı Baskısıyla Özelleştirilmesi",
+        "category": "Şirket Kararları (Birleşme/Kapanma/Taşınma)",
+        "event": "Muhasebe skandalları (2015) ve yönetişim krizleriyle sarsılan Toshiba, yabancı aktivist yatırımcıların baskısı ve iç çekişmeler sonrası Japon bir konsorsiyum (Japan Industrial Partners) tarafından $14 milyara satın alınarak 2023'te 74 yıllık halka açıklık geçmişini sonlandırdı.",
+        "market_reaction": (
+            "Özelleştirme teklifleri sürecinde hisse belirsizlikle dalgalandı, nihai anlaşma "
+            "duyurulduğunda hisse teklif fiyatına yakınsadı; olay, bir zamanlar Japonya'nın "
+            "sanayi amiral gemilerinden birinin yönetişim skandalları ve aktivist yatırımcı "
+            "baskısı nedeniyle nasıl borsadan çekilmeye kadar gidebildiğinin, Japonya'daki "
+            "kurumsal yönetişim reformu (2010'lar sonrası) baskısının somut bir sonucu oldu."
+        ),
+    },
+    # ---------------------------------------------------------------
+    # Ek: Mülteci krizleri, ek ekonomik krizler, SEC/FINRA düzenleyici
+    # kararları
+    # ---------------------------------------------------------------
+    {
+        "id": "european_migrant_crisis_2015_2016",
+        "date": "2015-04..2016-03",
+        "title": "Avrupa Mülteci Krizi (Suriye İç Savaşı Kaynaklı Kitlesel Göç)",
+        "category": "Mülteci/Göç Krizi",
+        "event": "Suriye iç savaşı, Irak/Afganistan çatışmaları nedeniyle 2015'te bir milyondan fazla mülteci/sığınmacı Akdeniz üzerinden Avrupa'ya ulaştı; AB içinde sınır kapatma (Macaristan çit inşası), Almanya'nın 'açık kapı' politikası (Merkel) ve Mart 2016'daki AB-Türkiye mülteci anlaşması gibi kritik kararlar alındı.",
+        "market_reaction": (
+            "Doğrudan büyük bir borsa endeksi hareketi yaratmadı ama Euro, aşırı sağ/göç "
+            "karşıtı partilerin yükselişine dair siyasi belirsizlik nedeniyle baskı gördü; "
+            "Almanya'da entegrasyon/konut/güvenlik harcamaları kamu bütçesine ek yük "
+            "getirdi, havayolu ve sınır turizm sektörleri (Yunan adaları) bölgesel olarak "
+            "olumsuz etkilendi. Kriz, 2016 Brexit referandumunda 'göç kontrolü' temasının öne "
+            "çıkmasına ve AB genelinde popülist/milliyetçi partilerin güçlenmesine zemin "
+            "hazırlayarak dolaylı ama uzun soluklu bir siyasi risk primi yarattı."
+        ),
+    },
+    {
+        "id": "venezuela_migration_crisis_2015_2023",
+        "date": "2015-2023",
+        "title": "Venezuela Göç Krizi (Latin Amerika'nın En Büyük Kitlesel Göçü)",
+        "category": "Mülteci/Göç Krizi",
+        "event": "Venezuela'nın ekonomik/siyasi çöküşü nedeniyle 7 milyondan fazla Venezuelalı (nüfusun ~%25'i) başta Kolombiya, Peru, Ekvador, Şili olmak üzere komşu ülkelere göç etti - tarihte tek bir ülkeden yaşanan en büyük kitlesel göçlerden biri.",
+        "market_reaction": (
+            "Komşu ülkelerin (özellikle Kolombiya ve Peru) kamu hizmetleri/istihdam piyasası "
+            "üzerinde baskı oluştu, bu ülkelerin para birimleri (Kolombiya pesosu) göç "
+            "yükünün mali maliyetine dair endişelerle dönemsel baskı gördü; uzun vadede göçmen "
+            "işgücünün ev sahibi ülke ekonomilerine (özellikle enformel sektörde) katkı "
+            "sağladığı da IMF/Dünya Bankası raporlarında belirtildi - göç krizlerinin kısa "
+            "vadede mali yük, uzun vadede işgücü arzı artışı şeklinde ikili etkisinin örneği."
+        ),
+    },
+    {
+        "id": "ukraine_refugee_crisis_2022",
+        "date": "2022-02..2022-12",
+        "title": "Ukrayna Mülteci Krizi (Rusya İşgali Sonrası)",
+        "category": "Mülteci/Göç Krizi",
+        "event": "Rusya'nın Şubat 2022 işgalinin ardından 8 milyondan fazla Ukraynalı (çoğunlukla kadın/çocuk) AB ülkelerine (Polonya, Almanya başta olmak üzere) sığındı; AB, Ukraynalı mültecilere normal sığınma prosedürünü atlayarak anında geçici koruma statüsü tanıyan tarihinde ilk kez uygulanan bir mekanizmayı devreye soktu.",
+        "market_reaction": (
+            "Polonya ve komşu ülkelerde kısa vadeli kamu harcaması artışı yaşandı ama AB'nin "
+            "hızlı/koordineli mali destek mekanizması (2015 krizinin aksine) piyasada siyasi "
+            "istikrarsızlık primi oluşturmadı; Polonya zlotisi ve bölge varlıkları esas olarak "
+            "savaşın kendisinin jeopolitik riskiyle hareket etti, mülteci akışının kendisi "
+            "ayrı bir piyasa şoku yaratmadı - 2015 krizine kıyasla çok daha hızlı/örgütlü "
+            "kurumsal tepkinin piyasa güvenini koruduğu bir örnek."
+        ),
+    },
+    {
+        "id": "syrian_refugee_crisis_turkey_2011_2020",
+        "date": "2011-2020",
+        "title": "Suriyeli Mülteci Krizi ve Türkiye'nin En Büyük Mülteci Nüfusunu Barındırması",
+        "category": "Mülteci/Göç Krizi",
+        "event": "Suriye iç savaşı (2011 başlangıçlı) nedeniyle Türkiye, dünyada tek bir ülkede en fazla mülteci barındıran ülke konumuna geldi (zirvede ~3.6 milyon Suriyeli); AB-Türkiye Mart 2016 anlaşmasıyla Türkiye'ye mülteci yönetimi karşılığında mali destek ($6+ milyar) sağlandı.",
+        "market_reaction": (
+            "Türkiye ekonomisi için mülteci nüfusu hem kamu harcaması yükü hem de (özellikle "
+            "sınır bölgelerinde) ek işgücü/tüketici tabanı olarak karma etki yarattı; TL "
+            "üzerindeki asıl baskı 2018/2021 kur krizlerinden kaynaklandı (mülteci krizi "
+            "doğrudan tetikleyici değildi), ancak AB ile mülteci konusundaki periyodik "
+            "gerilimler (Yunanistan sınırındaki 2020 kriz gibi) Türkiye'nin AB ilişkilerine "
+            "dair siyasi risk primini dönemsel olarak artırdı."
+        ),
+    },
+    {
+        "id": "lebanon_economic_collapse_2019_2023",
+        "date": "2019-10..2023",
+        "title": "Lübnan Ekonomik Çöküşü (Dünya Bankası'nın 'En Kötü 3 Kriz' Listesindeki Çöküş)",
+        "category": "Finans Krizi",
+        "event": "Lübnan lirası, on yıllarca sabit kurun ardından 2019'da çökmeye başladı; banka mevduatlarına fiili el konuldu (bankalar dolar çekimini engelledi), enflasyon yıllık binlerce yüzde seviyesine ulaştı, Dünya Bankası bu çöküşü 19. yüzyıldan beri dünyanın en kötü üç ekonomik krizinden biri olarak nitelendirdi.",
+        "market_reaction": (
+            "Lübnan lirası resmi kurdan (1 dolar = 1.507 LL) serbest piyasada 1 dolar = "
+            "100.000+ LL seviyesine çöktü (%-98'in üzerinde değer kaybı); banka sistemi fiilen "
+            "işlevini yitirdi, ülke IMF ile kurtarma paketi müzakerelerini yıllarca "
+            "sonuçlandıramadı (siyasi kilitlenme nedeniyle) - 'reform yapılmadığı sürece IMF "
+            "desteğinin gelmeyeceği ve krizin süresiz uzayabileceği' senaryosunun en somut "
+            "örneği; Ağustos 2020 Beyrut patlamasıyla kriz daha da derinleşti."
+        ),
+    },
+    {
+        "id": "zimbabwe_hyperinflation_2007_2009",
+        "date": "2007-2009",
+        "title": "Zimbabve Hiperenflasyonu (Tarihin En Yüksek Enflasyon Oranlarından Biri)",
+        "category": "Finans Krizi",
+        "event": "Zimbabve'de tarımsal üretim çöküşü (toprak reformu politikaları) ve aşırı para basımı, 2008'de aylık enflasyonun %79.6 milyar (yıllık trilyonlarca yüzde) seviyesine ulaşmasına yol açtı; ülke 2009'da kendi para birimini tamamen terk ederek yabancı para birimlerine (ABD doları) geçti.",
+        "market_reaction": (
+            "Zimbabve doları pratik olarak değersizleşti (100 trilyon dolarlık banknotlar "
+            "basıldı), yerel borsa (kağıt üzerinde) hiperenflasyon nedeniyle nominal olarak "
+            "muazzam yükseldi ama reel (dolar bazında) değer sıfıra yakındı; olay, aşırı para "
+            "basımının bir ulusal para birimini tamamen yok edebildiğinin ve 'dolarizasyon' "
+            "(kendi para birimini terk etme) kararının hiperenflasyonu durdurmak için son "
+            "çare olarak nasıl kullanıldığının klasik referans vakası oldu."
+        ),
+    },
+    {
+        "id": "sec_v_ripple_xrp_case_2020_2023",
+        "date": "2020-12..2023-07",
+        "title": "SEC'in Ripple'a (XRP) Karşı Menkul Kıymet Davası",
+        "category": "Yasal Süreç/Dava",
+        "event": "SEC, Aralık 2020'de Ripple Labs'ı XRP kripto parasını kayıtsız menkul kıymet olarak sattığı gerekçesiyle dava etti; Temmuz 2023'te federal mahkeme, XRP'nin borsalarda perakende yatırımcılara satışının menkul kıymet sayılmayacağına (kurumsal satışların ise sayılabileceğine) hükmetti - kripto sektöründe emsal niteliğinde kısmi bir zafer.",
+        "market_reaction": (
+            "Karar açıklandığında XRP fiyatı tek günde %+70'e varan sıçrama yaptı, diğer "
+            "altcoin'ler de (SEC'in 'menkul kıymet' iddia ettiği Solana, Cardano gibi "
+            "tokenlar) benzer emsal beklentisiyle ralli yaptı; olay, tek bir mahkeme kararının "
+            "kripto piyasasının geniş bir kesimine aynı anda nasıl fiyat etkisi yapabildiğinin "
+            "ve düzenleyici belirsizliğin kripto varlık fiyatlamasındaki merkezi rolünün "
+            "göstergesi oldu."
+        ),
+    },
+    {
+        "id": "sec_binance_coinbase_lawsuits_2023",
+        "date": "2023-06",
+        "title": "SEC'in Binance ve Coinbase'e Karşı Art Arda Dava Açması",
+        "category": "Yasal Süreç/Dava",
+        "event": "SEC, Haziran 2023'te bir hafta arayla hem dünyanın en büyük kripto borsası Binance'e (kayıtsız menkul kıymet borsası işletmek, fonların karıştırılması) hem de ABD'nin en büyük halka açık kripto borsası Coinbase'e (kayıtsız aracı kurum/borsa/takas kurumu olarak faaliyet) karşı dava açtı.",
+        "market_reaction": (
+            "Coinbase hissesi dava haberiyle %-12 düştü, Bitcoin/Ethereum %-5 ile geride "
+            "kaldı, davalarda 'menkul kıymet' olarak nitelendirilen onlarca altcoin (Solana, "
+            "Cardano, Polygon dahil) %-10-25 arası sert satıldı; bu olay ABD düzenleyici "
+            "baskısının kripto piyasasının SADECE ilgili şirketleri değil, dava dilekçesinde "
+            "adı geçen TÜM token'ları aynı anda nasıl etkileyebildiğini gösterdi (Coinbase "
+            "davadan bir yıl sonra, 2024'te kısmi zafer kazandı)."
+        ),
+    },
+    {
+        "id": "wells_fargo_fake_accounts_scandal_2016",
+        "date": "2016-09",
+        "title": "Wells Fargo Sahte Hesap Skandalı",
+        "category": "Yasal Süreç/Dava",
+        "event": "Wells Fargo çalışanlarının satış hedeflerini tutturmak için müşteri onayı olmadan milyonlarca sahte banka/kredi kartı hesabı açtığı ortaya çıktı; CFPB/OCC/LA şehri toplam $185 milyon ceza kesti, CEO John Stumpf istifa etti, Fed banka üzerine benzeri görülmemiş bir 'varlık büyüklüğü tavanı' (asset cap) getirdi.",
+        "market_reaction": (
+            "Wells Fargo hissesi skandal haberiyle günler içinde %-10'a varan düşüş yaşadı, "
+            "itibar kaybı yıllarca sürdü (hisse sonraki yıllarda sektör emsallerine göre "
+            "düşük performans gösterdi); Fed'in getirdiği varlık tavanı (2018-2025 arası "
+            "kaldırılamadı) bankanın büyüme kapasitesini yıllarca fiilen kısıtladı - "
+            "düzenleyici cezaların bazen tek seferlik para cezasından çok daha kalıcı "
+            "yapısal kısıtlamalara (büyüme tavanı gibi) dönüşebildiğinin örneği."
+        ),
+    },
+    {
+        "id": "finra_gamestop_robinhood_scrutiny_2021",
+        "date": "2021-01..2021-02",
+        "title": "GameStop Olayı Sonrası Robinhood'un İşlem Kısıtlaması ve FINRA/SEC İncelemesi",
+        "category": "Yasal Süreç/Dava",
+        "event": "Ocak 2021'deki GameStop kısa sıkıştırması sırasında Robinhood ve diğer aracı kurumlar, DTCC'nin (takas kurumu) teminat taleplerini karşılayamama riskiyle GameStop/AMC gibi hisselerde ALIM işlemlerini geçici olarak durdurdu; bu karar Kongre'de duruşmalara, FINRA/SEC soruşturmalarına ve 'perakende yatırımcının kurumlara karşı korunmadığı' tartışmasına yol açtı.",
+        "market_reaction": (
+            "Kısıtlama haberiyle GameStop hissesi tek günde %-44 düştü (alım durdurulup satış "
+            "serbest bırakılınca fiyat baskısı tek yönlü oldu); Robinhood, IPO'sunda (2021 "
+            "Temmuz) bu olayın itibar hasarını taşıdı ve FINRA Haziran 2021'de şirkete o "
+            "zamana dek kesilen en yüksek cezalardan birini ($70 milyon) verdi. Olay, takas/"
+            "teminat altyapısındaki (arka planda görünmeyen) kısıtların bir 'meme hisse' "
+            "manisini aniden durdurabildiğinin ve düzenleyici kurumların (FINRA/SEC) piyasa "
+            "yapısı sorunlarına odaklanmasına yol açtığının örneği oldu."
+        ),
+    },
+    {
+        "id": "sec_climate_disclosure_rule_2024",
+        "date": "2024-03",
+        "title": "SEC'in İklim Riski Açıklama Zorunluluğu Kuralı",
+        "category": "Yasal Süreç/Dava",
+        "event": "SEC, halka açık şirketlerin iklimle ilgili risklerini ve (bazı durumlarda) sera gazı emisyonlarını finansal raporlarında açıklamasını zorunlu kılan bir kural yayınladı; kural açıklanır açıklanmaz çok sayıda eyalet/iş dünyası grubu tarafından dava edildi ve SEC nisan 2024'te kuralın uygulanmasını kendi isteğiyle askıya aldı.",
+        "market_reaction": (
+            "Enerji/ağır sanayi şirketleri kuralın ek uyum maliyeti getireceği endişesiyle "
+            "karşı çıktı, kuralın askıya alınması bu sektörlerde kısa vadeli rahatlama "
+            "yarattı; olay, düzenleyici kurumların iklim/ESG alanındaki girişimlerinin ABD'de "
+            "(AB'nin aksine) güçlü hukuki/siyasi dirençle karşılaştığının ve düzenleme "
+            "sürecinin yıllarca mahkeme süreçlerinde tıkanabildiğinin örneği oldu."
+        ),
+    },
+    # ---------------------------------------------------------------
+    # Ek: Büyük halka arzlar (IPO) ve bunların piyasa likiditesi üzerindeki
+    # 'emme etkisi' (capital soak-up effect)
+    # ---------------------------------------------------------------
+    {
+        "id": "facebook_ipo_2012",
+        "date": "2012-05-18",
+        "title": "Facebook'un Halka Arzı ve İlk Hafta Teknik Aksaklıklar",
+        "category": "Halka Arz (IPO)",
+        "event": "Facebook, o zamana dek teknoloji şirketleri arasında en büyük halka arzlardan birini ($16 milyar) gerçekleştirdi; Nasdaq'ın işlem sisteminde yaşanan teknik aksaklıklar nedeniyle ilk gün işlemler gecikti, fiyat istikrarsız seyretti.",
+        "market_reaction": (
+            "Hisse, halka arz fiyatının ($38) altına düşerek ilk aylarda %-50'ye varan kayıp "
+            "yaşadı (mobil reklam gelir modelinin henüz kanıtlanmamış olması endişesi); "
+            "dev bir halka arzın piyasadan çektiği sermaye ve ardından gelen hayal kırıklığı, "
+            "o dönem diğer 'yeni nesil internet' IPO'larına (Zynga, Groupon) yönelik "
+            "iştahı da bir süre azalttı - hisse ancak 2013'te mobil reklam gelirini "
+            "kanıtlayınca kalıcı toparlanmaya geçti."
+        ),
+    },
+    {
+        "id": "alibaba_ipo_2014",
+        "date": "2014-09-19",
+        "title": "Alibaba'nın Tarihin (O Zamana Dek) En Büyük Halka Arzı",
+        "category": "Halka Arz (IPO)",
+        "event": "Çinli e-ticaret devi Alibaba, New York Borsası'nda $25 milyar toplayarak tarihin en büyük halka arzını gerçekleştirdi; talep o kadar yüksekti ki arz büyüklüğü birkaç kez artırıldı.",
+        "market_reaction": (
+            "Hisse ilk gün %+38 yükseldi, işlem hacmi rekor kırdı; bu denli büyük bir tek "
+            "işlemin piyasadan çektiği likidite, aynı hafta içindeki bazı küçük/orta ölçekli "
+            "IPO'ların ertelenmesine yol açtı (yatırımcı sermayesinin geçici olarak dev "
+            "arza yönlendiği gözlemlendi) - büyük IPO'ların kısa vadede 'sermaye emme etkisi' "
+            "yaratarak eşzamanlı diğer halka arzların performansını/zamanlamasını "
+            "etkileyebildiğinin örneği."
+        ),
+    },
+    {
+        "id": "saudi_aramco_ipo_2019",
+        "date": "2019-12-11",
+        "title": "Suudi Aramco'nun Tarihin En Büyük Halka Arzı ($25.6 Milyar)",
+        "category": "Halka Arz (IPO)",
+        "event": "Dünyanın en kârlı şirketi Suudi Aramco, sadece Suudi/Körfez borsasında (Tadawul) sınırlı bir halka arz yaparak $25.6 milyar topladı ve şirket değeri $1.7 trilyona ulaştı (dünyanın en değerli halka açık şirketi) - ancak arz esas olarak yerel/bölgesel yatırımcılara yönelikti, küresel borsalarda işlem görmedi.",
+        "market_reaction": (
+            "Tadawul borsasında halka arz sonrası hisse %+10 sınırıyla (borsa kuralı) yükseldi; "
+            "arzın büyük ölçüde Suudi yerel bankalarının kredilendirdiği yerel yatırımcılara "
+            "dayanması, Suudi bankacılık sistemindeki likiditeyi bir süre sıkılaştırdı - "
+            "dev bir yerel IPO'nun küresel piyasalardan çok, kendi iç finansal sistemindeki "
+            "likiditeyi 'emebileceğinin' bir örneği (küresel endekslere dahil edilmediği için "
+            "uluslararası fon akışı sınırlı kaldı)."
+        ),
+    },
+    {
+        "id": "uber_ipo_2019",
+        "date": "2019-05-10",
+        "title": "Uber'in Halka Arzı ve Zayıf İlk Gün Performansı",
+        "category": "Halka Arz (IPO)",
+        "event": "Uber, $8.1 milyar toplayarak halka açıldı ancak kârlılık belirsizliği ve o dönem ABD-Çin ticaret savaşı gerginliğinin piyasayı geniş çapta baskılaması nedeniyle ilk gün hissesi %-7.6 düşerek kapandı - dönemin en büyük teknoloji IPO'larından biri için zayıf bir başlangıçtı.",
+        "market_reaction": (
+            "Zayıf performans, aynı yıl halka açılmayı planlayan diğer 'unicorn' şirketlerin "
+            "(WeWork gibi) değerleme beklentilerini aşağı çekti; WeWork'ün birkaç ay sonra "
+            "halka arzını tamamen iptal etmesinde (2019 Eylül) Uber'in soğuk karşılanmasının "
+            "da dolaylı payı olduğu değerlendirilir - büyük bir IPO'nun zayıf performansının, "
+            "'IPO penceresini' (yatırımcı iştahını) sonraki şirketler için de daraltabildiğinin "
+            "örneği."
+        ),
+    },
+    {
+        "id": "rivian_ipo_2021",
+        "date": "2021-11-10",
+        "title": "Rivian'ın Halka Arzı (Kâr Öncesi Şirket İçin Dev Değerleme)",
+        "category": "Halka Arz (IPO)",
+        "event": "Elektrikli kamyon üreticisi Rivian, henüz anlamlı gelir üretmeden $13.7 milyar toplayarak halka açıldı ve piyasa değeri kısa süreliğine Ford'u geçerek $150 milyara ulaştı; bu, 2021'in en büyük IPO'suydu ve dönemin 'büyüme her şeydir' yatırımcı iştahının zirvesini simgeledi.",
+        "market_reaction": (
+            "Hisse halka arz sonrası ilk günlerde %+50'ye varan sıçrama yaptı, ancak 2022'deki "
+            "Fed faiz artışları ve kârsız büyüme şirketlerinden kaçış dalgasıyla yıl sonuna "
+            "kadar %-80'in üzerinde çöktü; dev IPO'nun piyasadan çektiği spekülatif sermaye "
+            "(ve ardından gelen çöküş), 2021 sonu 'her şey balonunun' (everything bubble) "
+            "zirve/dönüm noktalarından biri olarak değerlendirilir."
+        ),
+    },
+    {
+        "id": "arm_holdings_ipo_2023",
+        "date": "2023-09-14",
+        "title": "Arm Holdings'in Nasdaq'ta Halka Arzı (2023'ün En Büyük IPO'su)",
+        "category": "Halka Arz (IPO)",
+        "event": "SoftBank, Nvidia'nın satın alma teklifinin düzenleyicilerce engellenmesinin ardından Arm'ı doğrudan halka arz etti; $4.9 milyar toplayan arz, 2023'ün en büyük teknoloji IPO'suydu ve yapay zeka çip talebi anlatısıyla güçlü talep gördü.",
+        "market_reaction": (
+            "Hisse ilk gün %+25 yükseldi; büyük/başarılı bir IPO'nun piyasada 'IPO penceresinin "
+            "yeniden açıldığı' sinyalini vermesiyle sonraki aylarda Instacart, Klaviyo gibi "
+            "başka şirketler de halka arz planlarını hızlandırdı - başarılı dev IPO'ların "
+            "sadece sermaye çekmekle kalmayıp, ardından gelen IPO dalgası için 'güven "
+            "sinyali' işlevi de görebildiğinin örneği (Uber 2019'un tam tersi bir etki)."
+        ),
+    },
+    {
+        "id": "twitter_ipo_2013",
+        "date": "2013-11-07",
+        "title": "Twitter'ın Halka Arzı (Facebook'un Tersine Güçlü İlk Gün)",
+        "category": "Halka Arz (IPO)",
+        "event": "Twitter, $1.8 milyar toplayarak halka açıldı; Facebook'un 2012'deki sorunlu halka arzından ders çıkararak daha az agresif fiyatlama ve NYSE'de (Nasdaq yerine) işlem görme stratejisi izledi.",
+        "market_reaction": (
+            "Hisse ilk gün %+73 yükseldi (Facebook'un aksine); ancak şirket hiçbir zaman "
+            "sürdürülebilir kâr üretemedi ve kullanıcı büyümesi yavaşladı, hisse yıllar "
+            "içinde halka arz fiyatının çevresinde sıkışık kaldı - sonunda 2022'de Musk "
+            "tarafından özelleştirildi (bkz. Musk'ın Twitter'ı satın alması) - güçlü bir "
+            "ilk gün performansının uzun vadeli iş modeli sorunlarını telafi etmediğinin "
+            "örneği."
+        ),
+    },
+    {
+        "id": "ipo_capital_soak_up_liquidity_effect_note",
+        "date": "Sürekli/Metodoloji",
+        "title": "Yöntem Notu: Dev Halka Arzların Piyasadan Sermaye/Likidite Çekmesi Etkisi",
+        "category": "Halka Arz (IPO)",
+        "event": (
+            "Çok büyük ($5 milyar+) bir halka arz duyurulduğunda, kurumsal yatırımcılar "
+            "(özellikle endeks/tema fonları) genellikle mevcut pozisyonlarından nakde geçerek "
+            "yeni arza katılım payı ayırır; bu durum arz öncesi haftalarda ilgili sektördeki "
+            "diğer hisselerde hafif satış baskısı, arz sonrası ise (kilitlenme süresi bitince, "
+            "genelde 90-180 gün sonra) içerden satış baskısı yaratabilir."
+        ),
+        "market_reaction": (
+            "GÖZLEM: Facebook (2012), Alibaba (2014) ve Rivian (2021) örneklerinde arz "
+            "öncesi/sonrası dönemde teknoloji sektöründeki küçük-orta ölçekli hisselerde "
+            "görece zayıf performans gözlemlenmiştir; kilitlenme süresi bitiminde (lock-up "
+            "expiry) içeriden büyük hissedarların (kurucular, erken yatırımcılar) satışa "
+            "geçmesi de o hisse için ayrı bir düşüş baskısı dönemi yaratır (genelde arzdan "
+            "3-6 ay sonra). Bu nedenle çok büyük bir IPO haberi geldiğinde, aynı sektördeki "
+            "diğer hisselerde kısa vadeli göreceli zayıflık ve arzın kendisinde kilitlenme "
+            "bitiş tarihi civarında ek oynaklık beklenmesi mantıklı bir temel orandır (base "
+            "rate) - kesinlik taşımaz, teyit gerektirir."
+        ),
+    },
 ]
 
 
