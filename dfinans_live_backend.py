@@ -4645,6 +4645,28 @@ FEAR_GREED_EXTREME_LOW = int(os.getenv("FEAR_GREED_EXTREME_LOW", "25"))
 FEAR_GREED_EXTREME_HIGH = int(os.getenv("FEAR_GREED_EXTREME_HIGH", "75"))
 EXTERNAL_SIGNALS_ENABLED = os.getenv("EXTERNAL_SIGNALS_ENABLED", "true").lower() == "true"
 
+# ============================================================
+# CARRY TRADE (YEN FONLAMASI) COZULME RISKI SINYALI
+# Tarihsel referans: 5 Agustos 2024 - JPY'nin birkaç gun icinde sert
+# guclenmesi (USDJPY dususu) + BOJ faiz artisi + VIX sicramasi, dusuk
+# faizli yen ile finanse edilen risk varligi (BTC, ABD hisseleri, altin,
+# gelisen piyasa para birimleri) pozisyonlarinin kitlesel tasfiyesine
+# (unwind) yol acmis, Nikkei tek gunde %-12.4, S&P 500 %-3 dusmustu.
+# Bu sinyal TUM piyasalar/semboller icin GENEL bir risk-off/risk-on
+# ayarlamasi olarak calisir (crypto ve hisse senedi islemlerinin ikisinde
+# de kullanilir) - belirli bir sembole ozgu degildir.
+# ============================================================
+CARRY_TRADE_SIGNAL_ENABLED = os.getenv("CARRY_TRADE_SIGNAL_ENABLED", "true").lower() == "true"
+CARRY_TRADE_JPY_STRENGTH_HIGH_PCT = float(os.getenv("CARRY_TRADE_JPY_STRENGTH_HIGH_PCT", "2.5"))
+CARRY_TRADE_JPY_STRENGTH_ELEVATED_PCT = float(os.getenv("CARRY_TRADE_JPY_STRENGTH_ELEVATED_PCT", "1.2"))
+CARRY_TRADE_VIX_CONFIRM_PCT = float(os.getenv("CARRY_TRADE_VIX_CONFIRM_PCT", "10.0"))
+
+# Emir defteri "spoof wall" tespiti (bkz. get_orderbook_spoofing_signal) ve
+# pump&dump hizlanma tespiti (bkz. get_pump_dump_acceleration_signal) esikleri.
+ORDERBOOK_SPOOF_WALL_RATIO = float(os.getenv("ORDERBOOK_SPOOF_WALL_RATIO", "12.0"))
+PUMP_DUMP_ACCEL_PCT = float(os.getenv("PUMP_DUMP_ACCEL_PCT", "5.0"))
+PUMP_DUMP_ACCEL_VOLUME_RATIO = float(os.getenv("PUMP_DUMP_ACCEL_VOLUME_RATIO", "4.0"))
+
 _external_signal_cache: Dict[str, Dict[str, Any]] = {}
 _external_signal_lock = threading.Lock()
 
@@ -6074,6 +6096,35 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
                 bias -= 5
                 notes.append(f"Makro rejim RISK-OFF: borsa/dolar baskısı var, yeni alım riskli olabilir.")
 
+    if CARRY_TRADE_SIGNAL_ENABLED:
+        carry = get_carry_trade_risk_bias()
+        if not carry.get("error"):
+            risk_level = carry.get("risk_level")
+            jpy_str = carry.get("jpy_strength_3d_pct", 0.0)
+            vix_chg = carry.get("vix_3d_pct", 0.0)
+            if risk_level == "HIGH":
+                if action == "SELL":
+                    bias += 8
+                    notes.append(
+                        f"Carry trade çözülme riski YÜKSEK (JPY 3g %{jpy_str:+.1f} güçlendi, VIX %{vix_chg:+.1f}): "
+                        "yen fonlamalı risk varlıklarında kitlesel tasfiye (5 Ağustos 2024 benzeri) SELL'i destekler."
+                    )
+                else:
+                    bias -= 8
+                    notes.append(
+                        f"Carry trade çözülme riski YÜKSEK (JPY 3g %{jpy_str:+.1f} güçlendi, VIX %{vix_chg:+.1f}): "
+                        "risk varlıklarında yeni ALIM açmak tehlikeli, global ani satış tetiklenebilir."
+                    )
+            elif risk_level == "ELEVATED":
+                if action == "SELL":
+                    bias += 4
+                    notes.append(f"Carry trade çözülme riski YÜKSELİYOR (JPY 3g %{jpy_str:+.1f}): SELL'i hafifçe destekler.")
+                else:
+                    bias -= 4
+                    notes.append(f"Carry trade çözülme riski YÜKSELİYOR (JPY 3g %{jpy_str:+.1f}): yeni ALIM için temkinli olunmalı.")
+            elif risk_level == "WATCH":
+                notes.append(f"Carry trade riski izlemede (JPY 3g %{jpy_str:+.1f} güçlendi) - henüz eşik aşılmadı.")
+
     whale = get_whale_positioning(symbol)
     if not whale.get("error"):
         ratio = safe_float(whale.get("long_short_ratio"))
@@ -6133,7 +6184,7 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
         bias -= 1
         notes.append(f"Google Trends'te '{trends['keyword']}' aramalarında ani artış (x{trends['spike_ratio']:.1f}): olası yüksek oynaklık, dikkatli olunmalı.")
 
-    return {"bias": max(-16, min(16, bias)), "notes": notes}
+    return {"bias": max(-24, min(24, bias)), "notes": notes}
 
 
 def get_macro_regime() -> Dict[str, Any]:
@@ -6165,6 +6216,61 @@ def get_macro_regime() -> Dict[str, Any]:
             "time": now_text(),
         }
     return _cache_get_or_fetch("macro_regime", 14400, _fetch)
+
+
+def get_carry_trade_risk_bias() -> Dict[str, Any]:
+    """Yen (JPY) carry trade cozulme riskini olcer - TUM piyasalar (crypto + hisse)
+    icin genel bir risk-off/risk-on ayar sinyali.
+    Mantik (5 Agustos 2024 unwind olayindan turetildi):
+      - USDJPY kisa vadede (3 gun) sert dusuyorsa (JPY hizla GUCLENIYORSA) bu,
+        dusuk faizli yen ile finanse edilen risk varliklarinin (BTC, ABD hisseleri,
+        gelisen piyasa FX, altin) tasfiye edildigine (carry trade unwind) isaret eder.
+      - VIX ayni donemde de yukseliyorsa (korku endeksi teyidi) risk seviyesi YUKSEK
+        olarak isaretlenir; VIX teyidi yoksa ELEVATED (dikkatli) seviyesinde kalir.
+      - USDJPY YUKARI (JPY zayifliyor) ise carry trade rahat/genisliyor demektir,
+        bu risk sinyali acisindan NORMAL kabul edilir (ayrica risk-on baski da katmaz,
+        cunku bu makro rejim/DXY sinyaliyle zaten kismen kapsanir).
+    yfinance kullanir (JPY=X = USDJPY, ^VIX), 4 saat cache'lenir, hata durumunda
+    sessizce NORMAL'e duser (fail-open)."""
+    def _fetch():
+        import yfinance as yf
+        data = yf.download(["JPY=X", "^VIX"], period="15d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"].dropna()
+        if len(close) < 4:
+            raise RuntimeError("Yetersiz carry trade verisi")
+        usdjpy = close["JPY=X"]
+        vix = close["^VIX"]
+        usdjpy_3d_pct = (usdjpy.iloc[-1] / usdjpy.iloc[-4] - 1.0) * 100.0
+        vix_3d_pct = (vix.iloc[-1] / vix.iloc[-4] - 1.0) * 100.0 if vix.iloc[-4] else 0.0
+
+        jpy_strength_pct = -usdjpy_3d_pct  # USDJPY dususu = JPY guclenmesi
+        vix_confirms = vix_3d_pct >= CARRY_TRADE_VIX_CONFIRM_PCT
+
+        if jpy_strength_pct >= CARRY_TRADE_JPY_STRENGTH_HIGH_PCT and vix_confirms:
+            risk_level = "HIGH"
+        elif jpy_strength_pct >= CARRY_TRADE_JPY_STRENGTH_HIGH_PCT or (
+            jpy_strength_pct >= CARRY_TRADE_JPY_STRENGTH_ELEVATED_PCT and vix_confirms
+        ):
+            risk_level = "ELEVATED"
+        elif jpy_strength_pct >= CARRY_TRADE_JPY_STRENGTH_ELEVATED_PCT:
+            risk_level = "WATCH"
+        else:
+            risk_level = "NORMAL"
+
+        return {
+            "usdjpy_3d_pct": round(float(usdjpy_3d_pct), 2),
+            "jpy_strength_3d_pct": round(float(jpy_strength_pct), 2),
+            "vix_3d_pct": round(float(vix_3d_pct), 2),
+            "vix_confirms": bool(vix_confirms),
+            "risk_level": risk_level,
+            "note": (
+                "USDJPY'nin hizla dusmesi (JPY guclenmesi) + VIX sicramasi, dusuk faizli yen "
+                "ile finanse edilen risk varliklarinin (BTC, ABD hisseleri, EM FX, altin) "
+                "kitlesel tasfiyesine (5 Agustos 2024 benzeri) isaret edebilir."
+            ),
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch("carry_trade_risk", 14400, _fetch)
 
 
 def get_bull_bear_market_regime(market: str) -> Dict[str, Any]:
@@ -7121,6 +7227,63 @@ def get_financial_statement_analysis() -> Dict[str, Any]:
     return _cache_get_or_fetch("financial_statement_analysis", 43200, _fetch)
 
 
+def get_orderbook_spoofing_signal(symbol: str) -> Optional[Dict[str, Any]]:
+    """Binance Futures emir defterinden (order book) en iyi 20 seviyeyi ceker ve
+    'spoofing/layering' supheli buyuk emir duvarlarini tespit eder: spread'e en
+    yakin (top-of-book) seviye haric, derinlikteki (2. seviyeden itibaren)
+    seviyelerden birinin hacmi o taraftaki diger seviyelerin MEDYANININ cok
+    uzerindeyse (ornegin 8 kat+) bu, gercekte doldurulma niyeti olmayan, sadece
+    fiyati bir yone itmek/baskilamak icin konulmus 'sahte duvar' (spoof wall)
+    olabilir. Top-of-book haric tutulur cunku spread'e en yakin seviyede dogal
+    hacim yigilmasi (yuvarlak sayi kumelenmesi) cok yaygindir ve tek basina
+    supheli sayilmaz. Kesin kanit degildir, istatistiksel bir uyari isaretidir."""
+    try:
+        base = FUTURES_BASE
+        data = public_get(base, "/fapi/v1/depth", {"symbol": symbol, "limit": 20})
+        bids = data.get("bids") or []
+        asks = data.get("asks") or []
+        if len(bids) < 8 or len(asks) < 8:
+            return None
+
+        def _wall_ratio(levels: List[List[str]]) -> Optional[Dict[str, float]]:
+            # Top-of-book (en iyi seviye) haric tut - dogal yigilma orada yaygin.
+            depth_levels = levels[1:]
+            sizes = [safe_float(lv[1]) for lv in depth_levels]
+            if len(sizes) < 5 or sum(sizes) <= 0:
+                return None
+            sorted_sizes = sorted(sizes)
+            mid = len(sorted_sizes) // 2
+            median_size = sorted_sizes[mid]
+            max_size = max(sizes)
+            max_idx = sizes.index(max_size)
+            if median_size <= 0:
+                return None
+            ratio = max_size / median_size
+            return {"ratio": ratio, "price": safe_float(depth_levels[max_idx][0])}
+
+        bid_wall = _wall_ratio(bids)
+        ask_wall = _wall_ratio(asks)
+
+        flags: List[str] = []
+        if bid_wall and bid_wall["ratio"] >= ORDERBOOK_SPOOF_WALL_RATIO:
+            flags.append(
+                f"Alış tarafında derinlikte {bid_wall['price']:g} seviyesinde medyanın {bid_wall['ratio']:.1f} katı "
+                "büyüklüğünde emir duvarı - spoofing/layering şüphesi (fiyatı desteklemeden yukarı itme girişimi olabilir)"
+            )
+        if ask_wall and ask_wall["ratio"] >= ORDERBOOK_SPOOF_WALL_RATIO:
+            flags.append(
+                f"Satış tarafında derinlikte {ask_wall['price']:g} seviyesinde medyanın {ask_wall['ratio']:.1f} katı "
+                "büyüklüğünde emir duvarı - spoofing/layering şüphesi (fiyatı baskılama girişimi olabilir)"
+            )
+        return {
+            "bid_wall_ratio": round(bid_wall["ratio"], 2) if bid_wall else None,
+            "ask_wall_ratio": round(ask_wall["ratio"], 2) if ask_wall else None,
+            "flags": flags,
+        }
+    except Exception:
+        return None
+
+
 def get_klines_volume_stats(symbol: str, market: str = "FUTURES", limit: int = 30) -> Optional[Dict[str, Any]]:
     """Son N gunluk mum verisinden ortalama hacim ve son gunun hacim orani ile
     fiyat/hacim uyumsuzlugunu hesaplar. Ani hacim patlamasi (ort. hacmin 3 kati+)
@@ -7148,11 +7311,51 @@ def get_klines_volume_stats(symbol: str, market: str = "FUTURES", limit: int = 3
         return None
 
 
+def get_pump_dump_acceleration_signal(symbol: str) -> Optional[Dict[str, Any]]:
+    """Son 3 saatlik (1 saatlik mumlarla) kumulatif fiyat degisimi + hacim oranini
+    inceleyerek klasik 'pump&dump' oruntusune (kisa surede anormal sert yon +
+    anormal hacim patlamasi, sonrasinda genelde sert geri donus) benzer ani
+    hizlanma olup olmadigini tespit eder. Gunluk mum bazli get_klines_volume_stats'a
+    gore cok daha kisa vadeli (saatlik) bir pencereye bakar, bu yuzden gun ici
+    ani pump/dump hareketlerini de yakalayabilir."""
+    try:
+        base = FUTURES_BASE
+        data = public_get(base, "/fapi/v1/klines", {"symbol": symbol, "interval": "1h", "limit": 30})
+        if not isinstance(data, list) or len(data) < 6:
+            return None
+        closes = [safe_float(row[4]) for row in data]
+        volumes = [safe_float(row[5]) for row in data]
+        last_3h_change_pct = ((closes[-1] / closes[-4] - 1.0) * 100.0) if closes[-4] else 0.0
+        last_3h_volume = sum(volumes[-3:])
+        prior_volumes = volumes[:-3]
+        avg_3h_volume = (sum(prior_volumes) / len(prior_volumes) * 3) if prior_volumes else 0.0
+        volume_ratio = (last_3h_volume / avg_3h_volume) if avg_3h_volume > 0 else 0.0
+
+        flags: List[str] = []
+        if abs(last_3h_change_pct) >= PUMP_DUMP_ACCEL_PCT and volume_ratio >= PUMP_DUMP_ACCEL_VOLUME_RATIO:
+            direction = "PUMP (ani yükseliş)" if last_3h_change_pct > 0 else "DUMP (ani düşüş)"
+            flags.append(
+                f"Son 3 saatte %{last_3h_change_pct:+.1f} hareket + hacim ortalamanın {volume_ratio:.1f} katına çıktı "
+                f"- klasik {direction} örüntüsü, sonrasında sert geri dönüş riski yüksek"
+            )
+        return {
+            "last_3h_change_pct": round(last_3h_change_pct, 2),
+            "volume_ratio_3h_vs_avg": round(volume_ratio, 2),
+            "flags": flags,
+        }
+    except Exception:
+        return None
+
+
 def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
     """Kripto icin: buyuk hesap (whale) long/short orani + fonlama orani (funding
-    rate) asiriliklarini ve hacim/fiyat uyumsuzluguna dayali olasi manipulasyon
+    rate) asiriliklarini, hacim/fiyat uyumsuzluguna dayali olasi manipulasyon
     (pump&dump, ani hacim patlamasi, asiri kaldiracli tek yonlu yigilma - short
-    squeeze/long squeeze riski) isaretlerini tarar.
+    squeeze/long squeeze riski), saatlik pump&dump hizlanma orunusu (bkz.
+    get_pump_dump_acceleration_signal - status/bias'i etkiler) ve emir defteri
+    spoof/layering supheli duvarlarini (bkz. get_orderbook_spoofing_signal -
+    tek-snapshot yanlis-pozitif riski yuksek oldugundan SADECE bilgi amacli
+    raporlanir, status/bias'i tetiklemez) tarar.
     Hisse senetleri icin: kisa pozisyon orani (short interest / float), kapanma
     gunu sayisi (short ratio/days-to-cover - yuksekse short squeeze potansiyeli),
     kurumsal ve icerden (insider) sahiplik oranlarini raporlar (yuksek kurumsal
@@ -7192,6 +7395,18 @@ def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
                             "- ince likidite, manipülasyona açık"
                         )
 
+                pump_dump = get_pump_dump_acceleration_signal(sym)
+                if pump_dump and pump_dump.get("flags"):
+                    flags.extend(pump_dump["flags"])
+
+                # NOT: Order book spoof/layering tespiti tek bir aninlik (snapshot)
+                # emir defteri goruntusune dayanir; gercek spoofing tekrarlanan
+                # emir/iptal davranisi gerektirir ve tek snapshot yanlis-pozitif
+                # orani yuksektir. Bu yuzden status/bias'i TETIKLEMEZ, sadece
+                # bilgi amacli ayri bir alanda raporlanir.
+                spoof = get_orderbook_spoofing_signal(sym)
+                spoof_flags_informational = spoof.get("flags", []) if spoof else []
+
                 status = "MANİPÜLASYON RİSKİ / AŞIRI POZİSYONLANMA" if flags else "NORMAL"
                 results.append({
                     "symbol": sym,
@@ -7201,6 +7416,11 @@ def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
                     "funding_rate_pct": funding_pct,
                     "volume_ratio_vs_avg": vol_stats.get("volume_ratio_vs_avg") if vol_stats else None,
                     "last_day_change_pct": vol_stats.get("last_day_change_pct") if vol_stats else None,
+                    "last_3h_change_pct": pump_dump.get("last_3h_change_pct") if pump_dump else None,
+                    "volume_ratio_3h_vs_avg": pump_dump.get("volume_ratio_3h_vs_avg") if pump_dump else None,
+                    "bid_wall_ratio": spoof.get("bid_wall_ratio") if spoof else None,
+                    "ask_wall_ratio": spoof.get("ask_wall_ratio") if spoof else None,
+                    "orderbook_flags_informational": spoof_flags_informational,
                     "status": status,
                     "flags": flags,
                 })
@@ -15218,6 +15438,10 @@ def market_signals_external():
     except Exception as e:
         macro_regime = {"error": str(e)}
     try:
+        carry_trade_risk = get_carry_trade_risk_bias()
+    except Exception as e:
+        carry_trade_risk = {"error": str(e)}
+    try:
         whale_positioning = get_whale_positioning(symbol)
     except Exception as e:
         whale_positioning = {"error": str(e)}
@@ -15242,6 +15466,7 @@ def market_signals_external():
         "funding_rate": funding,
         "fear_greed_index": fear_greed,
         "macro_regime": macro_regime,
+        "carry_trade_risk": carry_trade_risk,
         "whale_positioning": whale_positioning,
         "geopolitical_risk": geopolitical_risk,
         "regulatory_activity": regulatory_activity,
