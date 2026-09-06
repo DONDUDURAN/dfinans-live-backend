@@ -53,6 +53,7 @@ from historical_market_scenarios import (
     get_historical_scenarios_by_category,
     search_historical_scenarios,
     list_historical_scenario_categories,
+    get_historical_market_scenarios_with_actions,
 )
 
 APP_NAME = "D-finans Live Backend"
@@ -13471,16 +13472,34 @@ def historical_scenarios():
       - category: belirli bir kategoriyle filtrele (list_historical_scenario_categories ile
         mevcut kategorileri gorebilirsiniz)
       - q: baslik/olay/piyasa tepkisi metninde serbest metin arama
+      - with_actions: "1" verilirse her senaryoya kategori bazli genel aksiyon/pozisyon
+        rehberi (action alani) eklenir
     """
     try:
         category = request.args.get("category", "").strip()
         query = request.args.get("q", "").strip()
-        if query:
-            items = search_historical_scenarios(query)
-        elif category:
-            items = get_historical_scenarios_by_category(category)
+        with_actions = request.args.get("with_actions", "").strip() in ("1", "true", "yes")
+
+        if with_actions:
+            base_items = get_historical_market_scenarios_with_actions()
         else:
-            items = get_historical_market_scenarios()
+            base_items = get_historical_market_scenarios()
+
+        if query:
+            q = query.lower()
+            items = [
+                s for s in base_items
+                if q in " ".join([
+                    s.get("title", ""), s.get("category", ""), s.get("event", ""),
+                    s.get("market_reaction", ""),
+                ]).lower()
+            ]
+        elif category:
+            cat = category.strip().lower()
+            items = [s for s in base_items if s.get("category", "").strip().lower() == cat]
+        else:
+            items = base_items
+
         return jsonify({
             "ok": True,
             "count": len(items),

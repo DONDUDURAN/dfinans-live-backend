@@ -2930,3 +2930,145 @@ def list_historical_scenario_categories() -> List[str]:
         if cat and cat not in seen:
             seen.append(cat)
     return seen
+
+
+# ---------------------------------------------------------------------------
+# Kategori bazlı genel aksiyon rehberi: yeni bir olay bu kategorilerden birine
+# benzediğinde, sistemin/kullanıcının hangi genel yönde pozisyon değerlendirmesi
+# yapabileceğine dair TEMEL ORAN (base-rate) niteliğinde kısa bir öneri.
+# Bu KESIN bir sinyal değildir; her zaman gerçek zamanlı fiyat/hacim teyidiyle
+# ve küçük pozisyon büyüklüğüyle kullanılmalıdır.
+# ---------------------------------------------------------------------------
+CATEGORY_ACTION_GUIDANCE: Dict[str, str] = {
+    "Teknoloji/Kripto Balonu": (
+        "Balon zirve belirtileri (aşırı değerleme, kütlesel perakende yatırımcı girişi, "
+        "kaldıraçlı spekülasyon) görülünce kâr realizasyonu/pozisyon küçültme; çöküş "
+        "sonrası (genelde %-70+ düşüş, temel değerleme normalleşmesi) güçlü şirketlerde "
+        "kademeli uzun vadeli long fırsatı aranabilir - zamanlama (dip yakalama) zordur, "
+        "kademeli giriş (dollar-cost averaging) tercih edilmelidir."
+    ),
+    "Savaş/Jeopolitik": (
+        "Şok anında kısa vadeli risk-off: hisse/kripto long pozisyonlarda sıkı stop, "
+        "altın/petrol/savunma hisselerinde taktiksel long. Çatışma sınırlı/bölgesel kalıp "
+        "ateşkes ihtimali belirginleşirse (haber akışını izleyerek) birkaç gün içinde "
+        "kademeli risk-on'a dönülebilir - tarihsel örüntü genelde 'hızlı şok, hızlı toparlanma'."
+    ),
+    "Petrol Krizi": (
+        "Petrol/gaz fiyatı ANİ YUKARI sıçrarsa: enerji hisseleri/emtia long, havayolu/nakliye/"
+        "tüketici döngüsel hisseler kısa vadede short/hedge. Fiyat ANİ AŞAĞI çökerse (arz "
+        "fazlası/talep şoku): tam tersi - enerji üreticisi ülkelerin para birimlerinde ve "
+        "petrol şirketi hisselerinde temkinli/short, tüketici/nakliye şirketlerinde long."
+    ),
+    "Finans Krizi": (
+        "Sistemik risk sinyali (banka/kredi kuruluşu iflası, kredi notu indirimi) görülünce "
+        "risk azaltma: kaldıraçlı pozisyonları kapat, nakit/güvenli liman (dolar, kısa vadeli "
+        "tahvil, altın) ağırlığını artır; kriz merkez bankası/hükümet müdahalesiyle "
+        "durdurulduktan sonra (genelde haftalar içinde) kademeli risk-on'a dönülür."
+    ),
+    "Pandemi/Salgın": (
+        "İlk şok anında (vaka sayısı/kapanma haberleri) risk-off ve sağlık/ilaç sektörüne "
+        "taktiksel long; aşı/tedavi/toparlanma haberi geldiğinde HIZLA risk-on'a döner "
+        "(genelde piyasa toparlanması reel ekonomiden çok önce başlar) - 'haberi bekleme, "
+        "trend değişimini erken yakala' prensibi geçerlidir."
+    ),
+    "Para Politikası": (
+        "Beklenenden ŞAHİN veri/karar (yüksek enflasyon, güçlü istihdam, faiz artışı "
+        "sürprizi) -> hisse/kripto kısa vadeli short veya long'ları küçült, dolar/tahvil "
+        "getirisi long. Beklenenden GÜVERCİN veri/karar (düşen enflasyon, zayıf istihdam, "
+        "faiz indirimi sinyali) -> risk varlıklarında (hisse, kripto) long ağırlığını artır."
+    ),
+    "ABD Seçimleri": (
+        "Sonuç belirsizliği döneminde oynaklık artışı beklenir (hedge/küçük pozisyon); "
+        "sonuç kesinleşince kazanan tarafın politika önceliklerine göre SEKTÖR ROTASYONU "
+        "yapılır (ör. vergi indirimi vaadi -> hisse senedi geneli long, düzenleme artışı "
+        "vaadi -> ilgili sektörde temkinli)."
+    ),
+    "Doğal Afet": (
+        "Etkilenen bölge/sektör (enerji üretimi, tarım, turizm, sigorta) için kısa vadeli "
+        "short/hedge; yeniden yapılanma döneminde inşaat/altyapı/malzeme şirketlerinde "
+        "orta vadeli long değerlendirilebilir. Küresel endekslere etkisi genelde sınırlı "
+        "ve kısa sürelidir, bölgesel/sektörel odaklanma daha isabetlidir."
+    ),
+    "Ticaret/Jeopolitik-Ekonomi": (
+        "Yeni tarife/yaptırım/düzenleme haberinde ETKİLENEN sektör/şirket hisselerinde "
+        "short/hedge, YERLİ/ALTERNATİF üretici veya rakiplerde göreceli long fırsatı "
+        "aranır. Süreç uzun sürebileceğinden (aylar/yıllar) pozisyon küçük tutulup haber "
+        "akışına göre kademeli ayarlanmalıdır."
+    ),
+    "Kıtlık/Tarım Şoku": (
+        "Tedarik zinciri/emtia arzı kesintiye uğradığında ilgili emtia (tahıl, çip, enerji) "
+        "long, tedarik zincirine bağımlı üretici/perakendeci şirketlerde kısa vadeli "
+        "short/hedge; darboğaz çözüldükçe (üretim normalleşmesi) pozisyonlar kademeli "
+        "tersine çevrilir."
+    ),
+    "Öngörü/Senaryo": (
+        "Bu senaryolar gerçekleşmemiş, VARSAYIMSAL projeksiyonlardır - yalnızca ilgili "
+        "gerçek olay haber akışında somutlaşmaya başladığında (resmi açıklama, anlaşma "
+        "imzası vb.) küçük/test pozisyonla değerlendirilmeli, kesinlik atfedilmemelidir."
+    ),
+    "Yasal Süreç/Dava": (
+        "Dava/soruşturma açıklandığında ilgili şirkette kısa vadeli oynaklık/hafif short "
+        "beklenir; süreç boyunca (aylar/yıllar) belirsizlik primi taşınır. Nihai karar "
+        "şirket lehine ise pozisyon long'a çevrilebilir, aleyhine ağır yaptırım/bölünme "
+        "riski varsa short/uzak durma tercih edilir."
+    ),
+    "Öngörü/Rapor": (
+        "Saygın kurum/yatırımcının (IMF, Dünya Bankası, tanınmış fon yöneticisi) yayınladığı "
+        "uyarı/rapor, TEK BAŞINA işlem sinyali değildir ama izlenecek bir öncü göstergedir; "
+        "raporun işaret ettiği risk piyasa fiyatlamasında henüz görünmüyorsa kademeli/küçük "
+        "hedge pozisyonu (rapor teyit edilirse büyütülür) mantıklıdır."
+    ),
+    "Şirket Bilançosu Şoku": (
+        "Beklenti ALTI bilanço/kâr uyarısı -> ilgili hissede ve aynı sektördeki emsallerinde "
+        "kısa vadeli short/kâr realizasyonu. Beklenti ÜSTÜ bilanço -> ilgili hissede ve "
+        "tedarik zinciri/emsallerinde long. Sektörün 'öncü gösterge' (bellwether) şirketi "
+        "ise (ör. FedEx, Nvidia) etkinin tüm sektöre yayılabileceği unutulmamalı."
+    ),
+    "Açıklama/İfade Şoku": (
+        "Etkili bir kişinin (CEO, siyasetçi, merkez bankası başkanı) beklenmedik açıklaması "
+        "sonrası anlık sert hareket olur ama açıklamanın SOMUT bir eyleme/veriye dayanıp "
+        "dayanmadığı doğrulanana kadar pozisyon küçük ve kısa vadeli tutulmalı; "
+        "doğrulanmazsa (ör. 'funding secured' gibi) fiyat geri döner."
+    ),
+    "Şirket Kararları (Birleşme/Kapanma/Taşınma)": (
+        "Satın alma/birleşme duyurusunda HEDEF şirket genelde primli fiyattan long "
+        "(arbitraj fırsatı, düzenleyici onay riskiyle küçük pozisyon); anlaşma iptal "
+        "olursa hedef şirkette sert düşüş beklenir (short/pozisyon kapama). Fabrika "
+        "kapatma/maliyet kesme haberleri kısa vadede hisse için genelde OLUMLU (verimlilik "
+        "artışı algısı) fiyatlanır, uzun vadeli rekabet gücü ayrıca değerlendirilmelidir."
+    ),
+    "Mülteci/Göç Krizi": (
+        "Doğrudan endeks düzeyinde etkisi genelde sınırlıdır; asıl izlenmesi gereken "
+        "ilgili ülkenin kamu bütçesi/para birimi üzerindeki dolaylı baskı ve siyasi "
+        "istikrarsızlık riskidir (popülist parti yükselişi gibi) - kısa vadeli işlem "
+        "sinyali yerine orta-uzun vadeli makro risk unsuru olarak değerlendirilmelidir."
+    ),
+    "Halka Arz (IPO)": (
+        "Dev bir IPO ($5 milyar+) yaklaşırken aynı sektördeki küçük/orta ölçekli hisselerde "
+        "hafif temkinli olunabilir (sermaye çekme etkisi); IPO sonrası kilitlenme (lock-up) "
+        "bitiş tarihi (genelde 90-180 gün sonra) yaklaşırken de ek satış baskısı riski "
+        "izlenmelidir."
+    ),
+}
+
+
+def get_category_action_guidance(category: str) -> str:
+    """Belirli bir kategori icin genel aksiyon/pozisyon rehberini dondurur.
+    Bilinmeyen kategoriler icin genel bir uyari metni doner."""
+    return CATEGORY_ACTION_GUIDANCE.get(
+        str(category or "").strip(),
+        "Bu kategori icin ozel bir aksiyon sablonu tanimlanmamis; genel kural: "
+        "sok aninda kucuk pozisyon + gercek zamanli teyit, netlesince kademeli pozisyon artisi.",
+    )
+
+
+def get_historical_market_scenarios_with_actions() -> List[Dict[str, Any]]:
+    """Her senaryoya, kategorisine gore genel bir 'action' (aksiyon rehberi) alani
+    eklenmis halini dondurur. Orijinal HISTORICAL_MARKET_SCENARIOS listesini
+    degistirmez, yeni bir liste dondurur."""
+    enriched = []
+    for s in HISTORICAL_MARKET_SCENARIOS:
+        item = dict(s)
+        item["action"] = get_category_action_guidance(s.get("category"))
+        enriched.append(item)
+    return enriched
