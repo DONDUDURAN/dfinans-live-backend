@@ -741,6 +741,33 @@ IBKR_TAKE_PROFIT_PCT_NON_STOCK = float(os.getenv("IBKR_TAKE_PROFIT_PCT_NON_STOCK
 # arttigi icin risk de arttigindan kari daha erken realize etmek mantikli.
 BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "1.0"))
 IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.0"))
+# Kullanicinin talebi: 'BTC 120binden 60bine dustu, simdi 80binlerde periyodik
+# fiyat hareketleri oluyor - 5 yillik hareketleri tarayip uzun vadeli long/short
+# acalim dip ve zirvelerde, kar/zarar limitleri farkli olsun'. BTCUSDT/ETHUSDT
+# icin ayri bir 'makro sal\u0131n\u0131m' (macro swing) katmani: fiyat 5 yillik
+# en dusuk/en yuksek seviyeye yakinken VE haftalik RSI asiri satim/asiri alimda
+# ise, normal kisa vadeli sinyallerden cok daha genis kar-al/zarar-kes
+# yuzdeleriyle (bkz. get_macro_swing_zone / get_macro_swing_bias) pozisyon
+# acilmasi desteklenir. Pozisyon boyutlandirma DEGISMEZ (kullanicinin talebi:
+# mevcut % risk kurallariyla ayni), sadece TP/SL genisler.
+MACRO_SWING_SYMBOLS = frozenset(
+    s.strip().upper()
+    for s in os.getenv("MACRO_SWING_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
+    if s.strip()
+)
+MACRO_SWING_YF_TICKERS = {"BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD"}
+# Fiyatin 5 yillik en dusuk/en yuksekten en fazla bu yuzde kadar uzakta olmasi
+# 'dip/zirve bolgesi' sayilir icin gerekli esik.
+MACRO_SWING_ZONE_PCT = float(os.getenv("MACRO_SWING_ZONE_PCT", "15.0"))
+# Haftalik RSI asiri satim/asiri alim esikleri (gunluk RSI'dan daha yavas/
+# gurultusuz - uzun vadeli teyit icin haftalik kapanislar kullanilir).
+MACRO_SWING_RSI_OVERSOLD = float(os.getenv("MACRO_SWING_RSI_OVERSOLD", "35.0"))
+MACRO_SWING_RSI_OVERBOUGHT = float(os.getenv("MACRO_SWING_RSI_OVERBOUGHT", "65.0"))
+# Makro dip/zirve bolgesinde acilan islemler icin genis kar-al/zarar-kes
+# yuzdeleri (normal BINANCE_TAKE_PROFIT_PCT/STOP_LOSS_PCT %6/%2'den cok daha
+# genis - bu islemler gunluk degil, aylar surebilecek buyuk donusleri hedefler).
+MACRO_SWING_TAKE_PROFIT_PCT = float(os.getenv("MACRO_SWING_TAKE_PROFIT_PCT", "28.0"))
+MACRO_SWING_STOP_LOSS_PCT = float(os.getenv("MACRO_SWING_STOP_LOSS_PCT", "14.0"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
 # dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
@@ -1635,6 +1662,28 @@ def db_delete_symbol_tp_sl_override(broker: str, symbol: str) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def sync_macro_swing_tp_sl_override(broker: str, symbol: str, zone: str) -> None:
+    """get_macro_swing_bias tarafindan her sinyal donguse cagrilir. Sembol
+    5 yillik dip/zirve bolgesindeyken (zone DIP/PEAK) genis MACRO_SWING_
+    TAKE_PROFIT_PCT/STOP_LOSS_PCT override'ini otomatik kurar; bolgeden
+    cikinca (zone NONE) - SADECE bu override'i bizzat bu ozellik kurmussa
+    (yani mevcut override degerleri tam olarak MACRO_SWING_* ile
+    esleşiyorsa) - tekrar global varsayilanlara doner. Kullanicinin
+    admin panelinden manuel girdigi FARKLI bir override varsa dokunulmaz."""
+    existing = db_get_symbol_tp_sl_override(broker, symbol)
+    is_auto_macro_override = (
+        existing is not None
+        and safe_float(existing.get("take_profit_pct")) == MACRO_SWING_TAKE_PROFIT_PCT
+        and safe_float(existing.get("stop_loss_pct")) == MACRO_SWING_STOP_LOSS_PCT
+    )
+    if zone in ("DIP", "PEAK"):
+        if existing is None or is_auto_macro_override:
+            db_set_symbol_tp_sl_override(broker, symbol, MACRO_SWING_TAKE_PROFIT_PCT, MACRO_SWING_STOP_LOSS_PCT)
+    else:
+        if is_auto_macro_override:
+            db_delete_symbol_tp_sl_override(broker, symbol)
 
 
 def db_list_symbol_tp_sl_overrides() -> List[Dict[str, Any]]:
@@ -6212,6 +6261,108 @@ def get_market_cycle_bias(symbol: str, action: str, market: str) -> Dict[str, An
     return {"bias": bias, "qty_scale": qty_scale, "notes": [note], "regime": regime}
 
 
+def get_macro_swing_zone(symbol: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'BTC 120binden 60bine dustu, simdi 80binlerde
+    periyodik fiyat hareketleri oluyor - son 5 yildaki hareketleri tarayip
+    dip ve zirvelerde uzun vadeli long/short degerlendirelim'. Sadece
+    MACRO_SWING_SYMBOLS icindeki semboller (varsayilan BTCUSDT/ETHUSDT) icin
+    calisir. 5 yillik gunluk kapanis fiyatlarinin en dusuk/en yuksek
+    seviyelerini bulur, mevcut fiyatin bunlara yuzde mesafesini hesaplar ve
+    haftalik (gunluk kapanislardan resample edilmis) RSI ile teyit arar:
+      - DIP:  fiyat 5y dusukten <= MACRO_SWING_ZONE_PCT uzakta VE haftalik
+              RSI <= MACRO_SWING_RSI_OVERSOLD (asiri satim) -> uzun vadeli
+              LONG icin firsat bolgesi.
+      - PEAK: fiyat 5y yuksekten <= MACRO_SWING_ZONE_PCT uzakta VE haftalik
+              RSI >= MACRO_SWING_RSI_OVERBOUGHT (asiri alim) -> uzun vadeli
+              SHORT icin firsat bolgesi.
+      - NONE: digerleri (bolge disi ya da RSI teyidi yok).
+    Sonuc 6 saat cache'lenir (5 yillik veri sik degismez, yfinance yavas
+    olabilir); hata durumunda sessizce NONE'a duser (fail-open)."""
+    sym = str(symbol or "").upper()
+    ticker = MACRO_SWING_YF_TICKERS.get(sym)
+    if not ticker:
+        return {"zone": "NONE", "symbol": sym, "notes": []}
+
+    def _fetch():
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period="5y", interval="1d", auto_adjust=True)
+        closes = hist["Close"].dropna()
+        if len(closes) < 260:
+            raise RuntimeError("Yetersiz 5 yillik veri (en az ~1 yil gerekli)")
+        current = float(closes.iloc[-1])
+        low_5y = float(closes.min())
+        high_5y = float(closes.max())
+        pct_from_low = ((current / low_5y) - 1.0) * 100.0 if low_5y > 0 else 0.0
+        pct_from_high = ((current / high_5y) - 1.0) * 100.0 if high_5y > 0 else 0.0
+        weekly_closes = closes.resample("W").last().dropna().tolist()
+        weekly_rsi = compute_rsi(weekly_closes, period=14)
+        zone = "NONE"
+        if (
+            pct_from_low <= MACRO_SWING_ZONE_PCT
+            and weekly_rsi is not None
+            and weekly_rsi <= MACRO_SWING_RSI_OVERSOLD
+        ):
+            zone = "DIP"
+        elif (
+            pct_from_high >= -MACRO_SWING_ZONE_PCT
+            and weekly_rsi is not None
+            and weekly_rsi >= MACRO_SWING_RSI_OVERBOUGHT
+        ):
+            zone = "PEAK"
+        return {
+            "zone": zone,
+            "symbol": sym,
+            "reference_symbol": ticker,
+            "price": round(current, 2),
+            "low_5y": round(low_5y, 2),
+            "high_5y": round(high_5y, 2),
+            "pct_from_low": round(pct_from_low, 2),
+            "pct_from_high": round(pct_from_high, 2),
+            "weekly_rsi": round(weekly_rsi, 2) if weekly_rsi is not None else None,
+            "time": now_text(),
+        }
+    try:
+        return _cache_get_or_fetch(f"macro_swing_zone_{sym}", 21600, _fetch)
+    except Exception:
+        return {"zone": "NONE", "symbol": sym, "notes": []}
+
+
+def get_macro_swing_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
+    """get_macro_swing_zone sonucuna gore islem yonune bias ekler. Bolge
+    yonunde (DIP+BUY veya PEAK+SELL) islem GUCLU desteklenir (+20 bias) ve
+    is_macro_swing_entry=True donulur - cagiran taraf bunu gorunce
+    db_set_symbol_tp_sl_override ile MACRO_SWING_TAKE_PROFIT_PCT/
+    MACRO_SWING_STOP_LOSS_PCT (varsayilan %28/%14) uygular. Bolgeye KARSI
+    islem (DIP+SELL veya PEAK+BUY) caydirilir (-15 bias). Pozisyon
+    boyutlandirma bilerek DEGISTIRILMEZ (kullanicinin talebi: mevcut % risk
+    kurallariyla ayni kalsin) - sadece TP/SL genisletilir."""
+    sym = str(symbol or "").upper()
+    if sym not in MACRO_SWING_SYMBOLS or action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": [], "is_macro_swing_entry": False, "zone": "NONE"}
+    try:
+        zone_info = get_macro_swing_zone(sym)
+    except Exception:
+        return {"bias": 0, "notes": [], "is_macro_swing_entry": False, "zone": "NONE"}
+    zone = zone_info.get("zone", "NONE")
+    if zone == "NONE":
+        return {"bias": 0, "notes": [], "is_macro_swing_entry": False, "zone": "NONE"}
+    with_trend = (zone == "DIP" and action == "BUY") or (zone == "PEAK" and action == "SELL")
+    zone_label = "5 yıllık DİP" if zone == "DIP" else "5 yıllık ZİRVE"
+    if with_trend:
+        note = (
+            f"[Uzun Vadeli Makro Salınım] {sym} {zone_label} bölgesinde "
+            f"(5y düşükten %{zone_info.get('pct_from_low')}, 5y yüksekten %{zone_info.get('pct_from_high')}, "
+            f"haftalık RSI {zone_info.get('weekly_rsi')}): {action} güçlü destekleniyor, "
+            f"kâr/zarar hedefleri genişletildi (TP %{MACRO_SWING_TAKE_PROFIT_PCT:.0f} / SL %{MACRO_SWING_STOP_LOSS_PCT:.0f})."
+        )
+        return {"bias": 20, "notes": [note], "is_macro_swing_entry": True, "zone": zone, "zone_info": zone_info}
+    note = (
+        f"[Uzun Vadeli Makro Salınım] {sym} {zone_label} bölgesindeyken {action} yönü trende ters "
+        f"düştüğü için caydırılır."
+    )
+    return {"bias": -15, "notes": [note], "is_macro_swing_entry": False, "zone": zone, "zone_info": zone_info}
+
+
 def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
     """Kullanicinin talebi: 'genel piyasa dususlerinde (ör. bir cip sirketi
     yuzunden tum borsalar dustugunde) nakitte beklemek yerine guvenli limana
@@ -8875,6 +9026,24 @@ def _auto_trader_run_symbol(
         if market_cycle["notes"]:
             reason = (reason + " " + " ".join(market_cycle["notes"])).strip()
         market_cycle_qty_scale = market_cycle.get("qty_scale", 1.0)
+
+        # Kullanicinin talebi: 'BTC 120binden 60bine dustu, simdi 80binlerde
+        # periyodik fiyat hareketleri oluyor - 5 yillik hareketleri tarayip
+        # dip/zirvelerde uzun vadeli long/short acalim, kar/zarar limitleri
+        # farkli olsun'. Sadece BTCUSDT/ETHUSDT icin (bkz. MACRO_SWING_SYMBOLS):
+        # fiyat 5 yillik dip/zirveye yakinken VE haftalik RSI teyidi varsa
+        # trend yonundeki islem guclu desteklenir ve o sembol icin (bolgede
+        # kaldigi surece) genis TP/SL override'i otomatik uygulanir/kaldirilir.
+        macro_swing = get_macro_swing_bias(symbol, action, market, broker)
+        if macro_swing["bias"] != 0:
+            confidence = max(0, min(95, confidence + macro_swing["bias"]))
+        if macro_swing["notes"]:
+            reason = (reason + " " + " ".join(macro_swing["notes"])).strip()
+        if symbol.upper() in MACRO_SWING_SYMBOLS:
+            try:
+                sync_macro_swing_tp_sl_override(broker, symbol, macro_swing.get("zone", "NONE"))
+            except Exception:
+                pass
 
         # Kullanicinin talebi: 'ATR ekle' - volatiliteye gore pozisyon boyutu
         # otomatik ayarlanir (yuksek volatilitede kucult, dusuk volatilitede
