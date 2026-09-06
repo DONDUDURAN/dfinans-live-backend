@@ -2122,6 +2122,154 @@ HISTORICAL_MARKET_SCENARIOS: List[Dict[str, Any]] = [
             "onayı) aranmalıdır."
         ),
     },
+    # ---------------------------------------------------------------
+    # Ek: ABD enflasyon verisi sürprizi (13 Eylül 2022) ve büyük şirket
+    # bilanço/kâr uyarısı şokları
+    # ---------------------------------------------------------------
+    {
+        "id": "us_cpi_shock_sept13_2022",
+        "date": "2022-09-13",
+        "title": "ABD Ağustos 2022 Enflasyon (CPI) Verisinin Beklentilerin Üzerinde Gelmesi",
+        "category": "Para Politikası",
+        "event": "13 Eylül 2022'de açıklanan ABD Ağustos ayı TÜFE verisi yıllık %8.3 (beklenti %8.1) ve çekirdek TÜFE aylık %0.6 (beklenti %0.3) ile piyasanın 'enflasyon zirveyi gördü, Fed yavaşlayacak' beklentisini tamamen bozdu.",
+        "market_reaction": (
+            "S&P 500 tek günde %-4.32, Nasdaq %-5.16, Dow Jones %-3.94 düştü - 2020 COVID "
+            "çöküşünden bu yana en kötü tek günlük performans; tahvil getirileri sert yükseldi "
+            "(2 yıllık ABD tahvili %3.75'in üzerine çıktı), dolar endeksi güçlendi, kripto "
+            "paralar %-8-10 arası sert düştü. Olay, piyasanın 'iyi haber = Fed şahin kalır = "
+            "kötü haber' tersine dönmüş tepki mekanizmasının (enflasyon verisi beklenenden "
+            "yüksek → faiz artışı beklentisi büyür → risk varlıkları satılır) ders kitabı "
+            "niteliğinde bir örneği oldu. Sonraki aylarda benzer CPI sürprizlerinde piyasa "
+            "aynı örüntüyü (veri açıklanmadan önce oynaklık artışı, veri sonrası sert tek "
+            "yönlü hareket) tekrarladı."
+        ),
+    },
+    {
+        "id": "us_cpi_cooling_surprise_nov_2022",
+        "date": "2022-11-10",
+        "title": "ABD Ekim 2022 Enflasyon Verisinin Beklentilerin Altında Gelmesi (Ters Yönlü CPI Şoku)",
+        "category": "Para Politikası",
+        "event": "10 Kasım 2022'de açıklanan Ekim ayı TÜFE verisi yıllık %7.7 (beklenti %8.0) ile piyasanın umduğundan daha düşük geldi; bu, Eylül'deki şokun tam tersi yönde bir 'sürpriz' oldu.",
+        "market_reaction": (
+            "S&P 500 tek günde %+5.54, Nasdaq %+7.35 yükseldi (2020'den beri en güçlü günlerden "
+            "biri), tahvil getirileri sert düştü, dolar endeksi %-2'nin üzerinde geriledi, "
+            "kripto paralar ralli yaptı; bu olay CPI verisinin -yön ne olursa olsun- piyasada "
+            "en yüksek etkili makro veri noktalarından biri haline geldiğini gösterdi - hem "
+            "yukarı hem aşağı sürprizlerin tek günde %5+ endeks hareketi yaratabildiği "
+            "kanıtlandı."
+        ),
+    },
+    {
+        "id": "earnings_shock_meta_feb_2022",
+        "date": "2022-02-03",
+        "title": "Meta'nın Kullanıcı Kaybı ve Zayıf Kâr Beklentisi Açıklaması",
+        "category": "Şirket Bilançosu Şoku",
+        "event": "Meta (Facebook), tarihinde ilk kez günlük aktif kullanıcı sayısında düşüş bildirdi ve Apple'ın gizlilik değişikliklerinin (ATT) reklam gelirine $10 milyar zarar vereceğini açıkladı.",
+        "market_reaction": (
+            "Hisse tek günde %-26.4 çöktü - ABD borsa tarihinde bir şirketin tek günde kaybettiği "
+            "en yüksek piyasa değeri (~$230 milyar); diğer sosyal medya/reklam şirketleri "
+            "(Snap, Pinterest, Twitter) de benzer risklere maruz kaldığı için domino etkisiyle "
+            "sert düştü - tek bir şirketin bilanço uyarısının tüm bir sektörü aynı gün "
+            "yeniden fiyatlandırabildiğinin klasik örneği."
+        ),
+    },
+    {
+        "id": "earnings_shock_amazon_q1_2022",
+        "date": "2022-04-28",
+        "title": "Amazon'un Beklenmedik Zarar Açıklaması (Q1 2022)",
+        "category": "Şirket Bilançosu Şoku",
+        "event": "Amazon, pandemi sonrası aşırı büyütülmüş lojistik kapasitesi, artan işçilik/yakıt maliyetleri ve Rivian yatırımındaki değer kaybı nedeniyle 2015'ten beri ilk kez çeyreklik net zarar açıkladı.",
+        "market_reaction": (
+            "Hisse tek günde %-14 düştü, e-ticaret segmentinin kâr marjı erimesi yatırımcıları "
+            "şaşırttı; benzer 'pandemi döneminde aşırı kapasite artırıp şimdi daralan' sorunu "
+            "yaşayan diğer e-ticaret/lojistik şirketlerinde de (Shopify, FedEx) satış baskısı "
+            "gözlendi - pandemi sonrası 'talep normalleşmesi' temasının bilançolara yansıdığı "
+            "dönemin sembol olaylarından biri."
+        ),
+    },
+    {
+        "id": "earnings_shock_snap_q2_2022",
+        "date": "2022-05-23",
+        "title": "Snap Inc.'in Ani Kâr Uyarısı (Beklenmedik Profit Warning)",
+        "category": "Şirket Bilançosu Şoku",
+        "event": "Snap, çeyrek sonu gelmeden düzenlediği yatırımcı toplantısında makroekonomik ortamın beklenenden hızlı kötüleştiğini, gelir/kâr hedeflerini tutturamayacağını açıkladı.",
+        "market_reaction": (
+            "Snap hissesi tek günde %-43 çöktü (halka arzından beri en kötü günü); reklam "
+            "gelirine bağımlı tüm dijital reklam sektörü (Meta %-7.6, Pinterest %-23, Alphabet "
+            "%-5) aynı gün sert satıldı - bir şirketin 'sektörün öncü göstergesi' (bellwether) "
+            "olarak algılanmasının, tek başına açıklamasının tüm bir sektörü aşağı "
+            "çekebildiğinin örneği."
+        ),
+    },
+    {
+        "id": "earnings_shock_fedex_sept_2022",
+        "date": "2022-09-15",
+        "title": "FedEx'in Gelir Tahminini Geri Çekmesi (Küresel Talep Uyarısı)",
+        "category": "Şirket Bilançosu Şoku",
+        "event": "FedEx, küresel taşımacılık hacimlerinin özellikle Asya ve Avrupa'da beklenenden hızlı zayıfladığını belirterek yıllık kâr tahminini geri çekti ve CEO 'küresel resesyona giriyoruz' uyarısında bulundu.",
+        "market_reaction": (
+            "FedEx hissesi tek günde %-21 düştü (1980'lerden beri en kötü günü); UPS ve diğer "
+            "lojistik/nakliye şirketleri de düşüşe katıldı, S&P 500 sanayi sektörü genelinde "
+            "baskı oluştu - FedEx'in küresel ticaret hacminin öncü göstergesi olarak "
+            "görülmesi nedeniyle açıklama tek bir şirketin ötesinde makro resesyon endişesini "
+            "tetikledi."
+        ),
+    },
+    {
+        "id": "earnings_shock_target_walmart_2022",
+        "date": "2022-05-17..2022-05-18",
+        "title": "Target ve Walmart'ın Enflasyon Kaynaklı Kâr Marjı Çöküşü",
+        "category": "Şirket Bilançosu Şoku",
+        "event": "Walmart ve Target, tüketicilerin gıda/yakıta harcama kaydırması nedeniyle giyim/elektronik gibi yüksek marjlı ürünlerde stok fazlası oluştuğunu ve nakliye/işçilik maliyetlerinin marjları eritiğini açıkladı.",
+        "market_reaction": (
+            "Walmart hissesi %-6.8, Target hissesi %-24.9 düştü (Target'ın 1987'den beri en "
+            "kötü günü); perakende sektörü genelinde satış dalgası yaşandı - enflasyonun "
+            "tüketici harcama alışkanlıklarını değiştirerek büyük perakendecilerin kâr "
+            "marjlarını beklenmedik şekilde nasıl sıkıştırabildiğinin göstergesi oldu."
+        ),
+    },
+    {
+        "id": "earnings_shock_intel_2022_2023",
+        "date": "2022-07..2023-01",
+        "title": "Intel'in Art Arda Gelen Zayıf Bilançoları ve Pazar Payı Kaybı",
+        "category": "Şirket Bilançosu Şoku",
+        "event": "Intel, PC/sunucu çip talebinin daralması ve AMD/Nvidia'ya karşı pazar payı kaybı nedeniyle art arda çeyreklerde beklenti altı gelir, marj daralması ve temettü kesintisi (2023) açıkladı.",
+        "market_reaction": (
+            "Intel hissesi 2022 Temmuz bilançosunda tek günde %-8.6, sonraki çeyreklerde de "
+            "tekrarlayan düşüşler yaşadı, hisse 2022'de yıllık %-49 ile Dow Jones'un en kötü "
+            "performans gösteren bileşeni oldu; bir zamanlar sektör lideri olan bir şirketin "
+            "art arda gelen zayıf bilançolarla yatırımcı güveninin kademeli ve kalıcı biçimde "
+            "aşınmasının örneği."
+        ),
+    },
+    {
+        "id": "earnings_shock_boeing_2019_2024",
+        "date": "2019-2024",
+        "title": "Boeing'in Tekrarlayan Üretim/Kalite Sorunları Kaynaklı Bilanço Zararları",
+        "category": "Şirket Bilançosu Şoku",
+        "event": "Boeing, 737 MAX krizi (2019), pandemi kaynaklı uçak talebi çöküşü (2020) ve Ocak 2024'teki Alaska Airlines kapı paneli olayı sonrası üretim yavaşlatmaları nedeniyle yıllarca art arda milyarlarca dolarlık zarar açıkladı.",
+        "market_reaction": (
+            "Hisse her yeni kalite/güvenlik olayında (2019 uçuş yasağı, Ocak 2024 kapı paneli "
+            "olayında tek günde %-8) tekrar sert düşüş yaşadı; şirketin serbest nakit akışı "
+            "yıllarca negatif kaldı, kredi notu yatırım yapılabilir seviyenin sınırında kaldı - "
+            "tekrarlayan operasyonel/kalite krizlerinin bir şirketin bilançosunu YILLARCA "
+            "kalıcı olarak zayıflatabildiğinin uzun soluklu örneği."
+        ),
+    },
+    {
+        "id": "earnings_shock_nvidia_2023_2025_beats",
+        "date": "2023-05..2025",
+        "title": "Nvidia'nın Art Arda Beklentileri Fazlasıyla Aşan Bilançoları (Ters Yönlü Örnek)",
+        "category": "Şirket Bilançosu Şoku",
+        "event": "Nvidia, yapay zeka çip talebindeki patlama nedeniyle 2023'ten itibaren art arda çeyreklerde analist beklentilerini büyük farkla aşan gelir/kâr açıkladı (bazı çeyreklerde gelir bir önceki yıla göre %2-3 katına çıktı).",
+        "market_reaction": (
+            "Her bilanço açıklamasında hisse %+10-25 arası sıçradı, şirket piyasa değeri "
+            "olarak dünyanın en değerli şirketleri arasına girdi; bu, 'kötü bilanço = sert "
+            "düşüş' örüntüsünün TAM TERSİ - beklenti fazlasıyla aşan bilançoların da tek "
+            "başına bir hisseyi ve ilişkili tüm tedarik zincirini (TSMC, SK Hynix, Micron) "
+            "aynı gün nasıl yukarı çekebildiğinin örneği."
+        ),
+    },
 ]
 
 
