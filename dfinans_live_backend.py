@@ -4719,6 +4719,74 @@ WHALE_RATIO_EXTREME_HIGH = float(os.getenv("WHALE_RATIO_EXTREME_HIGH", "2.5"))
 WHALE_RATIO_EXTREME_LOW = float(os.getenv("WHALE_RATIO_EXTREME_LOW", "0.5"))
 
 
+def get_global_account_positioning(symbol: str) -> Dict[str, Any]:
+    """Binance Futures 'global account' (TUM hesaplar - kucuk/buyuk/perakende karisimi)
+    long/short pozisyon orani. get_whale_positioning() ('top trader'/buyuk hesap)
+    ile birlikte kullanildiginda, 'akilli para' (whale) ile 'kalabalik' (retail)
+    pozisyonlanmasi arasindaki AYRISMAYI (divergence) olcmek icin kullanilir -
+    bkz. get_whale_vs_retail_divergence(). Anahtar gerektirmez, herkese acik."""
+    def _fetch():
+        base = FUTURES_BASE
+        data = public_get(base, "/futures/data/globalLongShortAccountRatio", {"symbol": symbol, "period": "1h", "limit": 2})
+        if not isinstance(data, list) or not data:
+            raise RuntimeError("Global hesap pozisyon verisi bos döndü.")
+        row = data[-1]
+        ratio = safe_float(row.get("longShortRatio"))
+        long_acc = safe_float(row.get("longAccount")) * 100
+        short_acc = safe_float(row.get("shortAccount")) * 100
+        return {
+            "symbol": symbol,
+            "long_short_ratio": round(ratio, 3),
+            "long_account_pct": round(long_acc, 1),
+            "short_account_pct": round(short_acc, 1),
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"global_acct_pos:{symbol}", 900, _fetch)
+
+
+WHALE_VS_RETAIL_WHALE_LONG_MIN = float(os.getenv("WHALE_VS_RETAIL_WHALE_LONG_MIN", "1.5"))
+WHALE_VS_RETAIL_WHALE_SHORT_MAX = float(os.getenv("WHALE_VS_RETAIL_WHALE_SHORT_MAX", "0.7"))
+WHALE_VS_RETAIL_RETAIL_SHORT_MAX = float(os.getenv("WHALE_VS_RETAIL_RETAIL_SHORT_MAX", "0.8"))
+WHALE_VS_RETAIL_RETAIL_LONG_MIN = float(os.getenv("WHALE_VS_RETAIL_RETAIL_LONG_MIN", "1.3"))
+
+
+def get_whale_vs_retail_divergence(symbol: str) -> Dict[str, Any]:
+    """BTC/ETH gibi semboller icin 'buyuk hesaplar' (top trader/whale, bkz.
+    get_whale_positioning) ile 'tum hesaplar' (retail agirlikli kalabalik, bkz.
+    get_global_account_positioning) arasindaki pozisyonlanma AYRISMASINI olcer.
+    Bu, Coinglass gibi sitelerde 'top trader vs global account ratio' adiyla
+    yayinlanan klasik bir 'akilli para vs kalabalik' (smart money vs dumb money)
+    karsilastirmasidir:
+      - Whale'ler LONG agirlikli + kalabalik SHORT agirlikliyken -> tarihsel
+        olarak whale tarafinin haklici cikma ihtimali daha yuksek kabul edilir
+        (kalabalik genelde donuslerde/zirvede yanlis taraftadir) -> BUY'i destekler.
+      - Whale'ler SHORT agirlikli + kalabalik LONG agirlikliyken -> SELL'i destekler.
+      - Ikisi ayni yondeyse (ayrisma yok) -> notr, ekstra sinyal uretilmez.
+    Anahtar gerektirmez (Binance public futures data), 15 dk cache (whale/global
+    fonksiyonlarinin kendi cache'i uzerinden)."""
+    whale = get_whale_positioning(symbol)
+    retail = get_global_account_positioning(symbol)
+    if whale.get("error") or retail.get("error"):
+        return {"error": "Whale veya global hesap verisi alinamadi", "divergence": "NONE"}
+
+    whale_ratio = safe_float(whale.get("long_short_ratio"))
+    retail_ratio = safe_float(retail.get("long_short_ratio"))
+
+    divergence = "NONE"
+    if whale_ratio >= WHALE_VS_RETAIL_WHALE_LONG_MIN and 0 < retail_ratio <= WHALE_VS_RETAIL_RETAIL_SHORT_MAX:
+        divergence = "SMART_MONEY_LONG_RETAIL_SHORT"
+    elif 0 < whale_ratio <= WHALE_VS_RETAIL_WHALE_SHORT_MAX and retail_ratio >= WHALE_VS_RETAIL_RETAIL_LONG_MIN:
+        divergence = "SMART_MONEY_SHORT_RETAIL_LONG"
+
+    return {
+        "symbol": symbol,
+        "whale_long_short_ratio": whale_ratio,
+        "retail_long_short_ratio": retail_ratio,
+        "divergence": divergence,
+        "time": now_text(),
+    }
+
+
 def get_geopolitical_risk_signal() -> Dict[str, Any]:
     """GDELT Project (ucretsiz, anahtar gerekmez) uzerinden savas/jeopolitik gerginlik
     haberlerinin hacim ve ton (tone) ortalamasini olcer. Cok negatif ton + yuksek hacim
@@ -6142,6 +6210,32 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
             else:
                 bias += 3
                 notes.append(f"Büyük hesaplar aşırı SHORT yığılmış (oran {ratio:.2f}): olası short squeeze BUY'ı destekler.")
+
+    divergence_info = get_whale_vs_retail_divergence(symbol)
+    if not divergence_info.get("error"):
+        div = divergence_info.get("divergence")
+        if div == "SMART_MONEY_LONG_RETAIL_SHORT":
+            if action == "BUY":
+                bias += 5
+                notes.append(
+                    f"Whale/akıllı para LONG ağırlıklı (oran {divergence_info['whale_long_short_ratio']:.2f}), "
+                    f"kalabalık/retail SHORT ağırlıklı (oran {divergence_info['retail_long_short_ratio']:.2f}): "
+                    "bu ayrışma tarihsel olarak whale tarafını (BUY) destekler."
+                )
+            else:
+                bias -= 3
+                notes.append("Whale'ler LONG, kalabalık SHORT ağırlıklı: SELL için ters ayrışma sinyali var.")
+        elif div == "SMART_MONEY_SHORT_RETAIL_LONG":
+            if action == "SELL":
+                bias += 5
+                notes.append(
+                    f"Whale/akıllı para SHORT ağırlıklı (oran {divergence_info['whale_long_short_ratio']:.2f}), "
+                    f"kalabalık/retail LONG ağırlıklı (oran {divergence_info['retail_long_short_ratio']:.2f}): "
+                    "bu ayrışma tarihsel olarak whale tarafını (SELL) destekler."
+                )
+            else:
+                bias -= 3
+                notes.append("Whale'ler SHORT, kalabalık LONG ağırlıklı: BUY için ters ayrışma sinyali var.")
 
     geo = get_geopolitical_risk_signal()
     if not geo.get("error"):
@@ -15446,6 +15540,10 @@ def market_signals_external():
     except Exception as e:
         whale_positioning = {"error": str(e)}
     try:
+        whale_vs_retail_divergence = get_whale_vs_retail_divergence(symbol)
+    except Exception as e:
+        whale_vs_retail_divergence = {"error": str(e)}
+    try:
         geopolitical_risk = get_geopolitical_risk_signal()
     except Exception as e:
         geopolitical_risk = {"error": str(e)}
@@ -15468,6 +15566,7 @@ def market_signals_external():
         "macro_regime": macro_regime,
         "carry_trade_risk": carry_trade_risk,
         "whale_positioning": whale_positioning,
+        "whale_vs_retail_divergence": whale_vs_retail_divergence,
         "geopolitical_risk": geopolitical_risk,
         "regulatory_activity": regulatory_activity,
         "news_sentiment": news_sentiment,
