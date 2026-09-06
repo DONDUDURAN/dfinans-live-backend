@@ -2517,8 +2517,12 @@ _STRATEGY_SIGNAL_TAGS: Dict[str, List[str]] = {
     "MOMENTUM": ["momentum sinyali", "momentum (24s"],
     "EMIR_AKISI": ["emir akışı sinyali", "emir akışı"],
     "KORELASYON_LAG": ["korelasyon", "lag", "hedge"],
-    "DIS_SINYAL": ["sec dosyalama", "haber sentiment", "fear", "greed", "funding", "whale", "jeopolitik"],
-    "MAKRO_RISK": ["makro", "balon", "asiri deger", "aşırı değer", "manipulasyon", "manipülasyon"],
+    "DIS_SINYAL": ["sec dosyalama", "haber sentiment", "fear", "greed", "funding", "jeopolitik"],
+    "MAKRO_RISK": ["makro rejim", "balon", "asiri deger", "aşırı değer"],
+    "CARRY_TRADE": ["carry trade"],
+    "WHALE_POZISYON": ["büyük hesaplar", "buyuk hesaplar", "long squeeze", "short squeeze"],
+    "WHALE_RETAIL_AYRISMA": ["akıllı para", "akilli para", "kalabalık", "kalabalik"],
+    "MANIPULASYON_PUMP_DUMP": ["manipulasyon", "manipülasyon", "wash-trading", "pump", "dump", "spoofing"],
     "SEANS_SIRASI": ["seans-sırası", "seans-sirasi", "risk_on", "risk_off"],
     "OFF_MARKET": ["mesai-dışı", "mesai-disi", "off-market"],
     "FX_DONUSUM": ["otomatik fx", "fx cevrim", "fx çevrim"],
@@ -2598,7 +2602,11 @@ def compute_strategy_analysis(rows: List[Dict[str, Any]], base_stats: Dict[str, 
         "EMIR_AKISI": "Sadece emir defteri (bid/ask) sinyali",
         "KORELASYON_LAG": "Korelasyon/lag/hedge motoru sinyali",
         "DIS_SINYAL": "Dış sinyaller (haber, Fear&Greed, funding, jeopolitik)",
-        "MAKRO_RISK": "Makro/balon/manipülasyon riski sinyali",
+        "MAKRO_RISK": "Makro rejim/balon riski sinyali",
+        "CARRY_TRADE": "Yen carry trade çözülme riski sinyali",
+        "WHALE_POZISYON": "Büyük hesap (whale) aşırı pozisyonlanma/squeeze sinyali",
+        "WHALE_RETAIL_AYRISMA": "Akıllı para (whale) vs kalabalık (retail) ayrışma sinyali",
+        "MANIPULASYON_PUMP_DUMP": "Manipülasyon/pump&dump/wash-trading uyarı sinyali",
         "SEANS_SIRASI": "Bölgeler-arası seans-sırası (Asya→UK→ABD) sinyali",
         "OFF_MARKET": "Mesai-dışı (off-market) fiyat referanslı kararlar",
         "FX_DONUSUM": "Otomatik döviz (FX) çevrimli işlemler",
@@ -9678,7 +9686,7 @@ def _auto_trader_run_symbol(
                                     realized_pnl=pnl_amount,
                                     realized_pnl_pct=pnl_pct,
                                     close_reason="AI_KARARI",
-                                    detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
+                                    detail=f"AI SELL kararıyla kapandı: {reason[:600]}",
                                 )
                                 db_delete_spot_position(symbol)
                                 maybe_open_chain_order("BINANCE_SPOT", symbol, qty, exit_price)
@@ -10177,7 +10185,7 @@ def _auto_trader_run_symbol(
                                 realized_pnl=pnl_amount,
                                 realized_pnl_pct=pnl_pct,
                                 close_reason="AI_KARARI",
-                                detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
+                                detail=f"AI SELL kararıyla kapandı: {reason[:600]}",
                             )
                             maybe_open_chain_order("IBKR", symbol, filled_qty, exit_price)
                         if pre_close_short_position and not execution.get("error") and safe_float(execution.get("filled")) > 0:
@@ -10200,7 +10208,7 @@ def _auto_trader_run_symbol(
                                 realized_pnl=pnl_amount,
                                 realized_pnl_pct=pnl_pct,
                                 close_reason="AI_KARARI",
-                                detail=f"AI BUY (buy to cover) kararıyla short pozisyon kapandı: {reason[:200]}",
+                                detail=f"AI BUY (buy to cover) kararıyla short pozisyon kapandı: {reason[:600]}",
                             )
                 else:
                     execution = {
@@ -10369,7 +10377,7 @@ def _auto_trader_run_symbol(
                                 realized_pnl=pnl_amount,
                                 realized_pnl_pct=pnl_pct,
                                 close_reason="AI_KARARI",
-                                detail=f"AI {action} kararıyla kapandı: {reason[:200]}",
+                                detail=f"AI {action} kararıyla kapandı: {reason[:600]}",
                             )
                             maybe_open_chain_order("BINANCE_FUTURES", symbol, closed_qty, exit_price)
                 else:
