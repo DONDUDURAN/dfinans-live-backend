@@ -1068,6 +1068,34 @@ def init_runtime_db() -> None:
                 )
                 """
             )
+            # Kullanicinin bildirdigi sorun: 'USO pozisyonu kapanmis ama dfinansda
+            # (AI Islem Gunlugu / position_closures) gozukmuyor'. Kok neden: IBKR
+            # pozisyonlari (Binance spot'un aksine, bkz. spot_positions +
+            # reconcile_spot_positions) hicbir DB tablosunda takip edilmiyordu -
+            # her zaman canli olarak brokerdan (ibkr_positions_snapshot) sorgulanip
+            # kaynak-tek-gercek kabul ediliyordu. Bu, botun KENDI actigi/kapattigi
+            # islemler icin sorun degil (o an execution basarili olunca
+            # db_record_position_closure zaten cagriliyor) - ama kullanici TWS/
+            # mobil uygulamadan MANUEL olarak (bot disinda) bir pozisyonu kapatirsa,
+            # bunu tespit edip kaydedecek hicbir mekanizma yoktu. Bu tablo, her
+            # mutabakat dongusunde (bkz. reconcile_ibkr_positions) en son bilinen
+            # IBKR pozisyon anlik goruntusunu tutar; bir sonraki dongude bir sembol
+            # bu tabloda VAR ama artik brokerda YOKSA, harici/manuel kapatma
+            # tespit edilmis olur ve position_closures + auto_history'ye yazilir.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ibkr_position_state (
+                    symbol TEXT PRIMARY KEY,
+                    side TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    asset_type TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ibkr_lse_stop_loss_grandfather (
@@ -1375,6 +1403,53 @@ def db_get_spot_position(symbol: str) -> Optional[Dict[str, Any]]:
     if not row:
         return None
     return dict(row)
+
+
+def db_list_ibkr_position_state() -> List[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT symbol, side, qty, entry_price, asset_type, exchange, currency, updated_at "
+                "FROM ibkr_position_state"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def db_upsert_ibkr_position_state(
+    symbol: str, side: str, qty: float, entry_price: float,
+    asset_type: str, exchange: str, currency: str,
+) -> None:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO ibkr_position_state(symbol, side, qty, entry_price, asset_type, exchange, currency, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    side=excluded.side, qty=excluded.qty, entry_price=excluded.entry_price,
+                    asset_type=excluded.asset_type, exchange=excluded.exchange, currency=excluded.currency,
+                    updated_at=excluded.updated_at
+                """,
+                (symbol, side, qty, entry_price, asset_type, exchange, currency, now_text()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_delete_ibkr_position_state(symbol: str) -> None:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute("DELETE FROM ibkr_position_state WHERE symbol = ?", (symbol,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def db_upsert_spot_position(symbol: str, quantity: float, avg_cost: float, opened_at: Optional[str] = None) -> None:
@@ -10663,6 +10738,7 @@ def check_and_enforce_loss_circuit_breaker() -> None:
 
 def _auto_trader_loop():
     global _SPOT_RECONCILE_LAST_TS, _IBKR_ORDER_RECONCILE_LAST_TS, _LOSS_BREAKER_LAST_TS
+    global _IBKR_POSITION_RECONCILE_LAST_TS
     while True:
         if (time.time() - _SPOT_RECONCILE_LAST_TS) >= _SPOT_RECONCILE_INTERVAL_SEC:
             _SPOT_RECONCILE_LAST_TS = time.time()
@@ -10676,6 +10752,14 @@ def _auto_trader_loop():
             try:
                 if IBKR_RUNTIME.get("connected"):
                     reconcile_pending_ibkr_order_fills()
+            except Exception:
+                pass
+
+        if (time.time() - _IBKR_POSITION_RECONCILE_LAST_TS) >= _IBKR_POSITION_RECONCILE_INTERVAL_SEC:
+            _IBKR_POSITION_RECONCILE_LAST_TS = time.time()
+            try:
+                if IBKR_RUNTIME.get("connected"):
+                    reconcile_ibkr_positions()
             except Exception:
                 pass
 
@@ -12207,6 +12291,149 @@ def reconcile_spot_positions() -> Dict[str, Any]:
                 result["removed"].append(symbol)
             except Exception:
                 continue
+    return result
+
+
+_IBKR_POSITION_RECONCILE_INTERVAL_SEC = 120
+_IBKR_POSITION_RECONCILE_LAST_TS = 0.0
+
+
+def reconcile_ibkr_positions() -> Dict[str, Any]:
+    """Kullanicinin bildirdigi sorun: 'USO pozisyonu kapanmis ama dfinansda
+    (AI İşlem Günlüğü / position_closures) gözükmüyor'. IBKR pozisyonlari
+    (Binance spot'un aksine) hicbir DB tablosunda takip edilmiyordu - botun
+    KENDI actigi/kapattigi islemler icin sorun degil (execution basarili
+    olunca db_record_position_closure zaten cagriliyor), ama kullanici TWS/
+    mobil uygulamadan (ornegin 2FA/manuel giris sirasinda) bot DISINDA bir
+    pozisyonu kapatirsa bunu tespit edip kaydedecek hicbir mekanizma yoktu.
+
+    Bu fonksiyon her dongude canli IBKR pozisyonlarinin anlik goruntusunu
+    ibkr_position_state tablosuyla karsilastirir:
+    - Onceki dongude VAR olup simdi ARTIK YOK olan bir sembol -> harici/manuel
+      kapatma tespit edilir. Kesin kapanis fiyati bilinmedigi icin (bot disinda
+      gerceklesen emrin fill fiyatina erisimimiz yok) o anki piyasa fiyati
+      yaklasik cikis fiyati olarak kullanilir - bu acikca detail metninde
+      belirtilir. position_closures + auto_history'ye 'MANUAL' nedeniyle
+      yaziliyor ki hem /position-closures hem /ai-decision-center (AI Islem
+      Gunlugu) ekranlarinda gorunsun.
+    - Botun KENDI az once kapattigi bir pozisyonla CAKISMAYI (cift kayit)
+      onlemek icin: son 15 dakika icinde ayni sembol/broker icin zaten bir
+      position_closures kaydi varsa, harici kapanis kaydi ATLANIR (bot zaten
+      kendi kaydini yazmis demektir).
+    - IBKR baglantisi kopuksa (ibkr_positions_snapshot hata firlatirsa) HICBIR
+      SEY yapilmaz (fail-open) - aksi halde bir baglanti kopuklugu tum acik
+      pozisyonlari 'kapandi' sanip yanlis kayitlar olusturabilirdi.
+    """
+    result: Dict[str, Any] = {"closed_detected": [], "error": ""}
+    try:
+        current = ibkr_positions_snapshot()
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+    current_by_symbol = {str(p.get("symbol", "")).upper(): p for p in current}
+    try:
+        previous = db_list_ibkr_position_state()
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+    previous_by_symbol = {str(p.get("symbol", "")).upper(): p for p in previous}
+
+    # 1) Guncel anlik goruntuyu kaydet/guncelle (bir sonraki dongu icin baz).
+    for symbol, pos in current_by_symbol.items():
+        try:
+            db_upsert_ibkr_position_state(
+                symbol=symbol,
+                side=str(pos.get("side", "")).upper(),
+                qty=abs(safe_float(pos.get("size") or pos.get("position"))),
+                entry_price=safe_float(pos.get("entry_price") or pos.get("avgCost")),
+                asset_type=str(pos.get("asset_type", "") or pos.get("secType", "")),
+                exchange=str(pos.get("exchange", "")),
+                currency=str(pos.get("currency", "")),
+            )
+        except Exception:
+            continue
+
+    # 2) Onceden acik olup simdi artik brokerda olmayan (bot disinda kapanmis)
+    # pozisyonlari tespit et.
+    for symbol, prev in previous_by_symbol.items():
+        if symbol in current_by_symbol:
+            continue
+        try:
+            recent = [
+                r for r in db_recent_position_closures(20)
+                if str(r.get("broker", "")).upper() == "IBKR"
+                and str(r.get("symbol", "")).upper() == symbol
+            ]
+            already_recorded = False
+            for r in recent:
+                try:
+                    created = datetime.strptime(str(r.get("created_at", "")), "%Y-%m-%d %H:%M:%S")
+                    if (datetime.now() - created).total_seconds() < 900:
+                        already_recorded = True
+                        break
+                except Exception:
+                    continue
+            if already_recorded:
+                db_delete_ibkr_position_state(symbol)
+                continue
+
+            side = str(prev.get("side", "")).upper() or "LONG"
+            qty = safe_float(prev.get("qty"))
+            entry_price_native = safe_float(prev.get("entry_price"))
+            asset_type = str(prev.get("asset_type", "") or "STK")
+            exchange = str(prev.get("exchange", "") or "SMART")
+            currency = str(prev.get("currency", "") or "USD")
+            if qty <= 0 or entry_price_native <= 0:
+                db_delete_ibkr_position_state(symbol)
+                continue
+
+            exit_price_native = entry_price_native
+            try:
+                snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency)
+                exit_price_native = safe_float(snap.get("price")) or entry_price_native
+            except Exception:
+                pass
+
+            entry_price = get_ibkr_price_usd_equivalent(entry_price_native, exchange, currency)
+            exit_price = get_ibkr_price_usd_equivalent(exit_price_native, exchange, currency)
+            if side == "SHORT":
+                pnl_amount = (entry_price - exit_price) * qty
+            else:
+                pnl_amount = (exit_price - entry_price) * qty
+            pnl_pct = ((pnl_amount / (entry_price * qty)) * 100.0) if entry_price and qty else 0.0
+
+            detail = (
+                f"Pozisyon IBKR hesabında uygulama dışında (TWS/mobil - manuel) kapatılmış "
+                f"olarak tespit edildi. Kesin çıkış fiyatı botun elinde olmadığı için tespit "
+                f"anındaki piyasa fiyatı (~{exit_price_native:.4f}) yaklaşık çıkış fiyatı "
+                f"olarak kullanıldı, gerçekleşen K/Z bu nedenle yaklaşık bir değerdir."
+            )
+            db_record_position_closure(
+                broker="IBKR",
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                realized_pnl=pnl_amount,
+                realized_pnl_pct=pnl_pct,
+                close_reason="MANUAL",
+                detail=detail,
+            )
+            db_insert_auto_history(
+                broker="IBKR",
+                symbol=symbol,
+                action="MANUEL_KAPANIS",
+                confidence=0,
+                price=exit_price_native,
+                reason=detail,
+                execution={"simulated": True, "message": "Mutabakat: harici (manuel) kapanış tespit edildi."},
+            )
+            db_delete_ibkr_position_state(symbol)
+            result["closed_detected"].append(symbol)
+        except Exception:
+            continue
     return result
 
 
@@ -14745,6 +14972,60 @@ def ibkr_positions():
         return jsonify({"ok": False, "positions": [], "data": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
 
 
+@app.route("/ibkr/executions", methods=["GET"])
+def ibkr_executions_route():
+    """IBKR hesabinin GERCEK islem/dolum (execution/fill) gecmisini dogrudan
+    broker'dan sorgular (ib.reqExecutions() - bizim DB'mizde HICBIR sekilde
+    takip edilmeyen, IBKR'in kendi kayitlarindan gelen kesin veri). Kullanicinin
+    bildirdigi 'pozisyon kapandi ama dfinansda gözükmüyor' sorununda, bot disinda
+    (TWS/mobil, manuel) gerceklesen bir kapanisin GERCEK fiyat/zamanini geriye
+    donuk bulup dogrulamak/kaydetmek icin eklendi. ?symbol=USO ile filtrelenebilir,
+    varsayilan olarak son gunun tum execution'larini dondurur."""
+    symbol = request.args.get("symbol", "").strip().upper()
+    try:
+        days = int(request.args.get("days", "2"))
+    except Exception:
+        days = 2
+
+    def _run(ib, ibs):
+        exec_filter = ibs.ExecutionFilter()
+        if symbol:
+            exec_filter.symbol = symbol
+        if IBKR_ACCOUNT:
+            exec_filter.acctCode = IBKR_ACCOUNT
+        cutoff = datetime.now() - timedelta(days=max(days, 0))
+        exec_filter.time = cutoff.strftime("%Y%m%d %H:%M:%S")
+        fills = ib.reqExecutions(exec_filter)
+        rows = []
+        for f in fills:
+            try:
+                ex = f.execution
+                c = f.contract
+                rows.append({
+                    "symbol": getattr(c, "symbol", "-"),
+                    "asset_type": getattr(c, "secType", "-"),
+                    "exchange": getattr(c, "exchange", "-"),
+                    "currency": getattr(c, "currency", "-"),
+                    "side": getattr(ex, "side", "-"),
+                    "shares": safe_float(getattr(ex, "shares", 0)),
+                    "price": safe_float(getattr(ex, "price", 0)),
+                    "avg_price": safe_float(getattr(ex, "avgPrice", 0)),
+                    "time": str(getattr(ex, "time", "")),
+                    "order_id": getattr(ex, "orderId", None),
+                    "exec_id": getattr(ex, "execId", ""),
+                })
+            except Exception:
+                continue
+        rows.sort(key=lambda r: r.get("time", ""))
+        return rows
+
+    try:
+        rows = ibkr_execute(_run, timeout=30.0) or []
+        return jsonify({"ok": True, "executions": rows, "count": len(rows), "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "executions": [], "error": str(e), "last_update": now_text()}), 500
+
+
 @app.route("/ibkr-positions", methods=["GET"])
 def ibkr_positions_alias():
     # Mobil uygulama bu path'i cagiriyor; /ibkr/positions ile ayni veriyi dondurur.
@@ -15447,6 +15728,22 @@ def spot_auto_trader_reconcile():
         return jsonify({"ok": not result.get("error"), **result, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "added": [], "removed": [], "last_update": now_text()}), 200
+
+
+@app.route("/auto-trader/ibkr/reconcile", methods=["POST"])
+def ibkr_auto_trader_reconcile():
+    """IBKR'deki gercek acik pozisyonlari, botun en son bildigi anlik goruntuyle
+    (ibkr_position_state) manuel olarak eslestirir - bot disinda (TWS/mobil,
+    manuel) kapatilmis bir pozisyon varsa tespit edip position_closures +
+    AI İşlem Günlüğü'ne kaydeder. Normalde arka planda 2 dakikada bir otomatik
+    calisir (bkz. reconcile_ibkr_positions) - bu endpoint anlik/manuel tetikleme
+    icindir (kullanicinin bildirdigi 'pozisyon kapandi ama dfinansda gözükmüyor'
+    sorunu icin)."""
+    try:
+        result = reconcile_ibkr_positions()
+        return jsonify({"ok": not result.get("error"), **result, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "closed_detected": [], "last_update": now_text()}), 200
 
 
 @app.route("/chain-order/status", methods=["GET"])
