@@ -15804,6 +15804,33 @@ def position_closures_manual_record():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/position-closures/delete-by-symbol", methods=["POST"])
+def position_closures_delete_by_symbol():
+    """position_closures'a yanlislikla (ornegin test amacli) eklenmis bir
+    kaydi temizlemek icindir - bu tablo normalde HICBIR ZAMAN otomatik
+    silinmez, bu yuzden hatali/test kayitlarini duzeltmenin tek yolu budur."""
+    try:
+        body = request.get_json(silent=True) or {}
+        broker = str(body.get("broker", "")).upper().strip()
+        symbol = str(body.get("symbol", "")).upper().strip()
+        if not broker or not symbol:
+            return jsonify({"ok": False, "error": "broker ve symbol zorunludur."}), 400
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                cur = conn.execute(
+                    "DELETE FROM position_closures WHERE broker = ? AND symbol = ?",
+                    (broker, symbol),
+                )
+                conn.commit()
+                deleted = cur.rowcount
+            finally:
+                conn.close()
+        return jsonify({"ok": True, "deleted": deleted, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/chain-order/status", methods=["GET"])
 def chain_order_status():
     """Zincir emir ozelligi ayarlarini ve son tetiklenen zincir emirleri dondurur.
