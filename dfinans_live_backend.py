@@ -15746,6 +15746,64 @@ def ibkr_auto_trader_reconcile():
         return jsonify({"ok": False, "error": str(e), "closed_detected": [], "last_update": now_text()}), 200
 
 
+@app.route("/position-closures/manual-record", methods=["POST"])
+def position_closures_manual_record():
+    """IBKR/Binance'de bot disinda (manuel/TWS/mobil) kapanmis ve
+    reconcile_ibkr_positions/reconcile_spot_positions tarafindan (henuz bir
+    onceki-anlik-goruntu baz alinamadigi icin) YAKALANAMAMIS gecmis bir
+    kapanisi elle (geriye donuk) kaydetmek icindir - kullanicinin bildirdigi
+    'USO pozisyonu kapandi ama dfinansda hic gözükmüyor' sorununda, bu tespit
+    mekanizmasi YENI eklendigi icin ondan ONCE gerceklesen kapanislar icin
+    tek yol budur. entry_price bilinmiyorsa 0 gonderilebilir (bu durumda
+    gerceklesen K/Z hesaplanamaz, sadece kapanis islemi kayit altina alinir)."""
+    try:
+        body = request.get_json(silent=True) or {}
+        broker = str(body.get("broker", "")).upper().strip()
+        symbol = str(body.get("symbol", "")).upper().strip()
+        side = str(body.get("side", "LONG")).upper().strip()
+        qty = safe_float(body.get("qty"))
+        entry_price = safe_float(body.get("entry_price"))
+        exit_price = safe_float(body.get("exit_price"))
+        close_reason = str(body.get("close_reason", "MANUAL")).upper().strip() or "MANUAL"
+        detail = str(body.get("detail", "")).strip()
+        if not broker or not symbol or qty <= 0 or exit_price <= 0:
+            return jsonify({"ok": False, "error": "broker, symbol, qty (>0) ve exit_price (>0) zorunludur."}), 400
+        if entry_price > 0:
+            if side == "SHORT":
+                pnl_amount = (entry_price - exit_price) * qty
+            else:
+                pnl_amount = (exit_price - entry_price) * qty
+            pnl_pct = (pnl_amount / (entry_price * qty)) * 100.0
+        else:
+            pnl_amount = 0.0
+            pnl_pct = 0.0
+            detail = (detail + " (Giriş fiyatı bilinmediği için gerçekleşen K/Z hesaplanamadı.)").strip()
+        db_record_position_closure(
+            broker=broker,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            realized_pnl=pnl_amount,
+            realized_pnl_pct=pnl_pct,
+            close_reason=close_reason,
+            detail=detail or "Manuel (geriye dönük) kayıt.",
+        )
+        db_insert_auto_history(
+            broker=broker,
+            symbol=symbol,
+            action="MANUEL_KAPANIS",
+            confidence=0,
+            price=exit_price,
+            reason=detail or "Manuel (geriye dönük) kayıt.",
+            execution={"simulated": True, "message": "Manuel (geriye dönük) kapanış kaydı."},
+        )
+        return jsonify({"ok": True, "realized_pnl": pnl_amount, "realized_pnl_pct": pnl_pct, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/chain-order/status", methods=["GET"])
 def chain_order_status():
     """Zincir emir ozelligi ayarlarini ve son tetiklenen zincir emirleri dondurur.
