@@ -64,7 +64,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY",
 BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
 LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
 IBKR_ENABLED = os.getenv("IBKR_ENABLED", "true").lower() == "true"  # Re-enabled for USD/US markets only
-IBKR_FORCE_DISABLED = True  # Disable IBKR auto-trading (performance issues, 2FA outages)
+IBKR_FORCE_DISABLED = False  # Re-enable IBKR with optimization (blacklist: HSBA,SHEL,RIO,ULVR,BMW,SAP)
 IBKR_US_ONLY = True  # STRICT: US markets only
 # Railway internal networking: ibkr-gateway service connects as ibkr-gateway.railway.internal:4003
 # Local: 127.0.0.1:7497 (TWS) or ibkr-gateway:4003 (docker-compose)
@@ -508,7 +508,7 @@ IBKR_AUTO_TRADER.asset_type = "STK"
 IBKR_AUTO_TRADER.exchange = "SMART"
 IBKR_AUTO_TRADER.currency = "USD"
 IBKR_AUTO_TRADER.quantity = float(os.getenv("IBKR_AUTO_QUANTITY", "1"))
-IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "60"))
+IBKR_AUTO_TRADER.min_confidence = int(os.getenv("IBKR_AUTO_MIN_CONFIDENCE", "75"))  # Increased from 60 to filter weak signals
 IBKR_AUTO_TRADER.interval_sec = int(os.getenv("IBKR_AUTO_INTERVAL_SEC", "30"))
 IBKR_AUTO_TRADER.mode = AUTO_TRADER.mode
 IBKR_AUTO_TRADER.enabled = os.getenv("IBKR_AUTO_TRADER_ENABLED", "true").lower() == "true"
@@ -663,7 +663,7 @@ SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "
 SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "1.2"))
 BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "3.0"))  # Reduced from 6.0 for risk:reward 1:1.5
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "2.0"))
-IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "6.0"))
+IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "3.0"))  # Reduced from 6.0 for risk:reward 1:1.5
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "2.0"))
 # Kullanicinin talebi: son 1 haftalik islem gecmisi analiz edilince (bkz.
 # /position-closures) SHEL ve HSBA (ikisi de LSE/Londra hisseleri) 3'er kez
