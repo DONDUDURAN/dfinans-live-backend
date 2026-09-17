@@ -64,7 +64,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY",
 BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
 LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
 IBKR_ENABLED = os.getenv("IBKR_ENABLED", "true").lower() == "true"  # Re-enabled for USD/US markets only
-IBKR_FORCE_DISABLED = False  # Re-enable IBKR
+IBKR_FORCE_DISABLED = True  # Disable IBKR auto-trading (performance issues, 2FA outages)
 IBKR_US_ONLY = True  # STRICT: US markets only
 # Railway internal networking: ibkr-gateway service connects as ibkr-gateway.railway.internal:4003
 # Local: 127.0.0.1:7497 (TWS) or ibkr-gateway:4003 (docker-compose)
@@ -241,7 +241,7 @@ AUTO_TRADER.currency = "USDT"
 AUTO_TRADER.mode = "live"  # Live trading
 AUTO_TRADER.quantity = 0.01
 AUTO_TRADER.interval_sec = 20  # Check every 20 seconds (TP/SL de bu dongude kontrol edilir)
-AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "82"))
+AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "90"))  # Increased from 82 to filter DIGER_GENEL weak signals
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
 
@@ -661,7 +661,7 @@ SHADOW_WATCHLIST_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_WATCHLIST_TAKE_PROFIT
 SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT", "6.0"))
 SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
 SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "1.2"))
-BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "6.0"))
+BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "3.0"))  # Reduced from 6.0 for risk:reward 1:1.5
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "2.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "6.0"))
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "2.0"))
@@ -710,7 +710,12 @@ IBKR_STOP_LOSS_COOLDOWN_HOURS = float(os.getenv("IBKR_STOP_LOSS_COOLDOWN_HOURS",
 # ayrilmis) genisletilebilir/degistirilebilir.
 IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
     s.strip().upper()
-    for s in os.getenv("IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,SHEL,RIO,ULVR").split(",")
+    for s in os.getenv("IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,SHEL,RIO,ULVR,BMW,SAP").split(",")
+    if s.strip()
+)
+BINANCE_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
+    s.strip().upper()
+    for s in os.getenv("BINANCE_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,BMW,SHEL,SAP").split(",")
     if s.strip()
 )
 
@@ -9044,6 +9049,9 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
     # acilabiliyor, STK gibi tamamen Cmt/Paz kapali degil.
     _is_weekend_scan = broker == "IBKR" and datetime.utcnow().weekday() >= 5
     for symbol in symbols:
+        # Check if Binance symbol is excluded (poor performance)
+        if broker == "BINANCE" and symbol.upper() in BINANCE_AUTO_TRADE_EXCLUDED_SYMBOLS:
+            continue
         if _is_weekend_scan:
             _sym_asset_type = get_ibkr_symbol_market_info(symbol).get("asset_type", asset_type)
             if _sym_asset_type == "STK":
