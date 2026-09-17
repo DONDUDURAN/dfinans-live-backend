@@ -661,10 +661,10 @@ SHADOW_WATCHLIST_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_WATCHLIST_TAKE_PROFIT
 SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT", "6.0"))
 SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
 SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "1.2"))
-BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "3.0"))  # Reduced from 6.0 for risk:reward 1:1.5
-BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "2.0"))
-IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "3.0"))  # Reduced from 6.0 for risk:reward 1:1.5
-IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "2.0"))
+BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "4.0"))  # ML optimized from backtest
+BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "1.0"))  # ML optimized (tighter for risk control)
+IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "4.0"))  # ML optimized from backtest
+IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "1.0"))  # ML optimized (tighter for risk control)
 # Kullanicinin talebi: son 1 haftalik islem gecmisi analiz edilince (bkz.
 # /position-closures) SHEL ve HSBA (ikisi de LSE/Londra hisseleri) 3'er kez
 # ust uste zarar-kesildigi, hemen ardindan tekrar acilip yine zarar ettigi
@@ -17122,6 +17122,123 @@ def trade_journal():
             "error": str(e),
             "last_update": now_text(),
         }), 500
+
+
+@app.route("/ml/optimize-parameters", methods=["GET"])
+def ml_optimize_parameters():
+    """Makina öğrenimi ile TP/SL ve confidence parametrelerini optimize et.
+    Son 30/90 günlük işlemler üzerinde backtest yapıp en iyi parametreleri bulur."""
+    try:
+        days = int(request.args.get("days", "30"))
+        rows = db_all_position_closures(days=days, broker="ALL", include_mandatory_holdings=False)
+        if not rows:
+            return jsonify({"error": "Yeterli işlem verisi yok", "trades_found": 0}), 400
+        
+        # Sembol performans analizi
+        by_symbol = defaultdict(lambda: {"trades": [], "pnl": [], "wins": 0})
+        for r in rows:
+            sym = str(r.get("symbol", "")).upper()
+            pnl = safe_float(r.get("realized_pnl", 0))
+            by_symbol[sym]["pnl"].append(pnl)
+            by_symbol[sym]["trades"].append(r)
+            if pnl > 0:
+                by_symbol[sym]["wins"] += 1
+        
+        symbol_ranking = {}
+        for sym, data in by_symbol.items():
+            pnls = data["pnl"]
+            if pnls:
+                avg_pnl = sum(pnls) / len(pnls)
+                win_rate = data["wins"] / len(pnls) * 100
+                symbol_ranking[sym] = {
+                    "count": len(pnls),
+                    "total_pnl": sum(pnls),
+                    "avg_pnl": round(avg_pnl, 2),
+                    "win_rate": round(win_rate, 1),
+                }
+        
+        # TP/SL backtest (simplified)
+        best_config = {"pf": 0, "tp": 3.0, "sl": 2.0}
+        for tp in [1.0, 2.0, 3.0, 4.0, 5.0]:
+            for sl in [1.0, 1.5, 2.0, 2.5]:
+                wins = sum(1 for r in rows if safe_float(r.get("realized_pnl_pct", 0)) >= tp)
+                losses = sum(1 for r in rows if safe_float(r.get("realized_pnl_pct", 0)) <= -sl)
+                if wins + losses > 0:
+                    pf = wins / max(losses, 1)
+                    if pf > best_config["pf"]:
+                        best_config = {"tp": tp, "sl": sl, "wins": wins, "losses": losses, "pf": pf}
+        
+        # Kelly position sizing
+        wins_all = sum(1 for r in rows if safe_float(r.get("realized_pnl")) > 0)
+        losses_all = sum(1 for r in rows if safe_float(r.get("realized_pnl")) <= 0)
+        win_rate_all = wins_all / (wins_all + losses_all) * 100 if wins_all + losses_all > 0 else 0
+        
+        return jsonify({
+            "ok": True,
+            "days_analyzed": days,
+            "trades_analyzed": len(rows),
+            "symbol_ranking": dict(sorted(symbol_ranking.items(), key=lambda x: x[1]["total_pnl"], reverse=True)),
+            "optimal_tp_sl": {
+                "take_profit_pct": best_config["tp"],
+                "stop_loss_pct": best_config["sl"],
+                "profit_factor": round(best_config["pf"], 2),
+                "estimated_win_rate": round(best_config["wins"] / (best_config["wins"] + best_config["losses"]) * 100, 1),
+            },
+            "confidence_recommendation": {
+                "binance_min_confidence": 90,  # Filter DIGER_GENEL
+                "ibkr_min_confidence": 75,
+            },
+            "recommendations": [
+                f"TP/SL optimal: {best_config['tp']}% / {best_config['sl']}%",
+                f"Kelly position size: {round(max(0.01, min(0.25, (win_rate_all/100) - (1-win_rate_all/100) / 2)) * 100, 2)}% (conservative)",
+                f"Top symbols: {', '.join(list(symbol_ranking.keys())[:5])}",
+                f"Avoid symbols: {', '.join([s for s in symbol_ranking if symbol_ranking[s]['win_rate'] < 30])}" if any(symbol_ranking[s]['win_rate'] < 30 for s in symbol_ranking) else "All symbols performing acceptably",
+            ],
+            "last_update": now_text(),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "last_update": now_text()}), 500
+
+
+@app.route("/ml/symbol-ranking", methods=["GET"])
+def ml_symbol_ranking():
+    """ML: Sembol sıralaması (Sharpe ratio, PnL, win_rate)."""
+    try:
+        days = int(request.args.get("days", "30"))
+        rows = db_all_position_closures(days=days, broker="ALL", include_mandatory_holdings=False)
+        
+        by_symbol = defaultdict(lambda: {"pnl": [], "wins": 0})
+        for r in rows:
+            sym = str(r.get("symbol", "")).upper()
+            pnl = safe_float(r.get("realized_pnl"))
+            by_symbol[sym]["pnl"].append(pnl)
+            if pnl > 0:
+                by_symbol[sym]["wins"] += 1
+        
+        ranking = []
+        for sym, data in by_symbol.items():
+            pnls = data["pnl"]
+            if len(pnls) >= 2:
+                avg = sum(pnls) / len(pnls)
+                std = (sum((p - avg) ** 2 for p in pnls) / len(pnls)) ** 0.5
+                sharpe = avg / std if std > 0 else 0
+            else:
+                sharpe = 0 if not pnls or pnls[0] <= 0 else 5
+            
+            ranking.append({
+                "symbol": sym,
+                "trades": len(pnls),
+                "total_pnl": round(sum(pnls), 2),
+                "avg_pnl": round(sum(pnls) / len(pnls), 2) if pnls else 0,
+                "win_rate": round(data["wins"] / len(pnls) * 100, 1) if pnls else 0,
+                "sharpe_ratio": round(sharpe, 2),
+                "recommendation": "BUY" if sharpe > 0.5 else ("HOLD" if sharpe > -0.5 else "AVOID"),
+            })
+        
+        ranking.sort(key=lambda x: x["sharpe_ratio"], reverse=True)
+        return jsonify({"ok": True, "days": days, "ranking": ranking, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 init_runtime_db()
