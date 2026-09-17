@@ -48,6 +48,13 @@ from urllib.parse import urlencode
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from historical_market_scenarios import (
+    get_historical_market_scenarios,
+    get_historical_scenarios_by_category,
+    search_historical_scenarios,
+    list_historical_scenario_categories,
+    get_historical_market_scenarios_with_actions,
+)
 
 APP_NAME = "D-finans Live Backend"
 HOST = "0.0.0.0"
@@ -57,7 +64,7 @@ BINANCE_API_KEY = os.getenv("BINANCE_LIVE_API_KEY", os.getenv("BINANCE_API_KEY",
 BINANCE_SECRET_KEY = os.getenv("BINANCE_LIVE_SECRET_KEY", os.getenv("BINANCE_SECRET_KEY", ""))
 LIVE_TRADING = os.getenv("BINANCE_LIVE_TRADING", os.getenv("LIVE_TRADING", "false")).lower() == "true"
 IBKR_ENABLED = os.getenv("IBKR_ENABLED", "true").lower() == "true"  # Re-enabled for USD/US markets only
-IBKR_FORCE_DISABLED = False  # Re-enable IBKR
+IBKR_FORCE_DISABLED = True  # Disable IBKR auto-trading (performance issues, 2FA outages)
 IBKR_US_ONLY = True  # STRICT: US markets only
 # Railway internal networking: ibkr-gateway service connects as ibkr-gateway.railway.internal:4003
 # Local: 127.0.0.1:7497 (TWS) or ibkr-gateway:4003 (docker-compose)
@@ -212,18 +219,29 @@ class AutoTraderState:
 
 
 AUTO_TRADER = AutoTraderState()
-AUTO_TRADER.enabled = True  # Re-enable IBKR auto-trader
-AUTO_TRADER.broker = "IBKR"
-AUTO_TRADER.symbol = "NVDA"
-AUTO_TRADER.symbols = ["NVDA"]  # STRICT: only NVDA
-AUTO_TRADER.asset_type = "STK"
-AUTO_TRADER.market = "STK"
-AUTO_TRADER.exchange = "SMART"
-AUTO_TRADER.currency = "USD"
+AUTO_TRADER.enabled = True
+# KRITIK DUZELTME (2026-09-04): bu blok eskiden (NVDA-only IBKR denemesi
+# doneminden kalma) AUTO_TRADER.broker = "IBKR" olarak birakiyordu, ama asagida
+# (bkz. satir ~467) AUTO_TRADER.symbols hala Binance Futures kripto listesiyle
+# dolduruluyordu - yani bu state hem "IBKR" hem "kripto sembolleri" gibi
+# celiskili bir karisim halindeydi. Sonuc: auto_trader_cycle() icindeki
+# 'if broker == "BINANCE": enforce_binance_take_profit(...)' kontrolu HICBIR
+# ZAMAN True olmadigi icin Binance Futures pozisyonlarinda otomatik kar-al/
+# zarar-kes KONTROLU HIC CALISMIYORDU (bkz. canli ornek: BTCUSDT SHORT %3
+# zarar-kes esigini gecip %4.8'e kadar acik kaldi). Ayrica _auto_trader_run_symbol
+# icinde 'if broker == "IBKR":' dalina girdigi icin kripto sembolleri (AVAXUSDT
+# vb.) yanlislikla IBKR API'sine gonderiliyor, surekli hata veriyordu. Artik
+# broker="BINANCE"/market="FUTURES" dogru sekilde ayarlaniyor.
+AUTO_TRADER.broker = "BINANCE"
+AUTO_TRADER.symbol = "ETHUSDT"
+AUTO_TRADER.asset_type = "CRYPTO"
+AUTO_TRADER.market = "FUTURES"
+AUTO_TRADER.exchange = ""
+AUTO_TRADER.currency = "USDT"
 AUTO_TRADER.mode = "live"  # Live trading
-AUTO_TRADER.quantity = 1  # Buy 1 share at a time
-AUTO_TRADER.interval_sec = 60  # Check every 60 seconds
-AUTO_TRADER.min_confidence = 50  # Lower threshold for more trades
+AUTO_TRADER.quantity = 0.01
+AUTO_TRADER.interval_sec = 20  # Check every 20 seconds (TP/SL de bu dongude kontrol edilir)
+AUTO_TRADER.min_confidence = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "90"))  # Increased from 82 to filter DIGER_GENEL weak signals
 AUTO_LOCK = threading.Lock()
 AUTO_HISTORY: List[Dict[str, Any]] = []
 
@@ -643,7 +661,7 @@ SHADOW_WATCHLIST_TAKE_PROFIT_PCT = float(os.getenv("SHADOW_WATCHLIST_TAKE_PROFIT
 SHADOW_WATCHLIST_STOP_LOSS_PCT = float(os.getenv("SHADOW_WATCHLIST_STOP_LOSS_PCT", "6.0"))
 SHADOW_WATCHLIST_INTERVAL_SEC = int(os.getenv("SHADOW_WATCHLIST_INTERVAL_SEC", "60"))
 SHADOW_WATCHLIST_MIN_CHANGE_PCT = float(os.getenv("SHADOW_WATCHLIST_MIN_CHANGE_PCT", "1.2"))
-BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "6.0"))
+BINANCE_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_TAKE_PROFIT_PCT", "3.0"))  # Reduced from 6.0 for risk:reward 1:1.5
 BINANCE_STOP_LOSS_PCT = float(os.getenv("BINANCE_STOP_LOSS_PCT", "2.0"))
 IBKR_TAKE_PROFIT_PCT = float(os.getenv("IBKR_TAKE_PROFIT_PCT", "6.0"))
 IBKR_STOP_LOSS_PCT = float(os.getenv("IBKR_STOP_LOSS_PCT", "2.0"))
@@ -692,7 +710,12 @@ IBKR_STOP_LOSS_COOLDOWN_HOURS = float(os.getenv("IBKR_STOP_LOSS_COOLDOWN_HOURS",
 # ayrilmis) genisletilebilir/degistirilebilir.
 IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
     s.strip().upper()
-    for s in os.getenv("IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,SHEL,RIO,ULVR").split(",")
+    for s in os.getenv("IBKR_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,SHEL,RIO,ULVR,BMW,SAP").split(",")
+    if s.strip()
+)
+BINANCE_AUTO_TRADE_EXCLUDED_SYMBOLS = set(
+    s.strip().upper()
+    for s in os.getenv("BINANCE_AUTO_TRADE_EXCLUDED_SYMBOLS", "HSBA,BMW,SHEL,SAP").split(",")
     if s.strip()
 )
 
@@ -730,6 +753,33 @@ IBKR_TAKE_PROFIT_PCT_NON_STOCK = float(os.getenv("IBKR_TAKE_PROFIT_PCT_NON_STOCK
 # arttigi icin risk de arttigindan kari daha erken realize etmek mantikli.
 BINANCE_SCALED_TAKE_PROFIT_PCT = float(os.getenv("BINANCE_SCALED_TAKE_PROFIT_PCT", "1.0"))
 IBKR_SCALED_TAKE_PROFIT_PCT = float(os.getenv("IBKR_SCALED_TAKE_PROFIT_PCT", "1.0"))
+# Kullanicinin talebi: 'BTC 120binden 60bine dustu, simdi 80binlerde periyodik
+# fiyat hareketleri oluyor - 5 yillik hareketleri tarayip uzun vadeli long/short
+# acalim dip ve zirvelerde, kar/zarar limitleri farkli olsun'. BTCUSDT/ETHUSDT
+# icin ayri bir 'makro sal\u0131n\u0131m' (macro swing) katmani: fiyat 5 yillik
+# en dusuk/en yuksek seviyeye yakinken VE haftalik RSI asiri satim/asiri alimda
+# ise, normal kisa vadeli sinyallerden cok daha genis kar-al/zarar-kes
+# yuzdeleriyle (bkz. get_macro_swing_zone / get_macro_swing_bias) pozisyon
+# acilmasi desteklenir. Pozisyon boyutlandirma DEGISMEZ (kullanicinin talebi:
+# mevcut % risk kurallariyla ayni), sadece TP/SL genisler.
+MACRO_SWING_SYMBOLS = frozenset(
+    s.strip().upper()
+    for s in os.getenv("MACRO_SWING_SYMBOLS", "BTCUSDT,ETHUSDT").split(",")
+    if s.strip()
+)
+MACRO_SWING_YF_TICKERS = {"BTCUSDT": "BTC-USD", "ETHUSDT": "ETH-USD"}
+# Fiyatin 5 yillik en dusuk/en yuksekten en fazla bu yuzde kadar uzakta olmasi
+# 'dip/zirve bolgesi' sayilir icin gerekli esik.
+MACRO_SWING_ZONE_PCT = float(os.getenv("MACRO_SWING_ZONE_PCT", "15.0"))
+# Haftalik RSI asiri satim/asiri alim esikleri (gunluk RSI'dan daha yavas/
+# gurultusuz - uzun vadeli teyit icin haftalik kapanislar kullanilir).
+MACRO_SWING_RSI_OVERSOLD = float(os.getenv("MACRO_SWING_RSI_OVERSOLD", "35.0"))
+MACRO_SWING_RSI_OVERBOUGHT = float(os.getenv("MACRO_SWING_RSI_OVERBOUGHT", "65.0"))
+# Makro dip/zirve bolgesinde acilan islemler icin genis kar-al/zarar-kes
+# yuzdeleri (normal BINANCE_TAKE_PROFIT_PCT/STOP_LOSS_PCT %6/%2'den cok daha
+# genis - bu islemler gunluk degil, aylar surebilecek buyuk donusleri hedefler).
+MACRO_SWING_TAKE_PROFIT_PCT = float(os.getenv("MACRO_SWING_TAKE_PROFIT_PCT", "28.0"))
+MACRO_SWING_STOP_LOSS_PCT = float(os.getenv("MACRO_SWING_STOP_LOSS_PCT", "14.0"))
 # Normal AI karar dongusu (momentum/order-flow sinyali), pozisyonun kar/zarar
 # yuzdesine bakmaksizin SAT karari verebiliyordu - bu da gunluk gecici bir
 # dususte (ornegin bugun %10 dusup ertesi gun toparlanabilecek bir hissede)
@@ -825,6 +875,18 @@ IBKR_SHORTABLE_SYMBOLS = set(
     if s.strip()
 )
 IBKR_MIN_MARGIN_FOR_SHORT_USD = float(os.getenv("IBKR_MIN_MARGIN_FOR_SHORT_USD", "5000.0"))
+
+# Kullanicinin talebi: "cok artan hisselerde short degerlendirmesi de yapsin
+# sistem" - /ibkr/ai-signal daha once SADECE momentum takibi yapiyordu
+# (change_24h > +0.7 -> BUY), yani bir hisse ne kadar cok yukselirse o kadar
+# "AL" sinyali veriyordu - asiri yukselisin ardindan gelebilecek geri
+# cekilme/duzeltme hic degerlendirilmiyordu. RSI(14) asiri alim esigi asilinca
+# (gunluk kapanislar uzerinden - haftalarca surmus bir ralliyi de yakalar,
+# tek gunluk buyuk siramaya bagli degildir) ve genel piyasa rejimi guclu BULL
+# DEGILSE, sinyal SELL'e (short adayi) ceviriliyor - ayni "chain order" mean-
+# reversion mantigi (bkz. CHAIN_ORDER_*), ama pozisyon KAPANDIKTAN SONRA degil,
+# YENI POZISYON ACILIRKEN de calisiyor.
+IBKR_OVERBOUGHT_RSI_THRESHOLD = float(os.getenv("IBKR_OVERBOUGHT_RSI_THRESHOLD", "68"))
 
 # Varlik bazli pozisyon boyutlandirma: her BUY/SELL sinyalinde sabit miktar yerine,
 # bosta bekleyen (available) Binance futures USDT bakiyesinin belirli bir yuzdesi
@@ -1008,6 +1070,34 @@ def init_runtime_db() -> None:
                     add_date TEXT NOT NULL,
                     last_add_at TEXT NOT NULL,
                     PRIMARY KEY (broker, symbol, add_date)
+                )
+                """
+            )
+            # Kullanicinin bildirdigi sorun: 'USO pozisyonu kapanmis ama dfinansda
+            # (AI Islem Gunlugu / position_closures) gozukmuyor'. Kok neden: IBKR
+            # pozisyonlari (Binance spot'un aksine, bkz. spot_positions +
+            # reconcile_spot_positions) hicbir DB tablosunda takip edilmiyordu -
+            # her zaman canli olarak brokerdan (ibkr_positions_snapshot) sorgulanip
+            # kaynak-tek-gercek kabul ediliyordu. Bu, botun KENDI actigi/kapattigi
+            # islemler icin sorun degil (o an execution basarili olunca
+            # db_record_position_closure zaten cagriliyor) - ama kullanici TWS/
+            # mobil uygulamadan MANUEL olarak (bot disinda) bir pozisyonu kapatirsa,
+            # bunu tespit edip kaydedecek hicbir mekanizma yoktu. Bu tablo, her
+            # mutabakat dongusunde (bkz. reconcile_ibkr_positions) en son bilinen
+            # IBKR pozisyon anlik goruntusunu tutar; bir sonraki dongude bir sembol
+            # bu tabloda VAR ama artik brokerda YOKSA, harici/manuel kapatma
+            # tespit edilmis olur ve position_closures + auto_history'ye yazilir.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ibkr_position_state (
+                    symbol TEXT PRIMARY KEY,
+                    side TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    asset_type TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -1320,6 +1410,53 @@ def db_get_spot_position(symbol: str) -> Optional[Dict[str, Any]]:
     return dict(row)
 
 
+def db_list_ibkr_position_state() -> List[Dict[str, Any]]:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT symbol, side, qty, entry_price, asset_type, exchange, currency, updated_at "
+                "FROM ibkr_position_state"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [dict(r) for r in rows]
+
+
+def db_upsert_ibkr_position_state(
+    symbol: str, side: str, qty: float, entry_price: float,
+    asset_type: str, exchange: str, currency: str,
+) -> None:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute(
+                """
+                INSERT INTO ibkr_position_state(symbol, side, qty, entry_price, asset_type, exchange, currency, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    side=excluded.side, qty=excluded.qty, entry_price=excluded.entry_price,
+                    asset_type=excluded.asset_type, exchange=excluded.exchange, currency=excluded.currency,
+                    updated_at=excluded.updated_at
+                """,
+                (symbol, side, qty, entry_price, asset_type, exchange, currency, now_text()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def db_delete_ibkr_position_state(symbol: str) -> None:
+    with DB_LOCK:
+        conn = sqlite3.connect(RUNTIME_DB_PATH)
+        try:
+            conn.execute("DELETE FROM ibkr_position_state WHERE symbol = ?", (symbol,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def db_upsert_spot_position(symbol: str, quantity: float, avg_cost: float, opened_at: Optional[str] = None) -> None:
     now = now_text()
     with DB_LOCK:
@@ -1614,6 +1751,28 @@ def db_delete_symbol_tp_sl_override(broker: str, symbol: str) -> None:
             conn.close()
 
 
+def sync_macro_swing_tp_sl_override(broker: str, symbol: str, zone: str) -> None:
+    """get_macro_swing_bias tarafindan her sinyal donguse cagrilir. Sembol
+    5 yillik dip/zirve bolgesindeyken (zone DIP/PEAK) genis MACRO_SWING_
+    TAKE_PROFIT_PCT/STOP_LOSS_PCT override'ini otomatik kurar; bolgeden
+    cikinca (zone NONE) - SADECE bu override'i bizzat bu ozellik kurmussa
+    (yani mevcut override degerleri tam olarak MACRO_SWING_* ile
+    esleşiyorsa) - tekrar global varsayilanlara doner. Kullanicinin
+    admin panelinden manuel girdigi FARKLI bir override varsa dokunulmaz."""
+    existing = db_get_symbol_tp_sl_override(broker, symbol)
+    is_auto_macro_override = (
+        existing is not None
+        and safe_float(existing.get("take_profit_pct")) == MACRO_SWING_TAKE_PROFIT_PCT
+        and safe_float(existing.get("stop_loss_pct")) == MACRO_SWING_STOP_LOSS_PCT
+    )
+    if zone in ("DIP", "PEAK"):
+        if existing is None or is_auto_macro_override:
+            db_set_symbol_tp_sl_override(broker, symbol, MACRO_SWING_TAKE_PROFIT_PCT, MACRO_SWING_STOP_LOSS_PCT)
+    else:
+        if is_auto_macro_override:
+            db_delete_symbol_tp_sl_override(broker, symbol)
+
+
 def db_list_symbol_tp_sl_overrides() -> List[Dict[str, Any]]:
     with DB_LOCK:
         conn = sqlite3.connect(RUNTIME_DB_PATH)
@@ -1758,6 +1917,39 @@ def _build_and_send_closure_email(
         server.login(NOTIFY_EMAIL_SENDER, NOTIFY_EMAIL_PASSWORD)
         server.sendmail(NOTIFY_EMAIL_SENDER, [NOTIFY_EMAIL_RECIPIENT], msg.as_string())
     print(f"[EMAIL] Kapanış maili gönderildi: {symbol} ({close_reason})", flush=True)
+
+
+def send_alert_email(subject: str, body: str) -> None:
+    """Genel amacli uyari maili (pozisyon kapanisina ozel olmayan durumlar
+    icin - orn. gunluk zarar limiti asildi, IBKR baglantisi uzun sure kesik).
+    Asenkron (arka plan thread) calisir, SMTP hatasi olursa sessizce loglanip
+    gecilir - trading akisini asla bloklamaz."""
+    if not NOTIFY_EMAIL_ENABLED:
+        return
+    if not (NOTIFY_EMAIL_SENDER and NOTIFY_EMAIL_PASSWORD and NOTIFY_EMAIL_RECIPIENT):
+        return
+
+    def _send():
+        last_error = None
+        for attempt in range(2):
+            try:
+                msg = MIMEText(body, "plain", "utf-8")
+                msg["Subject"] = subject
+                msg["From"] = NOTIFY_EMAIL_SENDER
+                msg["To"] = NOTIFY_EMAIL_RECIPIENT
+                with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+                    server.starttls()
+                    server.login(NOTIFY_EMAIL_SENDER, NOTIFY_EMAIL_PASSWORD)
+                    server.sendmail(NOTIFY_EMAIL_SENDER, [NOTIFY_EMAIL_RECIPIENT], msg.as_string())
+                print(f"[EMAIL] Uyarı maili gönderildi: {subject}", flush=True)
+                return
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    time.sleep(5)
+        print(f"[EMAIL] Uyarı maili gönderilemedi: {type(last_error).__name__}: {last_error}", flush=True)
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def send_position_closure_email(
@@ -2405,8 +2597,12 @@ _STRATEGY_SIGNAL_TAGS: Dict[str, List[str]] = {
     "MOMENTUM": ["momentum sinyali", "momentum (24s"],
     "EMIR_AKISI": ["emir akışı sinyali", "emir akışı"],
     "KORELASYON_LAG": ["korelasyon", "lag", "hedge"],
-    "DIS_SINYAL": ["sec dosyalama", "haber sentiment", "fear", "greed", "funding", "whale", "jeopolitik"],
-    "MAKRO_RISK": ["makro", "balon", "asiri deger", "aşırı değer", "manipulasyon", "manipülasyon"],
+    "DIS_SINYAL": ["sec dosyalama", "haber sentiment", "fear", "greed", "funding", "jeopolitik"],
+    "MAKRO_RISK": ["makro rejim", "balon", "asiri deger", "aşırı değer"],
+    "CARRY_TRADE": ["carry trade"],
+    "WHALE_POZISYON": ["büyük hesaplar", "buyuk hesaplar", "long squeeze", "short squeeze"],
+    "WHALE_RETAIL_AYRISMA": ["akıllı para", "akilli para", "kalabalık", "kalabalik"],
+    "MANIPULASYON_PUMP_DUMP": ["manipulasyon", "manipülasyon", "wash-trading", "pump", "dump", "spoofing"],
     "SEANS_SIRASI": ["seans-sırası", "seans-sirasi", "risk_on", "risk_off"],
     "OFF_MARKET": ["mesai-dışı", "mesai-disi", "off-market"],
     "FX_DONUSUM": ["otomatik fx", "fx cevrim", "fx çevrim"],
@@ -2486,7 +2682,11 @@ def compute_strategy_analysis(rows: List[Dict[str, Any]], base_stats: Dict[str, 
         "EMIR_AKISI": "Sadece emir defteri (bid/ask) sinyali",
         "KORELASYON_LAG": "Korelasyon/lag/hedge motoru sinyali",
         "DIS_SINYAL": "Dış sinyaller (haber, Fear&Greed, funding, jeopolitik)",
-        "MAKRO_RISK": "Makro/balon/manipülasyon riski sinyali",
+        "MAKRO_RISK": "Makro rejim/balon riski sinyali",
+        "CARRY_TRADE": "Yen carry trade çözülme riski sinyali",
+        "WHALE_POZISYON": "Büyük hesap (whale) aşırı pozisyonlanma/squeeze sinyali",
+        "WHALE_RETAIL_AYRISMA": "Akıllı para (whale) vs kalabalık (retail) ayrışma sinyali",
+        "MANIPULASYON_PUMP_DUMP": "Manipülasyon/pump&dump/wash-trading uyarı sinyali",
         "SEANS_SIRASI": "Bölgeler-arası seans-sırası (Asya→UK→ABD) sinyali",
         "OFF_MARKET": "Mesai-dışı (off-market) fiyat referanslı kararlar",
         "FX_DONUSUM": "Otomatik döviz (FX) çevrimli işlemler",
@@ -4533,6 +4733,28 @@ FEAR_GREED_EXTREME_LOW = int(os.getenv("FEAR_GREED_EXTREME_LOW", "25"))
 FEAR_GREED_EXTREME_HIGH = int(os.getenv("FEAR_GREED_EXTREME_HIGH", "75"))
 EXTERNAL_SIGNALS_ENABLED = os.getenv("EXTERNAL_SIGNALS_ENABLED", "true").lower() == "true"
 
+# ============================================================
+# CARRY TRADE (YEN FONLAMASI) COZULME RISKI SINYALI
+# Tarihsel referans: 5 Agustos 2024 - JPY'nin birkaç gun icinde sert
+# guclenmesi (USDJPY dususu) + BOJ faiz artisi + VIX sicramasi, dusuk
+# faizli yen ile finanse edilen risk varligi (BTC, ABD hisseleri, altin,
+# gelisen piyasa para birimleri) pozisyonlarinin kitlesel tasfiyesine
+# (unwind) yol acmis, Nikkei tek gunde %-12.4, S&P 500 %-3 dusmustu.
+# Bu sinyal TUM piyasalar/semboller icin GENEL bir risk-off/risk-on
+# ayarlamasi olarak calisir (crypto ve hisse senedi islemlerinin ikisinde
+# de kullanilir) - belirli bir sembole ozgu degildir.
+# ============================================================
+CARRY_TRADE_SIGNAL_ENABLED = os.getenv("CARRY_TRADE_SIGNAL_ENABLED", "true").lower() == "true"
+CARRY_TRADE_JPY_STRENGTH_HIGH_PCT = float(os.getenv("CARRY_TRADE_JPY_STRENGTH_HIGH_PCT", "2.5"))
+CARRY_TRADE_JPY_STRENGTH_ELEVATED_PCT = float(os.getenv("CARRY_TRADE_JPY_STRENGTH_ELEVATED_PCT", "1.2"))
+CARRY_TRADE_VIX_CONFIRM_PCT = float(os.getenv("CARRY_TRADE_VIX_CONFIRM_PCT", "10.0"))
+
+# Emir defteri "spoof wall" tespiti (bkz. get_orderbook_spoofing_signal) ve
+# pump&dump hizlanma tespiti (bkz. get_pump_dump_acceleration_signal) esikleri.
+ORDERBOOK_SPOOF_WALL_RATIO = float(os.getenv("ORDERBOOK_SPOOF_WALL_RATIO", "12.0"))
+PUMP_DUMP_ACCEL_PCT = float(os.getenv("PUMP_DUMP_ACCEL_PCT", "5.0"))
+PUMP_DUMP_ACCEL_VOLUME_RATIO = float(os.getenv("PUMP_DUMP_ACCEL_VOLUME_RATIO", "4.0"))
+
 _external_signal_cache: Dict[str, Dict[str, Any]] = {}
 _external_signal_lock = threading.Lock()
 
@@ -4583,6 +4805,74 @@ def get_whale_positioning(symbol: str) -> Dict[str, Any]:
 
 WHALE_RATIO_EXTREME_HIGH = float(os.getenv("WHALE_RATIO_EXTREME_HIGH", "2.5"))
 WHALE_RATIO_EXTREME_LOW = float(os.getenv("WHALE_RATIO_EXTREME_LOW", "0.5"))
+
+
+def get_global_account_positioning(symbol: str) -> Dict[str, Any]:
+    """Binance Futures 'global account' (TUM hesaplar - kucuk/buyuk/perakende karisimi)
+    long/short pozisyon orani. get_whale_positioning() ('top trader'/buyuk hesap)
+    ile birlikte kullanildiginda, 'akilli para' (whale) ile 'kalabalik' (retail)
+    pozisyonlanmasi arasindaki AYRISMAYI (divergence) olcmek icin kullanilir -
+    bkz. get_whale_vs_retail_divergence(). Anahtar gerektirmez, herkese acik."""
+    def _fetch():
+        base = FUTURES_BASE
+        data = public_get(base, "/futures/data/globalLongShortAccountRatio", {"symbol": symbol, "period": "1h", "limit": 2})
+        if not isinstance(data, list) or not data:
+            raise RuntimeError("Global hesap pozisyon verisi bos döndü.")
+        row = data[-1]
+        ratio = safe_float(row.get("longShortRatio"))
+        long_acc = safe_float(row.get("longAccount")) * 100
+        short_acc = safe_float(row.get("shortAccount")) * 100
+        return {
+            "symbol": symbol,
+            "long_short_ratio": round(ratio, 3),
+            "long_account_pct": round(long_acc, 1),
+            "short_account_pct": round(short_acc, 1),
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch(f"global_acct_pos:{symbol}", 900, _fetch)
+
+
+WHALE_VS_RETAIL_WHALE_LONG_MIN = float(os.getenv("WHALE_VS_RETAIL_WHALE_LONG_MIN", "1.5"))
+WHALE_VS_RETAIL_WHALE_SHORT_MAX = float(os.getenv("WHALE_VS_RETAIL_WHALE_SHORT_MAX", "0.7"))
+WHALE_VS_RETAIL_RETAIL_SHORT_MAX = float(os.getenv("WHALE_VS_RETAIL_RETAIL_SHORT_MAX", "0.8"))
+WHALE_VS_RETAIL_RETAIL_LONG_MIN = float(os.getenv("WHALE_VS_RETAIL_RETAIL_LONG_MIN", "1.3"))
+
+
+def get_whale_vs_retail_divergence(symbol: str) -> Dict[str, Any]:
+    """BTC/ETH gibi semboller icin 'buyuk hesaplar' (top trader/whale, bkz.
+    get_whale_positioning) ile 'tum hesaplar' (retail agirlikli kalabalik, bkz.
+    get_global_account_positioning) arasindaki pozisyonlanma AYRISMASINI olcer.
+    Bu, Coinglass gibi sitelerde 'top trader vs global account ratio' adiyla
+    yayinlanan klasik bir 'akilli para vs kalabalik' (smart money vs dumb money)
+    karsilastirmasidir:
+      - Whale'ler LONG agirlikli + kalabalik SHORT agirlikliyken -> tarihsel
+        olarak whale tarafinin haklici cikma ihtimali daha yuksek kabul edilir
+        (kalabalik genelde donuslerde/zirvede yanlis taraftadir) -> BUY'i destekler.
+      - Whale'ler SHORT agirlikli + kalabalik LONG agirlikliyken -> SELL'i destekler.
+      - Ikisi ayni yondeyse (ayrisma yok) -> notr, ekstra sinyal uretilmez.
+    Anahtar gerektirmez (Binance public futures data), 15 dk cache (whale/global
+    fonksiyonlarinin kendi cache'i uzerinden)."""
+    whale = get_whale_positioning(symbol)
+    retail = get_global_account_positioning(symbol)
+    if whale.get("error") or retail.get("error"):
+        return {"error": "Whale veya global hesap verisi alinamadi", "divergence": "NONE"}
+
+    whale_ratio = safe_float(whale.get("long_short_ratio"))
+    retail_ratio = safe_float(retail.get("long_short_ratio"))
+
+    divergence = "NONE"
+    if whale_ratio >= WHALE_VS_RETAIL_WHALE_LONG_MIN and 0 < retail_ratio <= WHALE_VS_RETAIL_RETAIL_SHORT_MAX:
+        divergence = "SMART_MONEY_LONG_RETAIL_SHORT"
+    elif 0 < whale_ratio <= WHALE_VS_RETAIL_WHALE_SHORT_MAX and retail_ratio >= WHALE_VS_RETAIL_RETAIL_LONG_MIN:
+        divergence = "SMART_MONEY_SHORT_RETAIL_LONG"
+
+    return {
+        "symbol": symbol,
+        "whale_long_short_ratio": whale_ratio,
+        "retail_long_short_ratio": retail_ratio,
+        "divergence": divergence,
+        "time": now_text(),
+    }
 
 
 def get_geopolitical_risk_signal() -> Dict[str, Any]:
@@ -5421,6 +5711,59 @@ def compute_atr(highs: List[float], lows: List[float], closes: List[float], peri
     return atr
 
 
+def compute_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
+    """Wilder'in ADX (Average Directional Index) formulu - trendin YONU
+    degil, GUCUNU olcer (0-100). Dusuk ADX (<20-25) yonsuz/zikzak ("chop")
+    piyasayi, yuksek ADX (>25) net/guclu bir trendi gosterir. Sistemde
+    yonsuz piyasalarda islem acmayi engelleyen 'chop filtresi' bunu kullanir
+    (bkz. ADX_MIN_TREND_STRENGTH, get_technical_signal_bias). En az
+    2*period+1 bar gerektirir, yetersizse None doner (cagiran taraf fail-open
+    davranir - filtre asla veri eksikligi yuzunden islemi engellemez)."""
+    n = min(len(highs), len(lows), len(closes))
+    if n < (2 * period) + 1:
+        return None
+    plus_dm = [0.0]
+    minus_dm = [0.0]
+    tr_list = [0.0]
+    for i in range(1, n):
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+        plus_dm.append(up_move if (up_move > down_move and up_move > 0) else 0.0)
+        minus_dm.append(down_move if (down_move > up_move and down_move > 0) else 0.0)
+        tr_list.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        ))
+    # Wilder'in smoothed ortalamasi (ATR ile ayni yontem).
+    def _wilder_smooth(values: List[float]) -> List[float]:
+        smoothed = [sum(values[1:period + 1])]
+        for v in values[period + 1:]:
+            smoothed.append(smoothed[-1] - (smoothed[-1] / period) + v)
+        return smoothed
+    smoothed_tr = _wilder_smooth(tr_list)
+    smoothed_plus_dm = _wilder_smooth(plus_dm)
+    smoothed_minus_dm = _wilder_smooth(minus_dm)
+    dx_values = []
+    for tr, pdm, mdm in zip(smoothed_tr, smoothed_plus_dm, smoothed_minus_dm):
+        if tr <= 0:
+            continue
+        plus_di = 100.0 * (pdm / tr)
+        minus_di = 100.0 * (mdm / tr)
+        di_sum = plus_di + minus_di
+        dx = 100.0 * (abs(plus_di - minus_di) / di_sum) if di_sum > 0 else 0.0
+        dx_values.append(dx)
+    if len(dx_values) < period:
+        return None
+    adx = sum(dx_values[:period]) / period
+    for dx in dx_values[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
+
+
+ADX_MIN_TREND_STRENGTH = float(os.getenv("ADX_MIN_TREND_STRENGTH", "25"))
+
+
 def get_ibkr_daily_bars(symbol: str, asset_type: str, exchange: str, currency: str, num_days: int = 60, contract_month: str = "") -> List[Dict[str, float]]:
     """IBKR reqHistoricalData ile son num_days gunluk kapanis fiyati VE hacmini ceker
     (RSI/SMA ve hacim teyidi hesaplamalari icin gecmis veri gerekir). /history
@@ -5494,6 +5837,7 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
         sma20 = compute_sma(closes, 20)
         sma50 = compute_sma(closes, 50)
         atr = compute_atr(highs, lows, closes, 14)
+        adx = compute_adx(highs, lows, closes, 14)
         # Kullanicinin talebi: 'RSI/SMA aşırı-uç sinyali sadece yumuşak puan
         # (bias) - dipte SHORT/zirvede LONG açmayı engellemiyor'. MACD
         # histogramı burada da hesaplanip donus teyidi (RSI asiri uc + MACD
@@ -5525,6 +5869,7 @@ def get_technical_indicator_snapshot(symbol: str, market: str, broker: str) -> D
             "sma_50": round(sma50, 4) if sma50 is not None else None,
             "atr_14": round(atr, 6) if atr is not None else None,
             "atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
+            "adx_14": round(adx, 2) if adx is not None else None,
             "last_close": round(closes[-1], 6),
             "last_closed_volume": round(last_closed_volume, 2),
             "avg_volume_20": round(avg_volume, 2) if avg_volume else None,
@@ -5716,6 +6061,22 @@ def get_technical_signal_bias(symbol: str, market: str, broker: str, action: str
             elif volume_ratio <= 0.5:
                 bias -= 4
                 notes.append(f"Hacim ortalamanın {volume_ratio}x altında (düşük katılım): hareket teyitsiz, güvenilirliği düşük.")
+
+        # Kullanicinin talebi: 'gercek yatirimci gibi davran' - secici/dusuk
+        # frekansli islem felsefesinin bir parcasi olarak yonsuz ("chop")
+        # piyasalarda islem acmayi engelleyen ADX (trend gucu) filtresi.
+        # ADX < ADX_MIN_TREND_STRENGTH ise piyasa net bir trend icinde degil
+        # demektir - bu durumda momentum/RSI gibi sinyaller yanlis alarm
+        # verme egiliminde olur, bu yuzden SERT ENGEL uygulanir (yumusak puan
+        # yeterli degil, cunku zayif trendde herhangi bir yonde giris riskli).
+        # ADX verisi alinamazsa (yetersiz gecmis) fail-open - islemi engellemez.
+        adx = tech.get("adx_14")
+        if adx is not None and adx < ADX_MIN_TREND_STRENGTH:
+            hard_block = True
+            notes.append(
+                f"SERT ENGEL: ADX(14) {adx:.1f} - piyasa yönsüz/kararsız (\"chop\"), "
+                f"minimum trend gücü eşiğinin ({ADX_MIN_TREND_STRENGTH:.0f}) altında - giriş engellendi."
+            )
     except Exception:
         pass
 
@@ -5891,6 +6252,35 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
                 bias -= 5
                 notes.append(f"Makro rejim RISK-OFF: borsa/dolar baskısı var, yeni alım riskli olabilir.")
 
+    if CARRY_TRADE_SIGNAL_ENABLED:
+        carry = get_carry_trade_risk_bias()
+        if not carry.get("error"):
+            risk_level = carry.get("risk_level")
+            jpy_str = carry.get("jpy_strength_3d_pct", 0.0)
+            vix_chg = carry.get("vix_3d_pct", 0.0)
+            if risk_level == "HIGH":
+                if action == "SELL":
+                    bias += 8
+                    notes.append(
+                        f"Carry trade çözülme riski YÜKSEK (JPY 3g %{jpy_str:+.1f} güçlendi, VIX %{vix_chg:+.1f}): "
+                        "yen fonlamalı risk varlıklarında kitlesel tasfiye (5 Ağustos 2024 benzeri) SELL'i destekler."
+                    )
+                else:
+                    bias -= 8
+                    notes.append(
+                        f"Carry trade çözülme riski YÜKSEK (JPY 3g %{jpy_str:+.1f} güçlendi, VIX %{vix_chg:+.1f}): "
+                        "risk varlıklarında yeni ALIM açmak tehlikeli, global ani satış tetiklenebilir."
+                    )
+            elif risk_level == "ELEVATED":
+                if action == "SELL":
+                    bias += 4
+                    notes.append(f"Carry trade çözülme riski YÜKSELİYOR (JPY 3g %{jpy_str:+.1f}): SELL'i hafifçe destekler.")
+                else:
+                    bias -= 4
+                    notes.append(f"Carry trade çözülme riski YÜKSELİYOR (JPY 3g %{jpy_str:+.1f}): yeni ALIM için temkinli olunmalı.")
+            elif risk_level == "WATCH":
+                notes.append(f"Carry trade riski izlemede (JPY 3g %{jpy_str:+.1f} güçlendi) - henüz eşik aşılmadı.")
+
     whale = get_whale_positioning(symbol)
     if not whale.get("error"):
         ratio = safe_float(whale.get("long_short_ratio"))
@@ -5908,6 +6298,32 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
             else:
                 bias += 3
                 notes.append(f"Büyük hesaplar aşırı SHORT yığılmış (oran {ratio:.2f}): olası short squeeze BUY'ı destekler.")
+
+    divergence_info = get_whale_vs_retail_divergence(symbol)
+    if not divergence_info.get("error"):
+        div = divergence_info.get("divergence")
+        if div == "SMART_MONEY_LONG_RETAIL_SHORT":
+            if action == "BUY":
+                bias += 5
+                notes.append(
+                    f"Whale/akıllı para LONG ağırlıklı (oran {divergence_info['whale_long_short_ratio']:.2f}), "
+                    f"kalabalık/retail SHORT ağırlıklı (oran {divergence_info['retail_long_short_ratio']:.2f}): "
+                    "bu ayrışma tarihsel olarak whale tarafını (BUY) destekler."
+                )
+            else:
+                bias -= 3
+                notes.append("Whale'ler LONG, kalabalık SHORT ağırlıklı: SELL için ters ayrışma sinyali var.")
+        elif div == "SMART_MONEY_SHORT_RETAIL_LONG":
+            if action == "SELL":
+                bias += 5
+                notes.append(
+                    f"Whale/akıllı para SHORT ağırlıklı (oran {divergence_info['whale_long_short_ratio']:.2f}), "
+                    f"kalabalık/retail LONG ağırlıklı (oran {divergence_info['retail_long_short_ratio']:.2f}): "
+                    "bu ayrışma tarihsel olarak whale tarafını (SELL) destekler."
+                )
+            else:
+                bias -= 3
+                notes.append("Whale'ler SHORT, kalabalık LONG ağırlıklı: BUY için ters ayrışma sinyali var.")
 
     geo = get_geopolitical_risk_signal()
     if not geo.get("error"):
@@ -5950,7 +6366,7 @@ def get_external_signal_bias(symbol: str, action: str) -> Dict[str, Any]:
         bias -= 1
         notes.append(f"Google Trends'te '{trends['keyword']}' aramalarında ani artış (x{trends['spike_ratio']:.1f}): olası yüksek oynaklık, dikkatli olunmalı.")
 
-    return {"bias": max(-16, min(16, bias)), "notes": notes}
+    return {"bias": max(-24, min(24, bias)), "notes": notes}
 
 
 def get_macro_regime() -> Dict[str, Any]:
@@ -5982,6 +6398,61 @@ def get_macro_regime() -> Dict[str, Any]:
             "time": now_text(),
         }
     return _cache_get_or_fetch("macro_regime", 14400, _fetch)
+
+
+def get_carry_trade_risk_bias() -> Dict[str, Any]:
+    """Yen (JPY) carry trade cozulme riskini olcer - TUM piyasalar (crypto + hisse)
+    icin genel bir risk-off/risk-on ayar sinyali.
+    Mantik (5 Agustos 2024 unwind olayindan turetildi):
+      - USDJPY kisa vadede (3 gun) sert dusuyorsa (JPY hizla GUCLENIYORSA) bu,
+        dusuk faizli yen ile finanse edilen risk varliklarinin (BTC, ABD hisseleri,
+        gelisen piyasa FX, altin) tasfiye edildigine (carry trade unwind) isaret eder.
+      - VIX ayni donemde de yukseliyorsa (korku endeksi teyidi) risk seviyesi YUKSEK
+        olarak isaretlenir; VIX teyidi yoksa ELEVATED (dikkatli) seviyesinde kalir.
+      - USDJPY YUKARI (JPY zayifliyor) ise carry trade rahat/genisliyor demektir,
+        bu risk sinyali acisindan NORMAL kabul edilir (ayrica risk-on baski da katmaz,
+        cunku bu makro rejim/DXY sinyaliyle zaten kismen kapsanir).
+    yfinance kullanir (JPY=X = USDJPY, ^VIX), 4 saat cache'lenir, hata durumunda
+    sessizce NORMAL'e duser (fail-open)."""
+    def _fetch():
+        import yfinance as yf
+        data = yf.download(["JPY=X", "^VIX"], period="15d", interval="1d", progress=False, auto_adjust=True, threads=True)
+        close = data["Close"].dropna()
+        if len(close) < 4:
+            raise RuntimeError("Yetersiz carry trade verisi")
+        usdjpy = close["JPY=X"]
+        vix = close["^VIX"]
+        usdjpy_3d_pct = (usdjpy.iloc[-1] / usdjpy.iloc[-4] - 1.0) * 100.0
+        vix_3d_pct = (vix.iloc[-1] / vix.iloc[-4] - 1.0) * 100.0 if vix.iloc[-4] else 0.0
+
+        jpy_strength_pct = -usdjpy_3d_pct  # USDJPY dususu = JPY guclenmesi
+        vix_confirms = vix_3d_pct >= CARRY_TRADE_VIX_CONFIRM_PCT
+
+        if jpy_strength_pct >= CARRY_TRADE_JPY_STRENGTH_HIGH_PCT and vix_confirms:
+            risk_level = "HIGH"
+        elif jpy_strength_pct >= CARRY_TRADE_JPY_STRENGTH_HIGH_PCT or (
+            jpy_strength_pct >= CARRY_TRADE_JPY_STRENGTH_ELEVATED_PCT and vix_confirms
+        ):
+            risk_level = "ELEVATED"
+        elif jpy_strength_pct >= CARRY_TRADE_JPY_STRENGTH_ELEVATED_PCT:
+            risk_level = "WATCH"
+        else:
+            risk_level = "NORMAL"
+
+        return {
+            "usdjpy_3d_pct": round(float(usdjpy_3d_pct), 2),
+            "jpy_strength_3d_pct": round(float(jpy_strength_pct), 2),
+            "vix_3d_pct": round(float(vix_3d_pct), 2),
+            "vix_confirms": bool(vix_confirms),
+            "risk_level": risk_level,
+            "note": (
+                "USDJPY'nin hizla dusmesi (JPY guclenmesi) + VIX sicramasi, dusuk faizli yen "
+                "ile finanse edilen risk varliklarinin (BTC, ABD hisseleri, EM FX, altin) "
+                "kitlesel tasfiyesine (5 Agustos 2024 benzeri) isaret edebilir."
+            ),
+            "time": now_text(),
+        }
+    return _cache_get_or_fetch("carry_trade_risk", 14400, _fetch)
 
 
 def get_bull_bear_market_regime(market: str) -> Dict[str, Any]:
@@ -6083,6 +6554,108 @@ def get_market_cycle_bias(symbol: str, action: str, market: str) -> Dict[str, An
             f"caydırılır ve (kripto için) pozisyon boyutu küçültülür."
         )
     return {"bias": bias, "qty_scale": qty_scale, "notes": [note], "regime": regime}
+
+
+def get_macro_swing_zone(symbol: str) -> Dict[str, Any]:
+    """Kullanicinin talebi: 'BTC 120binden 60bine dustu, simdi 80binlerde
+    periyodik fiyat hareketleri oluyor - son 5 yildaki hareketleri tarayip
+    dip ve zirvelerde uzun vadeli long/short degerlendirelim'. Sadece
+    MACRO_SWING_SYMBOLS icindeki semboller (varsayilan BTCUSDT/ETHUSDT) icin
+    calisir. 5 yillik gunluk kapanis fiyatlarinin en dusuk/en yuksek
+    seviyelerini bulur, mevcut fiyatin bunlara yuzde mesafesini hesaplar ve
+    haftalik (gunluk kapanislardan resample edilmis) RSI ile teyit arar:
+      - DIP:  fiyat 5y dusukten <= MACRO_SWING_ZONE_PCT uzakta VE haftalik
+              RSI <= MACRO_SWING_RSI_OVERSOLD (asiri satim) -> uzun vadeli
+              LONG icin firsat bolgesi.
+      - PEAK: fiyat 5y yuksekten <= MACRO_SWING_ZONE_PCT uzakta VE haftalik
+              RSI >= MACRO_SWING_RSI_OVERBOUGHT (asiri alim) -> uzun vadeli
+              SHORT icin firsat bolgesi.
+      - NONE: digerleri (bolge disi ya da RSI teyidi yok).
+    Sonuc 6 saat cache'lenir (5 yillik veri sik degismez, yfinance yavas
+    olabilir); hata durumunda sessizce NONE'a duser (fail-open)."""
+    sym = str(symbol or "").upper()
+    ticker = MACRO_SWING_YF_TICKERS.get(sym)
+    if not ticker:
+        return {"zone": "NONE", "symbol": sym, "notes": []}
+
+    def _fetch():
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period="5y", interval="1d", auto_adjust=True)
+        closes = hist["Close"].dropna()
+        if len(closes) < 260:
+            raise RuntimeError("Yetersiz 5 yillik veri (en az ~1 yil gerekli)")
+        current = float(closes.iloc[-1])
+        low_5y = float(closes.min())
+        high_5y = float(closes.max())
+        pct_from_low = ((current / low_5y) - 1.0) * 100.0 if low_5y > 0 else 0.0
+        pct_from_high = ((current / high_5y) - 1.0) * 100.0 if high_5y > 0 else 0.0
+        weekly_closes = closes.resample("W").last().dropna().tolist()
+        weekly_rsi = compute_rsi(weekly_closes, period=14)
+        zone = "NONE"
+        if (
+            pct_from_low <= MACRO_SWING_ZONE_PCT
+            and weekly_rsi is not None
+            and weekly_rsi <= MACRO_SWING_RSI_OVERSOLD
+        ):
+            zone = "DIP"
+        elif (
+            pct_from_high >= -MACRO_SWING_ZONE_PCT
+            and weekly_rsi is not None
+            and weekly_rsi >= MACRO_SWING_RSI_OVERBOUGHT
+        ):
+            zone = "PEAK"
+        return {
+            "zone": zone,
+            "symbol": sym,
+            "reference_symbol": ticker,
+            "price": round(current, 2),
+            "low_5y": round(low_5y, 2),
+            "high_5y": round(high_5y, 2),
+            "pct_from_low": round(pct_from_low, 2),
+            "pct_from_high": round(pct_from_high, 2),
+            "weekly_rsi": round(weekly_rsi, 2) if weekly_rsi is not None else None,
+            "time": now_text(),
+        }
+    try:
+        return _cache_get_or_fetch(f"macro_swing_zone_{sym}", 21600, _fetch)
+    except Exception:
+        return {"zone": "NONE", "symbol": sym, "notes": []}
+
+
+def get_macro_swing_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
+    """get_macro_swing_zone sonucuna gore islem yonune bias ekler. Bolge
+    yonunde (DIP+BUY veya PEAK+SELL) islem GUCLU desteklenir (+20 bias) ve
+    is_macro_swing_entry=True donulur - cagiran taraf bunu gorunce
+    db_set_symbol_tp_sl_override ile MACRO_SWING_TAKE_PROFIT_PCT/
+    MACRO_SWING_STOP_LOSS_PCT (varsayilan %28/%14) uygular. Bolgeye KARSI
+    islem (DIP+SELL veya PEAK+BUY) caydirilir (-15 bias). Pozisyon
+    boyutlandirma bilerek DEGISTIRILMEZ (kullanicinin talebi: mevcut % risk
+    kurallariyla ayni kalsin) - sadece TP/SL genisletilir."""
+    sym = str(symbol or "").upper()
+    if sym not in MACRO_SWING_SYMBOLS or action not in ("BUY", "SELL"):
+        return {"bias": 0, "notes": [], "is_macro_swing_entry": False, "zone": "NONE"}
+    try:
+        zone_info = get_macro_swing_zone(sym)
+    except Exception:
+        return {"bias": 0, "notes": [], "is_macro_swing_entry": False, "zone": "NONE"}
+    zone = zone_info.get("zone", "NONE")
+    if zone == "NONE":
+        return {"bias": 0, "notes": [], "is_macro_swing_entry": False, "zone": "NONE"}
+    with_trend = (zone == "DIP" and action == "BUY") or (zone == "PEAK" and action == "SELL")
+    zone_label = "5 yıllık DİP" if zone == "DIP" else "5 yıllık ZİRVE"
+    if with_trend:
+        note = (
+            f"[Uzun Vadeli Makro Salınım] {sym} {zone_label} bölgesinde "
+            f"(5y düşükten %{zone_info.get('pct_from_low')}, 5y yüksekten %{zone_info.get('pct_from_high')}, "
+            f"haftalık RSI {zone_info.get('weekly_rsi')}): {action} güçlü destekleniyor, "
+            f"kâr/zarar hedefleri genişletildi (TP %{MACRO_SWING_TAKE_PROFIT_PCT:.0f} / SL %{MACRO_SWING_STOP_LOSS_PCT:.0f})."
+        )
+        return {"bias": 20, "notes": [note], "is_macro_swing_entry": True, "zone": zone, "zone_info": zone_info}
+    note = (
+        f"[Uzun Vadeli Makro Salınım] {sym} {zone_label} bölgesindeyken {action} yönü trende ters "
+        f"düştüğü için caydırılır."
+    )
+    return {"bias": -15, "notes": [note], "is_macro_swing_entry": False, "zone": zone, "zone_info": zone_info}
 
 
 def get_dip_recovery_bias(symbol: str, action: str, market: str, broker: str) -> Dict[str, Any]:
@@ -6836,6 +7409,63 @@ def get_financial_statement_analysis() -> Dict[str, Any]:
     return _cache_get_or_fetch("financial_statement_analysis", 43200, _fetch)
 
 
+def get_orderbook_spoofing_signal(symbol: str) -> Optional[Dict[str, Any]]:
+    """Binance Futures emir defterinden (order book) en iyi 20 seviyeyi ceker ve
+    'spoofing/layering' supheli buyuk emir duvarlarini tespit eder: spread'e en
+    yakin (top-of-book) seviye haric, derinlikteki (2. seviyeden itibaren)
+    seviyelerden birinin hacmi o taraftaki diger seviyelerin MEDYANININ cok
+    uzerindeyse (ornegin 8 kat+) bu, gercekte doldurulma niyeti olmayan, sadece
+    fiyati bir yone itmek/baskilamak icin konulmus 'sahte duvar' (spoof wall)
+    olabilir. Top-of-book haric tutulur cunku spread'e en yakin seviyede dogal
+    hacim yigilmasi (yuvarlak sayi kumelenmesi) cok yaygindir ve tek basina
+    supheli sayilmaz. Kesin kanit degildir, istatistiksel bir uyari isaretidir."""
+    try:
+        base = FUTURES_BASE
+        data = public_get(base, "/fapi/v1/depth", {"symbol": symbol, "limit": 20})
+        bids = data.get("bids") or []
+        asks = data.get("asks") or []
+        if len(bids) < 8 or len(asks) < 8:
+            return None
+
+        def _wall_ratio(levels: List[List[str]]) -> Optional[Dict[str, float]]:
+            # Top-of-book (en iyi seviye) haric tut - dogal yigilma orada yaygin.
+            depth_levels = levels[1:]
+            sizes = [safe_float(lv[1]) for lv in depth_levels]
+            if len(sizes) < 5 or sum(sizes) <= 0:
+                return None
+            sorted_sizes = sorted(sizes)
+            mid = len(sorted_sizes) // 2
+            median_size = sorted_sizes[mid]
+            max_size = max(sizes)
+            max_idx = sizes.index(max_size)
+            if median_size <= 0:
+                return None
+            ratio = max_size / median_size
+            return {"ratio": ratio, "price": safe_float(depth_levels[max_idx][0])}
+
+        bid_wall = _wall_ratio(bids)
+        ask_wall = _wall_ratio(asks)
+
+        flags: List[str] = []
+        if bid_wall and bid_wall["ratio"] >= ORDERBOOK_SPOOF_WALL_RATIO:
+            flags.append(
+                f"Alış tarafında derinlikte {bid_wall['price']:g} seviyesinde medyanın {bid_wall['ratio']:.1f} katı "
+                "büyüklüğünde emir duvarı - spoofing/layering şüphesi (fiyatı desteklemeden yukarı itme girişimi olabilir)"
+            )
+        if ask_wall and ask_wall["ratio"] >= ORDERBOOK_SPOOF_WALL_RATIO:
+            flags.append(
+                f"Satış tarafında derinlikte {ask_wall['price']:g} seviyesinde medyanın {ask_wall['ratio']:.1f} katı "
+                "büyüklüğünde emir duvarı - spoofing/layering şüphesi (fiyatı baskılama girişimi olabilir)"
+            )
+        return {
+            "bid_wall_ratio": round(bid_wall["ratio"], 2) if bid_wall else None,
+            "ask_wall_ratio": round(ask_wall["ratio"], 2) if ask_wall else None,
+            "flags": flags,
+        }
+    except Exception:
+        return None
+
+
 def get_klines_volume_stats(symbol: str, market: str = "FUTURES", limit: int = 30) -> Optional[Dict[str, Any]]:
     """Son N gunluk mum verisinden ortalama hacim ve son gunun hacim orani ile
     fiyat/hacim uyumsuzlugunu hesaplar. Ani hacim patlamasi (ort. hacmin 3 kati+)
@@ -6863,11 +7493,51 @@ def get_klines_volume_stats(symbol: str, market: str = "FUTURES", limit: int = 3
         return None
 
 
+def get_pump_dump_acceleration_signal(symbol: str) -> Optional[Dict[str, Any]]:
+    """Son 3 saatlik (1 saatlik mumlarla) kumulatif fiyat degisimi + hacim oranini
+    inceleyerek klasik 'pump&dump' oruntusune (kisa surede anormal sert yon +
+    anormal hacim patlamasi, sonrasinda genelde sert geri donus) benzer ani
+    hizlanma olup olmadigini tespit eder. Gunluk mum bazli get_klines_volume_stats'a
+    gore cok daha kisa vadeli (saatlik) bir pencereye bakar, bu yuzden gun ici
+    ani pump/dump hareketlerini de yakalayabilir."""
+    try:
+        base = FUTURES_BASE
+        data = public_get(base, "/fapi/v1/klines", {"symbol": symbol, "interval": "1h", "limit": 30})
+        if not isinstance(data, list) or len(data) < 6:
+            return None
+        closes = [safe_float(row[4]) for row in data]
+        volumes = [safe_float(row[5]) for row in data]
+        last_3h_change_pct = ((closes[-1] / closes[-4] - 1.0) * 100.0) if closes[-4] else 0.0
+        last_3h_volume = sum(volumes[-3:])
+        prior_volumes = volumes[:-3]
+        avg_3h_volume = (sum(prior_volumes) / len(prior_volumes) * 3) if prior_volumes else 0.0
+        volume_ratio = (last_3h_volume / avg_3h_volume) if avg_3h_volume > 0 else 0.0
+
+        flags: List[str] = []
+        if abs(last_3h_change_pct) >= PUMP_DUMP_ACCEL_PCT and volume_ratio >= PUMP_DUMP_ACCEL_VOLUME_RATIO:
+            direction = "PUMP (ani yükseliş)" if last_3h_change_pct > 0 else "DUMP (ani düşüş)"
+            flags.append(
+                f"Son 3 saatte %{last_3h_change_pct:+.1f} hareket + hacim ortalamanın {volume_ratio:.1f} katına çıktı "
+                f"- klasik {direction} örüntüsü, sonrasında sert geri dönüş riski yüksek"
+            )
+        return {
+            "last_3h_change_pct": round(last_3h_change_pct, 2),
+            "volume_ratio_3h_vs_avg": round(volume_ratio, 2),
+            "flags": flags,
+        }
+    except Exception:
+        return None
+
+
 def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
     """Kripto icin: buyuk hesap (whale) long/short orani + fonlama orani (funding
-    rate) asiriliklarini ve hacim/fiyat uyumsuzluguna dayali olasi manipulasyon
+    rate) asiriliklarini, hacim/fiyat uyumsuzluguna dayali olasi manipulasyon
     (pump&dump, ani hacim patlamasi, asiri kaldiracli tek yonlu yigilma - short
-    squeeze/long squeeze riski) isaretlerini tarar.
+    squeeze/long squeeze riski), saatlik pump&dump hizlanma orunusu (bkz.
+    get_pump_dump_acceleration_signal - status/bias'i etkiler) ve emir defteri
+    spoof/layering supheli duvarlarini (bkz. get_orderbook_spoofing_signal -
+    tek-snapshot yanlis-pozitif riski yuksek oldugundan SADECE bilgi amacli
+    raporlanir, status/bias'i tetiklemez) tarar.
     Hisse senetleri icin: kisa pozisyon orani (short interest / float), kapanma
     gunu sayisi (short ratio/days-to-cover - yuksekse short squeeze potansiyeli),
     kurumsal ve icerden (insider) sahiplik oranlarini raporlar (yuksek kurumsal
@@ -6907,6 +7577,18 @@ def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
                             "- ince likidite, manipülasyona açık"
                         )
 
+                pump_dump = get_pump_dump_acceleration_signal(sym)
+                if pump_dump and pump_dump.get("flags"):
+                    flags.extend(pump_dump["flags"])
+
+                # NOT: Order book spoof/layering tespiti tek bir aninlik (snapshot)
+                # emir defteri goruntusune dayanir; gercek spoofing tekrarlanan
+                # emir/iptal davranisi gerektirir ve tek snapshot yanlis-pozitif
+                # orani yuksektir. Bu yuzden status/bias'i TETIKLEMEZ, sadece
+                # bilgi amacli ayri bir alanda raporlanir.
+                spoof = get_orderbook_spoofing_signal(sym)
+                spoof_flags_informational = spoof.get("flags", []) if spoof else []
+
                 status = "MANİPÜLASYON RİSKİ / AŞIRI POZİSYONLANMA" if flags else "NORMAL"
                 results.append({
                     "symbol": sym,
@@ -6916,6 +7598,11 @@ def get_market_positioning_and_manipulation_analysis() -> Dict[str, Any]:
                     "funding_rate_pct": funding_pct,
                     "volume_ratio_vs_avg": vol_stats.get("volume_ratio_vs_avg") if vol_stats else None,
                     "last_day_change_pct": vol_stats.get("last_day_change_pct") if vol_stats else None,
+                    "last_3h_change_pct": pump_dump.get("last_3h_change_pct") if pump_dump else None,
+                    "volume_ratio_3h_vs_avg": pump_dump.get("volume_ratio_3h_vs_avg") if pump_dump else None,
+                    "bid_wall_ratio": spoof.get("bid_wall_ratio") if spoof else None,
+                    "ask_wall_ratio": spoof.get("ask_wall_ratio") if spoof else None,
+                    "orderbook_flags_informational": spoof_flags_informational,
                     "status": status,
                     "flags": flags,
                 })
@@ -7751,6 +8438,11 @@ def compute_correlation_matrix(symbols: List[str]) -> List[Dict[str, Any]]:
 # fark edilmeden artmasini onlemek icin esikler.
 PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT = float(os.getenv("PORTFOLIO_MAX_CORRELATED_EXPOSURE_PCT", "40.0"))
 
+# Pozisyon boyutlandirma katmanlarinin (market_cycle x ATR x portfolio_risk x
+# Kelly) bilesik/carpimsal urunune ust tavan. bkz. _auto_trader_run_symbol
+# icindeki uygulama noktasi (MAX_COMBINED_QTY_SCALE aramasi ile bulunabilir).
+MAX_COMBINED_QTY_SCALE = float(os.getenv("MAX_COMBINED_QTY_SCALE", "1.5"))
+
 
 def get_total_portfolio_value_usd() -> float:
     """Tum hesaplarin (Binance + IBKR) toplam USD degerini dondurur - TRY
@@ -8357,6 +9049,9 @@ def auto_trader_cycle(state=None, lock=None, history=None) -> None:
     # acilabiliyor, STK gibi tamamen Cmt/Paz kapali degil.
     _is_weekend_scan = broker == "IBKR" and datetime.utcnow().weekday() >= 5
     for symbol in symbols:
+        # Check if Binance symbol is excluded (poor performance)
+        if broker == "BINANCE" and symbol.upper() in BINANCE_AUTO_TRADE_EXCLUDED_SYMBOLS:
+            continue
         if _is_weekend_scan:
             _sym_asset_type = get_ibkr_symbol_market_info(symbol).get("asset_type", asset_type)
             if _sym_asset_type == "STK":
@@ -8744,6 +9439,24 @@ def _auto_trader_run_symbol(
             reason = (reason + " " + " ".join(market_cycle["notes"])).strip()
         market_cycle_qty_scale = market_cycle.get("qty_scale", 1.0)
 
+        # Kullanicinin talebi: 'BTC 120binden 60bine dustu, simdi 80binlerde
+        # periyodik fiyat hareketleri oluyor - 5 yillik hareketleri tarayip
+        # dip/zirvelerde uzun vadeli long/short acalim, kar/zarar limitleri
+        # farkli olsun'. Sadece BTCUSDT/ETHUSDT icin (bkz. MACRO_SWING_SYMBOLS):
+        # fiyat 5 yillik dip/zirveye yakinken VE haftalik RSI teyidi varsa
+        # trend yonundeki islem guclu desteklenir ve o sembol icin (bolgede
+        # kaldigi surece) genis TP/SL override'i otomatik uygulanir/kaldirilir.
+        macro_swing = get_macro_swing_bias(symbol, action, market, broker)
+        if macro_swing["bias"] != 0:
+            confidence = max(0, min(95, confidence + macro_swing["bias"]))
+        if macro_swing["notes"]:
+            reason = (reason + " " + " ".join(macro_swing["notes"])).strip()
+        if symbol.upper() in MACRO_SWING_SYMBOLS:
+            try:
+                sync_macro_swing_tp_sl_override(broker, symbol, macro_swing.get("zone", "NONE"))
+            except Exception:
+                pass
+
         # Kullanicinin talebi: 'ATR ekle' - volatiliteye gore pozisyon boyutu
         # otomatik ayarlanir (yuksek volatilitede kucult, dusuk volatilitede
         # buyut). Sadece boyut/bilgi katmanidir, confidence'a bias eklemez -
@@ -8774,6 +9487,23 @@ def _auto_trader_run_symbol(
         if kelly_scale_info.get("notes"):
             reason = (reason + " " + " ".join(kelly_scale_info["notes"])).strip()
         kelly_qty_scale = kelly_scale_info.get("qty_scale", 1.0)
+
+        # KRITIK GUVENLIK KATMANI (yeniden eklendi - buyuk kod yenilemesinde
+        # kaybolmustu): market_cycle x ATR x portfolio_risk x Kelly katsayilari
+        # ayni yonde (hepsi buyutucu) cakisirsa pozisyon boyutu carpimsal olarak
+        # asiri buyuyebilir. Canli ornek: BTCUSDT SHORT islemi, diger ayni gunku
+        # BTC islemlerine gore ~2.6x daha buyuk acilip -8.08 USD (-%3.92) zarar
+        # ettirmisti - teminat tabani ~206 USD iken digerleri ~80 USD idi. Bu
+        # katman 4 carpanin BILESIK/CARPIMSAL urununu MAX_COMBINED_QTY_SCALE ile
+        # sinirlar; asilirsa orantisal agirliklari koruyarak hepsini asagi
+        # olcekler. Kucultucu yonde (urun < 1.0) hicbir zaman kisitlanmaz.
+        _combined_scale_product = market_cycle_qty_scale * atr_qty_scale * portfolio_risk_qty_scale * kelly_qty_scale
+        if _combined_scale_product > MAX_COMBINED_QTY_SCALE:
+            _combined_scale_factor = (MAX_COMBINED_QTY_SCALE / _combined_scale_product) ** 0.25
+            market_cycle_qty_scale *= _combined_scale_factor
+            atr_qty_scale *= _combined_scale_factor
+            portfolio_risk_qty_scale *= _combined_scale_factor
+            kelly_qty_scale *= _combined_scale_factor
 
         # Kullanicinin talebi: 'sektör rotasyonu ekle' - ayni sektordeki lider
         # varlik belirgin hareket ettiyse ama bu sembol henuz takip etmediyse
@@ -9039,7 +9769,7 @@ def _auto_trader_run_symbol(
                                     realized_pnl=pnl_amount,
                                     realized_pnl_pct=pnl_pct,
                                     close_reason="AI_KARARI",
-                                    detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
+                                    detail=f"AI SELL kararıyla kapandı: {reason[:600]}",
                                 )
                                 db_delete_spot_position(symbol)
                                 maybe_open_chain_order("BINANCE_SPOT", symbol, qty, exit_price)
@@ -9538,7 +10268,7 @@ def _auto_trader_run_symbol(
                                 realized_pnl=pnl_amount,
                                 realized_pnl_pct=pnl_pct,
                                 close_reason="AI_KARARI",
-                                detail=f"AI SELL kararıyla kapandı: {reason[:200]}",
+                                detail=f"AI SELL kararıyla kapandı: {reason[:600]}",
                             )
                             maybe_open_chain_order("IBKR", symbol, filled_qty, exit_price)
                         if pre_close_short_position and not execution.get("error") and safe_float(execution.get("filled")) > 0:
@@ -9561,7 +10291,7 @@ def _auto_trader_run_symbol(
                                 realized_pnl=pnl_amount,
                                 realized_pnl_pct=pnl_pct,
                                 close_reason="AI_KARARI",
-                                detail=f"AI BUY (buy to cover) kararıyla short pozisyon kapandı: {reason[:200]}",
+                                detail=f"AI BUY (buy to cover) kararıyla short pozisyon kapandı: {reason[:600]}",
                             )
                 else:
                     execution = {
@@ -9730,7 +10460,7 @@ def _auto_trader_run_symbol(
                                 realized_pnl=pnl_amount,
                                 realized_pnl_pct=pnl_pct,
                                 close_reason="AI_KARARI",
-                                detail=f"AI {action} kararıyla kapandı: {reason[:200]}",
+                                detail=f"AI {action} kararıyla kapandı: {reason[:600]}",
                             )
                             maybe_open_chain_order("BINANCE_FUTURES", symbol, closed_qty, exit_price)
                 else:
@@ -9831,13 +10561,50 @@ def _auto_trader_run_symbol(
             execution=execution,
             confirmations=signal_confirmations,
         )
+IBKR_OUTAGE_ALERT_THRESHOLD_SEC = int(os.getenv("IBKR_OUTAGE_ALERT_THRESHOLD_SEC", "600"))
+_IBKR_DISCONNECTED_SINCE_EPOCH = 0.0
+_IBKR_OUTAGE_ALERT_SENT = False
+
+
 def _ibkr_keepalive_loop():
+    global _IBKR_DISCONNECTED_SINCE_EPOCH, _IBKR_OUTAGE_ALERT_SENT
     while True:
         time.sleep(max(8, IBKR_KEEPALIVE_SEC))
         if not IBKR_ENABLED:
             continue
         try:
             ibkr_ping()
+        except Exception:
+            pass
+
+        # Kullanicinin talebi: IBKR baglantisi uzun sure kesikse (2FA oturumu
+        # dusmus, gateway cokmus vb.) kullaniciya sormasini beklemeden
+        # proaktif olarak haber ver - once bunu fark etmek icin uygulamayi
+        # sorgulamasi gerekiyordu.
+        try:
+            is_connected = bool(IBKR_RUNTIME.get("connected"))
+            now_epoch = time.time()
+            if is_connected:
+                _IBKR_DISCONNECTED_SINCE_EPOCH = 0.0
+                _IBKR_OUTAGE_ALERT_SENT = False
+            else:
+                if _IBKR_DISCONNECTED_SINCE_EPOCH == 0.0:
+                    _IBKR_DISCONNECTED_SINCE_EPOCH = now_epoch
+                elif (
+                    not _IBKR_OUTAGE_ALERT_SENT
+                    and (now_epoch - _IBKR_DISCONNECTED_SINCE_EPOCH) >= IBKR_OUTAGE_ALERT_THRESHOLD_SEC
+                ):
+                    _IBKR_OUTAGE_ALERT_SENT = True
+                    down_min = (now_epoch - _IBKR_DISCONNECTED_SINCE_EPOCH) / 60.0
+                    send_alert_email(
+                        subject="[DFinans] IBKR bağlantısı kesik (uzun süredir)",
+                        body=(
+                            f"IBKR Gateway bağlantısı yaklaşık {down_min:.0f} dakikadır KESİK.\n"
+                            f"Muhtemelen 2FA oturumu düşmüş veya Gateway yeniden başlatma "
+                            f"bekliyor olabilir - mobil onay gerekebilir.\n\n"
+                            f"Zaman: {now_text()}"
+                        ),
+                    )
         except Exception:
             pass
 
@@ -9872,6 +10639,24 @@ def _ibkr_stuck_watchdog_loop():
 
 _SPOT_RECONCILE_INTERVAL_SEC = 300
 _SPOT_RECONCILE_LAST_TS = 0.0
+# Kullanicinin talebi: 'gercek yatirimci gibi davran' - tek tek islemler SL ile
+# korunsa da, art arda cok sayida kayip islem hesabi yavas yavas eritebilir.
+# Bu katman GUNLUK/HAFTALIK TOPLAM gerceklesen zarara (hesap degerinin bir
+# yuzdesi olarak) bir tavan koyar; asilirsa TUM auto-traderlar durdurulur.
+# Env ile ayarlanabilir; varsayilanlar tutucu (gunluk %3, haftalik %6).
+DAILY_MAX_LOSS_PCT = float(os.getenv("DAILY_MAX_LOSS_PCT", "3.0"))
+WEEKLY_MAX_LOSS_PCT = float(os.getenv("WEEKLY_MAX_LOSS_PCT", "6.0"))
+_LOSS_BREAKER_CHECK_INTERVAL_SEC = 60
+_LOSS_BREAKER_LAST_TS = 0.0
+RISK_CIRCUIT_BREAKER: Dict[str, Any] = {
+    "tripped": False,
+    "period": "",
+    "reason": "",
+    "tripped_at": "",
+    "realized_pnl_usd": 0.0,
+    "threshold_usd": 0.0,
+}
+_RISK_CIRCUIT_BREAKER_LOCK = threading.Lock()
 # Kullanicinin talebi: IBKR'de 'emir iletildi ama gerceklesmedi' durumunda
 # takili kalan AI karar kayitlarinin, emir sonradan (mesela seans acildiginda)
 # dolunca otomatik olarak 'İŞLEME DÖNÜŞTÜ' gorunmesi icin periyodik kontrol.
@@ -9879,8 +10664,89 @@ _IBKR_ORDER_RECONCILE_INTERVAL_SEC = 30
 _IBKR_ORDER_RECONCILE_LAST_TS = 0.0
 
 
+def check_and_enforce_loss_circuit_breaker() -> None:
+    """Gunluk/haftalik toplam gerceklesen zarar hesabin belirli bir yuzdesini
+    (DAILY_MAX_LOSS_PCT / WEEKLY_MAX_LOSS_PCT) gecerse TUM auto-traderlari
+    (Binance Futures/Spot, IBKR) otomatik durdurur. KASTEN otomatik olarak
+    tekrar acilmaz (yeni gun/hafta baslasa bile) - kullanicinin durumu gozden
+    gecirip ilgili /auto-trader/start (veya /spot,/ibkr) ile MANUEL olarak
+    yeniden baslatmasi gerekir; boylece sessizce/fark edilmeden tekrar risk
+    alinmaz. Zaten tetiklenmisse (RISK_CIRCUIT_BREAKER['tripped']) tekrar
+    kontrol/durdurma yapilmaz (spam onleme)."""
+    with _RISK_CIRCUIT_BREAKER_LOCK:
+        if RISK_CIRCUIT_BREAKER["tripped"]:
+            return
+    try:
+        total_usd = get_total_account_usd()
+        if total_usd <= 0:
+            return
+        rows = db_all_position_closures(days=8, include_mandatory_holdings=False)
+        now = datetime.now()
+        today_key = now.strftime("%Y-%m-%d")
+        week_cutoff = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        today_rows = [r for r in rows if str(r.get("created_at", "")).startswith(today_key)]
+        week_rows = [r for r in rows if str(r.get("created_at", "")) >= week_cutoff]
+        daily_pnl = sum(safe_float(r.get("realized_pnl")) for r in today_rows)
+        weekly_pnl = sum(safe_float(r.get("realized_pnl")) for r in week_rows)
+        daily_threshold = -(DAILY_MAX_LOSS_PCT / 100.0) * total_usd
+        weekly_threshold = -(WEEKLY_MAX_LOSS_PCT / 100.0) * total_usd
+
+        tripped = None
+        if daily_pnl <= daily_threshold:
+            tripped = (
+                "daily",
+                f"Günlük gerçekleşen zarar {daily_pnl:.2f} USD, hesabın %{DAILY_MAX_LOSS_PCT:.1f} "
+                f"limitini ({daily_threshold:.2f} USD) aştı.",
+                daily_pnl, daily_threshold,
+            )
+        elif weekly_pnl <= weekly_threshold:
+            tripped = (
+                "weekly",
+                f"Son 7 günlük gerçekleşen zarar {weekly_pnl:.2f} USD, hesabın %{WEEKLY_MAX_LOSS_PCT:.1f} "
+                f"limitini ({weekly_threshold:.2f} USD) aştı.",
+                weekly_pnl, weekly_threshold,
+            )
+        if not tripped:
+            return
+        period, reason_text, pnl_value, threshold_value = tripped
+        with _RISK_CIRCUIT_BREAKER_LOCK:
+            if RISK_CIRCUIT_BREAKER["tripped"]:
+                return
+            RISK_CIRCUIT_BREAKER.update({
+                "tripped": True,
+                "period": period,
+                "reason": reason_text,
+                "tripped_at": now_text(),
+                "realized_pnl_usd": round(pnl_value, 2),
+                "threshold_usd": round(threshold_value, 2),
+            })
+        for state, lock in ((AUTO_TRADER, AUTO_LOCK), (SPOT_AUTO_TRADER, SPOT_AUTO_LOCK), (IBKR_AUTO_TRADER, IBKR_AUTO_LOCK)):
+            with lock:
+                state.enabled = False
+                state.last_error = f"RISK CIRCUIT BREAKER: {reason_text}"
+                state.last_reason = f"Otomatik olarak durduruldu: {reason_text}"
+                state.last_update = now_text()
+        print(f"[RISK CIRCUIT BREAKER] {reason_text} - tüm auto-traderlar durduruldu.", flush=True)
+        send_alert_email(
+            subject=(
+                f"[DFinans] ACİL: {'Günlük' if period == 'daily' else 'Haftalık'} "
+                f"zarar limiti aşıldı - trading durduruldu"
+            ),
+            body=(
+                f"{reason_text}\n\n"
+                f"Tüm otomatik alım-satım (Binance Futures, Binance Spot, IBKR) DURDURULDU.\n"
+                f"Tekrar başlatmak için uygulamadan manuel olarak yeniden başlatmanız gerekiyor "
+                f"(/risk/circuit-breaker/reset veya ilgili auto-trader start).\n\n"
+                f"Zaman: {now_text()}"
+            ),
+        )
+    except Exception as e:
+        print(f"[RISK CIRCUIT BREAKER] Kontrol hatası: {e}", flush=True)
+
+
 def _auto_trader_loop():
-    global _SPOT_RECONCILE_LAST_TS, _IBKR_ORDER_RECONCILE_LAST_TS
+    global _SPOT_RECONCILE_LAST_TS, _IBKR_ORDER_RECONCILE_LAST_TS, _LOSS_BREAKER_LAST_TS
+    global _IBKR_POSITION_RECONCILE_LAST_TS
     while True:
         if (time.time() - _SPOT_RECONCILE_LAST_TS) >= _SPOT_RECONCILE_INTERVAL_SEC:
             _SPOT_RECONCILE_LAST_TS = time.time()
@@ -9894,6 +10760,21 @@ def _auto_trader_loop():
             try:
                 if IBKR_RUNTIME.get("connected"):
                     reconcile_pending_ibkr_order_fills()
+            except Exception:
+                pass
+
+        if (time.time() - _IBKR_POSITION_RECONCILE_LAST_TS) >= _IBKR_POSITION_RECONCILE_INTERVAL_SEC:
+            _IBKR_POSITION_RECONCILE_LAST_TS = time.time()
+            try:
+                if IBKR_RUNTIME.get("connected"):
+                    reconcile_ibkr_positions()
+            except Exception:
+                pass
+
+        if (time.time() - _LOSS_BREAKER_LAST_TS) >= _LOSS_BREAKER_CHECK_INTERVAL_SEC:
+            _LOSS_BREAKER_LAST_TS = time.time()
+            try:
+                check_and_enforce_loss_circuit_breaker()
             except Exception:
                 pass
 
@@ -10428,19 +11309,25 @@ def get_futures_positions() -> List[Dict[str, Any]]:
 
     if BINANCE_PROXY_BASE_URL:
         try:
-            # Try direct /positions endpoint first (VPS proxy has this)
+            # Proxy /positions'in BASARIYLA (istisnasiz) don mesi, bos bir liste
+            # olsa bile GECERLI bir sonuc - "acik futures pozisyonu yok" demektir,
+            # "bulunamadi/hata" degil. Eskiden bos liste yanlislikla hata sayilip
+            # /account-summary'ye, o da basarisiz olunca IP whitelist'i sadece VPS
+            # proxy'sinde olan dogrudan Binance API'ye (401 Invalid API-key/IP)
+            # dusuluyordu - bu da kullaniciya sahte bir 'HATA' pozisyonu olarak
+            # gozukuyordu, halbuki gercek durum sadece 'pozisyon yok' idi.
             legacy_pos = _binance_proxy_request("GET", "/positions")
             rows = _proxy_extract_positions_from_legacy_positions(legacy_pos)
-            if rows:
-                return _enrich_pnl_pct(rows)
-            # If empty, try /portfolio fallback
-            legacy = _binance_proxy_portfolio_payload()
-            rows = _proxy_extract_positions_from_portfolio(legacy)
-            if rows:
-                return _enrich_pnl_pct(rows)
-            raise RuntimeError("Proxy /positions veya /portfolio'dan futures position bulunamadı.")
+            return _enrich_pnl_pct(rows)
         except Exception as proxy_err:
-            pass
+            try:
+                # Proxy /positions cagrisinin kendisi basarisiz oldu (network/5055
+                # servisi coktu vb.) - /account-summary uzerinden ikinci bir deneme.
+                legacy = _binance_proxy_portfolio_payload()
+                rows = _proxy_extract_positions_from_portfolio(legacy)
+                return _enrich_pnl_pct(rows)
+            except Exception:
+                pass
     try:
         data = signed_request("GET", FUTURES_BASE, "/fapi/v2/positionRisk", {})
         positions = []
@@ -11412,6 +12299,149 @@ def reconcile_spot_positions() -> Dict[str, Any]:
                 result["removed"].append(symbol)
             except Exception:
                 continue
+    return result
+
+
+_IBKR_POSITION_RECONCILE_INTERVAL_SEC = 120
+_IBKR_POSITION_RECONCILE_LAST_TS = 0.0
+
+
+def reconcile_ibkr_positions() -> Dict[str, Any]:
+    """Kullanicinin bildirdigi sorun: 'USO pozisyonu kapanmis ama dfinansda
+    (AI İşlem Günlüğü / position_closures) gözükmüyor'. IBKR pozisyonlari
+    (Binance spot'un aksine) hicbir DB tablosunda takip edilmiyordu - botun
+    KENDI actigi/kapattigi islemler icin sorun degil (execution basarili
+    olunca db_record_position_closure zaten cagriliyor), ama kullanici TWS/
+    mobil uygulamadan (ornegin 2FA/manuel giris sirasinda) bot DISINDA bir
+    pozisyonu kapatirsa bunu tespit edip kaydedecek hicbir mekanizma yoktu.
+
+    Bu fonksiyon her dongude canli IBKR pozisyonlarinin anlik goruntusunu
+    ibkr_position_state tablosuyla karsilastirir:
+    - Onceki dongude VAR olup simdi ARTIK YOK olan bir sembol -> harici/manuel
+      kapatma tespit edilir. Kesin kapanis fiyati bilinmedigi icin (bot disinda
+      gerceklesen emrin fill fiyatina erisimimiz yok) o anki piyasa fiyati
+      yaklasik cikis fiyati olarak kullanilir - bu acikca detail metninde
+      belirtilir. position_closures + auto_history'ye 'MANUAL' nedeniyle
+      yaziliyor ki hem /position-closures hem /ai-decision-center (AI Islem
+      Gunlugu) ekranlarinda gorunsun.
+    - Botun KENDI az once kapattigi bir pozisyonla CAKISMAYI (cift kayit)
+      onlemek icin: son 15 dakika icinde ayni sembol/broker icin zaten bir
+      position_closures kaydi varsa, harici kapanis kaydi ATLANIR (bot zaten
+      kendi kaydini yazmis demektir).
+    - IBKR baglantisi kopuksa (ibkr_positions_snapshot hata firlatirsa) HICBIR
+      SEY yapilmaz (fail-open) - aksi halde bir baglanti kopuklugu tum acik
+      pozisyonlari 'kapandi' sanip yanlis kayitlar olusturabilirdi.
+    """
+    result: Dict[str, Any] = {"closed_detected": [], "error": ""}
+    try:
+        current = ibkr_positions_snapshot()
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+    current_by_symbol = {str(p.get("symbol", "")).upper(): p for p in current}
+    try:
+        previous = db_list_ibkr_position_state()
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+    previous_by_symbol = {str(p.get("symbol", "")).upper(): p for p in previous}
+
+    # 1) Guncel anlik goruntuyu kaydet/guncelle (bir sonraki dongu icin baz).
+    for symbol, pos in current_by_symbol.items():
+        try:
+            db_upsert_ibkr_position_state(
+                symbol=symbol,
+                side=str(pos.get("side", "")).upper(),
+                qty=abs(safe_float(pos.get("size") or pos.get("position"))),
+                entry_price=safe_float(pos.get("entry_price") or pos.get("avgCost")),
+                asset_type=str(pos.get("asset_type", "") or pos.get("secType", "")),
+                exchange=str(pos.get("exchange", "")),
+                currency=str(pos.get("currency", "")),
+            )
+        except Exception:
+            continue
+
+    # 2) Onceden acik olup simdi artik brokerda olmayan (bot disinda kapanmis)
+    # pozisyonlari tespit et.
+    for symbol, prev in previous_by_symbol.items():
+        if symbol in current_by_symbol:
+            continue
+        try:
+            recent = [
+                r for r in db_recent_position_closures(20)
+                if str(r.get("broker", "")).upper() == "IBKR"
+                and str(r.get("symbol", "")).upper() == symbol
+            ]
+            already_recorded = False
+            for r in recent:
+                try:
+                    created = datetime.strptime(str(r.get("created_at", "")), "%Y-%m-%d %H:%M:%S")
+                    if (datetime.now() - created).total_seconds() < 900:
+                        already_recorded = True
+                        break
+                except Exception:
+                    continue
+            if already_recorded:
+                db_delete_ibkr_position_state(symbol)
+                continue
+
+            side = str(prev.get("side", "")).upper() or "LONG"
+            qty = safe_float(prev.get("qty"))
+            entry_price_native = safe_float(prev.get("entry_price"))
+            asset_type = str(prev.get("asset_type", "") or "STK")
+            exchange = str(prev.get("exchange", "") or "SMART")
+            currency = str(prev.get("currency", "") or "USD")
+            if qty <= 0 or entry_price_native <= 0:
+                db_delete_ibkr_position_state(symbol)
+                continue
+
+            exit_price_native = entry_price_native
+            try:
+                snap = ibkr_market_snapshot(symbol, asset_type, exchange, currency)
+                exit_price_native = safe_float(snap.get("price")) or entry_price_native
+            except Exception:
+                pass
+
+            entry_price = get_ibkr_price_usd_equivalent(entry_price_native, exchange, currency)
+            exit_price = get_ibkr_price_usd_equivalent(exit_price_native, exchange, currency)
+            if side == "SHORT":
+                pnl_amount = (entry_price - exit_price) * qty
+            else:
+                pnl_amount = (exit_price - entry_price) * qty
+            pnl_pct = ((pnl_amount / (entry_price * qty)) * 100.0) if entry_price and qty else 0.0
+
+            detail = (
+                f"Pozisyon IBKR hesabında uygulama dışında (TWS/mobil - manuel) kapatılmış "
+                f"olarak tespit edildi. Kesin çıkış fiyatı botun elinde olmadığı için tespit "
+                f"anındaki piyasa fiyatı (~{exit_price_native:.4f}) yaklaşık çıkış fiyatı "
+                f"olarak kullanıldı, gerçekleşen K/Z bu nedenle yaklaşık bir değerdir."
+            )
+            db_record_position_closure(
+                broker="IBKR",
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                realized_pnl=pnl_amount,
+                realized_pnl_pct=pnl_pct,
+                close_reason="MANUAL",
+                detail=detail,
+            )
+            db_insert_auto_history(
+                broker="IBKR",
+                symbol=symbol,
+                action="MANUEL_KAPANIS",
+                confidence=0,
+                price=exit_price_native,
+                reason=detail,
+                execution={"simulated": True, "message": "Mutabakat: harici (manuel) kapanış tespit edildi."},
+            )
+            db_delete_ibkr_position_state(symbol)
+            result["closed_detected"].append(symbol)
+        except Exception:
+            continue
     return result
 
 
@@ -12991,6 +14021,60 @@ def place_futures_order(
         raise
 
 
+@app.route("/historical-scenarios", methods=["GET"])
+def historical_scenarios():
+    """2000'den beri yasanmis gercek tarihsel piyasa senaryolari (savas, petrol krizi,
+    secimler, merkez bankasi kararlari, pandemi, dogal afet, tekel davalari, dogru cikan
+    kurum/dusunce kurulusu raporlari vb.). Query params:
+      - category: belirli bir kategoriyle filtrele (list_historical_scenario_categories ile
+        mevcut kategorileri gorebilirsiniz)
+      - q: baslik/olay/piyasa tepkisi metninde serbest metin arama
+      - with_actions: "1" verilirse her senaryoya kategori bazli genel aksiyon/pozisyon
+        rehberi (action alani) eklenir
+    """
+    try:
+        category = request.args.get("category", "").strip()
+        query = request.args.get("q", "").strip()
+        with_actions = request.args.get("with_actions", "").strip() in ("1", "true", "yes")
+
+        if with_actions:
+            base_items = get_historical_market_scenarios_with_actions()
+        else:
+            base_items = get_historical_market_scenarios()
+
+        if query:
+            q = query.lower()
+            items = [
+                s for s in base_items
+                if q in " ".join([
+                    s.get("title", ""), s.get("category", ""), s.get("event", ""),
+                    s.get("market_reaction", ""),
+                ]).lower()
+            ]
+        elif category:
+            cat = category.strip().lower()
+            items = [s for s in base_items if s.get("category", "").strip().lower() == cat]
+        else:
+            items = base_items
+
+        return jsonify({
+            "ok": True,
+            "count": len(items),
+            "categories": list_historical_scenario_categories(),
+            "scenarios": items,
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/historical-scenarios/categories", methods=["GET"])
+def historical_scenarios_categories():
+    try:
+        return jsonify({"ok": True, "categories": list_historical_scenario_categories()})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
@@ -13057,6 +14141,92 @@ def ibkr_health():
     return jsonify(payload), (200 if connected else 503)
 
 
+RAILWAY_API_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "").strip()
+RAILWAY_PROJECT_ID = os.environ.get("RAILWAY_PROJECT_ID", "").strip()
+IBKR_GATEWAY_SERVICE_NAME = os.environ.get("IBKR_GATEWAY_SERVICE_NAME", "ibkr-gateway").strip()
+RAILWAY_GRAPHQL_URL = "https://backboard.railway.com/graphql/v2"
+
+
+def _railway_graphql(query: str, variables: dict) -> dict:
+    """Railway'in genel GraphQL API'sine istek atar (deployment durdurma/yeniden
+    baslatma icin). RAILWAY_API_TOKEN env var'i olmadan calismaz."""
+    if not RAILWAY_API_TOKEN:
+        raise RuntimeError("RAILWAY_API_TOKEN tanımlı değil - Railway kontrolü devre dışı.")
+    if not RAILWAY_PROJECT_ID:
+        raise RuntimeError("RAILWAY_PROJECT_ID tanımlı değil.")
+    resp = requests.post(
+        RAILWAY_GRAPHQL_URL,
+        headers={
+            "Authorization": f"Bearer {RAILWAY_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={"query": query, "variables": variables},
+        timeout=20,
+    )
+    data = resp.json()
+    if data.get("errors"):
+        raise RuntimeError(f"Railway API hatası: {data['errors']}")
+    return data.get("data") or {}
+
+
+def _railway_get_ibkr_gateway_deployment() -> dict:
+    """ibkr-gateway servisinin su anki (en son) deployment id + status bilgisini doner."""
+    query = """
+    query($projectId:String!){
+      project(id:$projectId){
+        environments(first:10){
+          edges{ node{
+            id name
+            serviceInstances(first:30){
+              edges{ node{ serviceId serviceName latestDeployment{ id status } } }
+            }
+          } }
+        }
+      }
+    }
+    """
+    data = _railway_graphql(query, {"projectId": RAILWAY_PROJECT_ID})
+    envs = ((data.get("project") or {}).get("environments") or {}).get("edges") or []
+    for env_edge in envs:
+        env_node = env_edge.get("node") or {}
+        if env_node.get("name") != "production":
+            continue
+        instances = ((env_node.get("serviceInstances") or {}).get("edges")) or []
+        for inst_edge in instances:
+            inst = inst_edge.get("node") or {}
+            if inst.get("serviceName") == IBKR_GATEWAY_SERVICE_NAME:
+                dep = inst.get("latestDeployment") or {}
+                return {"id": dep.get("id"), "status": dep.get("status")}
+    raise RuntimeError(f"'{IBKR_GATEWAY_SERVICE_NAME}' servisi Railway projesinde bulunamadı.")
+
+
+def _railway_stop_ibkr_gateway() -> dict:
+    """IB Gateway container'ini GERCEKTEN durdurur (IBKR sunucusundaki oturumu
+    biraktirmak icin) - sadece bizim python client'imizin baglantisini kesen
+    _ibkr_disconnect_locked()'tan farkli olarak, Gateway process'i tamamen
+    kapanir ve IBKR hesabi mobil/web girisi icin serbest kalir."""
+    dep = _railway_get_ibkr_gateway_deployment()
+    dep_id = dep.get("id")
+    if not dep_id:
+        raise RuntimeError("ibkr-gateway için aktif deployment bulunamadı.")
+    mutation = "mutation($id:String!){ deploymentStop(id:$id) }"
+    _railway_graphql(mutation, {"id": dep_id})
+    return {"deployment_id": dep_id}
+
+
+def _railway_restart_ibkr_gateway() -> dict:
+    """IB Gateway container'ini yeniden baslatir (durdurulmus deployment'i
+    rebuild etmeden ayaga kaldirir). Baslatinca IBKR 2FA onayi tekrar
+    gerekecektir - deploy sonrasi davranisin ayni."""
+    dep = _railway_get_ibkr_gateway_deployment()
+    dep_id = dep.get("id")
+    if not dep_id:
+        raise RuntimeError("ibkr-gateway için aktif deployment bulunamadı.")
+    mutation = "mutation($id:String!){ deploymentRestart(id:$id) }"
+    _railway_graphql(mutation, {"id": dep_id})
+    return {"deployment_id": dep_id}
+
+
 @app.route("/ibkr/disconnect", methods=["POST"])
 def ibkr_disconnect():
     """IBKR bağlantısını anında keser ve belirli süre yeniden bağlanmayı engeller."""
@@ -13092,6 +14262,66 @@ def ibkr_disconnect():
         "ibkr_auto_trader_enabled": False,
         "last_update": now_text(),
     })
+
+
+@app.route("/ibkr/release-session", methods=["POST"])
+def ibkr_release_session_alias():
+    """Kullanicinin acil durumda (mobil/web uzerinden manuel islem yapmak icin)
+    IBKR oturumunu GERCEKTEN serbest birakmasi icin: once /ibkr/disconnect ile
+    ayni mantikla bizim python client'imizi durdurur ve N dakika reconnect
+    engeller, SONRA Railway API uzerinden ibkr-gateway container'ini da
+    gercekten durdurur. Gateway container calisirken IBKR sunucusunda oturum
+    acik kaldigindan (mobil/web ile ayni anda giris IBKR tarafindan engelleniyor),
+    container durmadan gercek bir serbest birakma olmuyordu - bu duzeltiliyor."""
+    inner_response = ibkr_disconnect()
+    payload = inner_response.get_json() if hasattr(inner_response, "get_json") else inner_response[0].get_json()
+    gateway_stopped = False
+    gateway_error = ""
+    try:
+        _railway_stop_ibkr_gateway()
+        gateway_stopped = True
+    except Exception as e:
+        gateway_error = f"{type(e).__name__}: {e}"
+        print(f"[IBKR][release-session] Gateway container durdurulamadi: {gateway_error}")
+    payload["gateway_stopped"] = gateway_stopped
+    payload["gateway_stop_error"] = gateway_error
+    if not gateway_stopped:
+        payload["message"] = (
+            "Bot bağlantısı kesildi ama Gateway container durdurulamadı - "
+            "IBKR mobil/web girişi hâlâ engellenmiş olabilir: " + gateway_error
+        )
+    else:
+        payload["message"] = "IBKR Gateway container durduruldu - artık mobil/web ile giriş yapabilirsin."
+    return jsonify(payload)
+
+
+@app.route("/ibkr/resume-session", methods=["POST"])
+def ibkr_resume_session_alias():
+    """/ibkr/release-session ile birakilan oturumu erken bitirip hem manuel
+    baglanti blokunu kaldirir hem de Railway API ile ibkr-gateway container'ini
+    yeniden baslatir (bu, deploy sonrasinda oldugu gibi IBKR 2FA onayi
+    gerektirecektir - kullaniciya telefonundan onaylamasi hatirlatilmali)."""
+    inner_response = ibkr_reconnect_enable()
+    payload = inner_response.get_json() if hasattr(inner_response, "get_json") else inner_response[0].get_json()
+    gateway_restarted = False
+    gateway_error = ""
+    try:
+        _railway_restart_ibkr_gateway()
+        gateway_restarted = True
+    except Exception as e:
+        gateway_error = f"{type(e).__name__}: {e}"
+        print(f"[IBKR][resume-session] Gateway container yeniden baslatilamadi: {gateway_error}")
+    payload["gateway_restarted"] = gateway_restarted
+    payload["gateway_restart_error"] = gateway_error
+    if gateway_restarted:
+        payload["message"] = (
+            "IBKR Gateway yeniden başlatılıyor - birkaç dakika içinde telefonundan "
+            "2FA onayı gelecek, onaylayınca bot yeniden bağlanacak. "
+            "Auto-trader'ı ayrıca başlatmayı unutma."
+        )
+    else:
+        payload["message"] = "Manuel blok kaldırıldı ama Gateway yeniden başlatılamadı: " + gateway_error
+    return jsonify(payload)
 
 
 @app.route("/ibkr/reconnect-enable", methods=["POST"])
@@ -13404,6 +14634,104 @@ def profit_summary_endpoint():
         return jsonify({"ok": False, "error": str(e), "time": now_text()}), 200
 
 
+@app.route("/admin/config-healthcheck", methods=["GET"])
+def admin_config_healthcheck_endpoint():
+    """Her deploy sonrasi (veya istendigi zaman) kritik auto-trader
+    konfigurasyonunun beklenen degerlerle eslesip eslesmedigini kontrol eder.
+    Bu segmentte bulunan 'AUTO_TRADER.broker yanlislikla IBKR olarak
+    hardcode edilmis' turu regresyonlarin bir daha fark edilmeden production'a
+    sizmasini onlemek icin eklendi - buyuk bir rewrite/deploy sonrasi bu
+    endpoint'in kontrol edilmesi onerilir."""
+    problems: List[str] = []
+    checks: Dict[str, Any] = {}
+
+    with AUTO_LOCK:
+        auto_broker, auto_market, auto_asset, auto_conf = (
+            AUTO_TRADER.broker, AUTO_TRADER.market, AUTO_TRADER.asset_type, AUTO_TRADER.min_confidence,
+        )
+    checks["auto_trader"] = {"broker": auto_broker, "market": auto_market, "asset_type": auto_asset, "min_confidence": auto_conf}
+    if auto_broker != "BINANCE":
+        problems.append(f"AUTO_TRADER.broker beklenmedik: '{auto_broker}' (beklenen: BINANCE)")
+    if auto_market != "FUTURES":
+        problems.append(f"AUTO_TRADER.market beklenmedik: '{auto_market}' (beklenen: FUTURES)")
+    expected_auto_conf = int(os.getenv("BINANCE_FUTURES_AUTO_MIN_CONFIDENCE", "82"))
+    if auto_conf != expected_auto_conf:
+        problems.append(
+            f"AUTO_TRADER.min_confidence ({auto_conf}) env degeriyle ({expected_auto_conf}) eslesmiyor"
+        )
+
+    with SPOT_AUTO_LOCK:
+        spot_broker, spot_conf = SPOT_AUTO_TRADER.broker, SPOT_AUTO_TRADER.min_confidence
+    checks["spot_auto_trader"] = {"broker": spot_broker, "min_confidence": spot_conf}
+    if spot_broker != "BINANCE_SPOT":
+        problems.append(f"SPOT_AUTO_TRADER.broker beklenmedik: '{spot_broker}' (beklenen: BINANCE_SPOT)")
+
+    with IBKR_AUTO_LOCK:
+        ibkr_broker, ibkr_conf = IBKR_AUTO_TRADER.broker, IBKR_AUTO_TRADER.min_confidence
+    checks["ibkr_auto_trader"] = {"broker": ibkr_broker, "min_confidence": ibkr_conf}
+    if ibkr_broker != "IBKR":
+        problems.append(f"IBKR_AUTO_TRADER.broker beklenmedik: '{ibkr_broker}' (beklenen: IBKR)")
+
+    # Risk katmanlarinin kod seviyesinde gercekten var olup olmadigini dogrula
+    # (env var var ama kodda hic okunmuyor olabilir - daha once ADX'te oldugu gibi).
+    checks["risk_layers"] = {
+        "max_combined_qty_scale": MAX_COMBINED_QTY_SCALE,
+        "adx_min_trend_strength": ADX_MIN_TREND_STRENGTH,
+        "daily_max_loss_pct": DAILY_MAX_LOSS_PCT,
+        "weekly_max_loss_pct": WEEKLY_MAX_LOSS_PCT,
+    }
+    with _RISK_CIRCUIT_BREAKER_LOCK:
+        checks["risk_circuit_breaker_tripped"] = RISK_CIRCUIT_BREAKER["tripped"]
+
+    checks["ibkr_connected"] = bool(IBKR_RUNTIME.get("connected"))
+
+    return jsonify({
+        "ok": len(problems) == 0,
+        "healthy": len(problems) == 0,
+        "problems": problems,
+        "checks": checks,
+        "time": now_text(),
+    })
+
+
+@app.route("/risk/circuit-breaker/status", methods=["GET"])
+def risk_circuit_breaker_status_endpoint():
+    """Gunluk/haftalik zarar limiti devre kesicisinin (circuit breaker) anlik
+    durumunu doner: tetiklenmis mi, hangi periyotta (gunluk/haftalik),
+    gerceklesen zarar ve esik degeri neydi."""
+    with _RISK_CIRCUIT_BREAKER_LOCK:
+        state = dict(RISK_CIRCUIT_BREAKER)
+    state["ok"] = True
+    state["daily_max_loss_pct"] = DAILY_MAX_LOSS_PCT
+    state["weekly_max_loss_pct"] = WEEKLY_MAX_LOSS_PCT
+    state["time"] = now_text()
+    return jsonify(state)
+
+
+@app.route("/risk/circuit-breaker/reset", methods=["POST"])
+def risk_circuit_breaker_reset_endpoint():
+    """Kullanicinin durumu gozden gecirdikten sonra devre kesiciyi manuel
+    olarak sifirlamasi icin - bu sadece devre kesici bayragini temizler,
+    auto-traderlari TEKRAR BASLATMAZ (kullanici bunu ayrica /auto-trader/start
+    vb. ile bilinçli olarak yapmali - kasitli olarak iki ayri adim)."""
+    with _RISK_CIRCUIT_BREAKER_LOCK:
+        was_tripped = RISK_CIRCUIT_BREAKER["tripped"]
+        RISK_CIRCUIT_BREAKER.update({
+            "tripped": False,
+            "period": "",
+            "reason": "",
+            "tripped_at": "",
+            "realized_pnl_usd": 0.0,
+            "threshold_usd": 0.0,
+        })
+    return jsonify({
+        "ok": True,
+        "was_tripped": was_tripped,
+        "note": "Devre kesici sıfırlandı. Auto-trader'ları tekrar başlatmak için ilgili start endpoint'lerini çağırmanız gerekir.",
+        "time": now_text(),
+    })
+
+
 @app.route("/market-cycle/status", methods=["GET"])
 def market_cycle_status_endpoint():
     """Uzun vadeli (50/200 gunluk SMA) boga/ayi piyasa dongusu durumu - hisse
@@ -13652,6 +14980,60 @@ def ibkr_positions():
         return jsonify({"ok": False, "positions": [], "data": [], "broker": "IBKR", "error": str(e), "last_update": now_text()}), 500
 
 
+@app.route("/ibkr/executions", methods=["GET"])
+def ibkr_executions_route():
+    """IBKR hesabinin GERCEK islem/dolum (execution/fill) gecmisini dogrudan
+    broker'dan sorgular (ib.reqExecutions() - bizim DB'mizde HICBIR sekilde
+    takip edilmeyen, IBKR'in kendi kayitlarindan gelen kesin veri). Kullanicinin
+    bildirdigi 'pozisyon kapandi ama dfinansda gözükmüyor' sorununda, bot disinda
+    (TWS/mobil, manuel) gerceklesen bir kapanisin GERCEK fiyat/zamanini geriye
+    donuk bulup dogrulamak/kaydetmek icin eklendi. ?symbol=USO ile filtrelenebilir,
+    varsayilan olarak son gunun tum execution'larini dondurur."""
+    symbol = request.args.get("symbol", "").strip().upper()
+    try:
+        days = int(request.args.get("days", "2"))
+    except Exception:
+        days = 2
+
+    def _run(ib, ibs):
+        exec_filter = ibs.ExecutionFilter()
+        if symbol:
+            exec_filter.symbol = symbol
+        if IBKR_ACCOUNT:
+            exec_filter.acctCode = IBKR_ACCOUNT
+        cutoff = datetime.now() - timedelta(days=max(days, 0))
+        exec_filter.time = cutoff.strftime("%Y%m%d %H:%M:%S")
+        fills = ib.reqExecutions(exec_filter)
+        rows = []
+        for f in fills:
+            try:
+                ex = f.execution
+                c = f.contract
+                rows.append({
+                    "symbol": getattr(c, "symbol", "-"),
+                    "asset_type": getattr(c, "secType", "-"),
+                    "exchange": getattr(c, "exchange", "-"),
+                    "currency": getattr(c, "currency", "-"),
+                    "side": getattr(ex, "side", "-"),
+                    "shares": safe_float(getattr(ex, "shares", 0)),
+                    "price": safe_float(getattr(ex, "price", 0)),
+                    "avg_price": safe_float(getattr(ex, "avgPrice", 0)),
+                    "time": str(getattr(ex, "time", "")),
+                    "order_id": getattr(ex, "orderId", None),
+                    "exec_id": getattr(ex, "execId", ""),
+                })
+            except Exception:
+                continue
+        rows.sort(key=lambda r: r.get("time", ""))
+        return rows
+
+    try:
+        rows = ibkr_execute(_run, timeout=30.0) or []
+        return jsonify({"ok": True, "executions": rows, "count": len(rows), "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "executions": [], "error": str(e), "last_update": now_text()}), 500
+
+
 @app.route("/ibkr-positions", methods=["GET"])
 def ibkr_positions_alias():
     # Mobil uygulama bu path'i cagiriyor; /ibkr/positions ile ayni veriyi dondurur.
@@ -13858,6 +15240,40 @@ def ibkr_ai_signal():
             signal = "SELL"
             confidence = min(90, int(57 + abs(change) * 10))
             reason = "IBKR momentum negatif."
+
+        # Asiri yukselis (overbought) kontrolu: sadece gunluk intraday
+        # momentumu degil, gunluk kapanis bazli RSI(14)'u de bakar - bir hisse
+        # cok hizli/cok yukselmisse (ve piyasa genel rejimi guclu BULL degilse)
+        # BUY yerine SHORT adayi olarak SELL sinyaline ceviriyoruz.
+        overbought_note = ""
+        try:
+            daily_stats = get_symbol_daily_change_and_rsi(normalize_symbol(symbol), "IBKR")
+        except Exception:
+            daily_stats = None
+        if daily_stats and daily_stats.get("rsi") is not None:
+            daily_change = daily_stats["change_24h"]
+            rsi = daily_stats["rsi"]
+            # RSI(14) zaten SURDURULEN/BIRIKMIS bir yukselisi (haftalarca surse
+            # bile) yansitir - "cok artmis" durumu tek bir gunun buyuk siramasina
+            # bagli degildir. daily_change > 0 sarti sadece "hisse zaten dususe
+            # gecmemis, hala yukselis/yatay bolgede" teyidi icin tutuluyor.
+            if rsi >= IBKR_OVERBOUGHT_RSI_THRESHOLD and daily_change > 0:
+                regime_info = get_bull_bear_market_regime("STOCK")
+                regime = regime_info.get("regime", "TRANSITION")
+                if regime != "BULL":
+                    signal = "SELL"
+                    confidence = max(0, min(92, int(58 + (rsi - IBKR_OVERBOUGHT_RSI_THRESHOLD) * 1.5 + daily_change * 2)))
+                    reason = (
+                        f"Aşırı yükseliş: son günde %{daily_change:.2f} artış + RSI {rsi:.1f} "
+                        f"(aşırı alım). Piyasa rejimi {regime} (BULL değil) - geri çekilme "
+                        f"beklentisiyle SHORT adayı."
+                    )
+                else:
+                    overbought_note = (
+                        f" [Not: %{daily_change:.2f} artış + RSI {rsi:.1f} aşırı alım seviyesinde "
+                        f"ama piyasa rejimi BULL - trende karşı SHORT riskli kabul edilip atlandı.]"
+                    )
+
         if signal in ["BUY", "SELL"]:
             confidence = max(0, min(95, confidence + learning_bias(signal)))
         return jsonify({
@@ -13870,7 +15286,7 @@ def ibkr_ai_signal():
             "orderbook": synthetic_orderbook(change, "ibkr"),
             "signal": signal,
             "confidence": confidence,
-            "reason": reason,
+            "reason": reason + overbought_note,
             "last_update": now_text(),
             "engine_enabled": ENGINE.enabled,
             "data_source": "ibkr",
@@ -14117,7 +15533,17 @@ def auto_trader_start():
     body = request.get_json(force=True) or {}
     with AUTO_LOCK:
         AUTO_TRADER.enabled = True
-        AUTO_TRADER.broker = str(body.get("broker", AUTO_TRADER.broker)).upper()
+        # GUVENLIK: broker/market/asset_type/exchange/currency BILEREK request
+        # govdesinden okunmuyor ve degistirilemiyor. Bu endpoint SADECE Binance
+        # Futures auto-trader'i kontrol eder; bu alanlar disaridan gelen bir
+        # deger ile "IBKR"/"STK" gibi yanlis bir kimlige donusturulursen daha
+        # once yasadigimiz kritik hataya (crypto sembollerin IBKR mantigiyla
+        # islenmesi, otomatik TP/SL'in hic calismamasi) tekrar yol acabilir.
+        AUTO_TRADER.broker = "BINANCE"
+        AUTO_TRADER.market = "FUTURES"
+        AUTO_TRADER.asset_type = "CRYPTO"
+        AUTO_TRADER.exchange = ""
+        AUTO_TRADER.currency = "USDT"
         AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", AUTO_TRADER.symbol))
         if "symbols" in body:
             raw_symbols = body.get("symbols")
@@ -14125,10 +15551,6 @@ def auto_trader_start():
                 AUTO_TRADER.symbols = [normalize_symbol(s) for s in raw_symbols if str(s).strip()]
             else:
                 AUTO_TRADER.symbols = _parse_symbol_list(str(raw_symbols))
-        AUTO_TRADER.market = str(body.get("market", AUTO_TRADER.market)).upper()
-        AUTO_TRADER.asset_type = str(body.get("asset_type", AUTO_TRADER.asset_type)).upper()
-        AUTO_TRADER.exchange = str(body.get("exchange", AUTO_TRADER.exchange)).upper()
-        AUTO_TRADER.currency = str(body.get("currency", AUTO_TRADER.currency)).upper()
         AUTO_TRADER.mode = "live" if str(body.get("mode", AUTO_TRADER.mode)).lower() == "live" else "paper"
         AUTO_TRADER.quantity = max(0.0, safe_float(body.get("quantity"), AUTO_TRADER.quantity))
         AUTO_TRADER.interval_sec = max(8, int(safe_float(body.get("interval_sec"), AUTO_TRADER.interval_sec)))
@@ -14163,6 +15585,9 @@ def ibkr_auto_trader_start():
     body = request.get_json(force=True) or {}
     with IBKR_AUTO_LOCK:
         IBKR_AUTO_TRADER.enabled = True
+        # GUVENLIK: broker kimligi bu endpoint icin sabit - request govdesinden
+        # asla okunmaz/degistirilmez (bkz. /auto-trader/start'taki ayni koruma).
+        IBKR_AUTO_TRADER.broker = "IBKR"
         IBKR_AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", IBKR_AUTO_TRADER.symbol))
         if IBKR_US_ONLY:
             _info = get_ibkr_symbol_market_info(IBKR_AUTO_TRADER.symbol)
@@ -14223,6 +15648,9 @@ def spot_auto_trader_start():
     body = request.get_json(force=True) or {}
     with SPOT_AUTO_LOCK:
         SPOT_AUTO_TRADER.enabled = True
+        # GUVENLIK: broker kimligi bu endpoint icin sabit - request govdesinden
+        # asla okunmaz/degistirilmez (bkz. /auto-trader/start'taki ayni koruma).
+        SPOT_AUTO_TRADER.broker = "BINANCE_SPOT"
         SPOT_AUTO_TRADER.symbol = normalize_symbol(body.get("symbol", SPOT_AUTO_TRADER.symbol))
         if "symbols" in body:
             raw_symbols = body.get("symbols")
@@ -14308,6 +15736,107 @@ def spot_auto_trader_reconcile():
         return jsonify({"ok": not result.get("error"), **result, "last_update": now_text()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "added": [], "removed": [], "last_update": now_text()}), 200
+
+
+@app.route("/auto-trader/ibkr/reconcile", methods=["POST"])
+def ibkr_auto_trader_reconcile():
+    """IBKR'deki gercek acik pozisyonlari, botun en son bildigi anlik goruntuyle
+    (ibkr_position_state) manuel olarak eslestirir - bot disinda (TWS/mobil,
+    manuel) kapatilmis bir pozisyon varsa tespit edip position_closures +
+    AI İşlem Günlüğü'ne kaydeder. Normalde arka planda 2 dakikada bir otomatik
+    calisir (bkz. reconcile_ibkr_positions) - bu endpoint anlik/manuel tetikleme
+    icindir (kullanicinin bildirdigi 'pozisyon kapandi ama dfinansda gözükmüyor'
+    sorunu icin)."""
+    try:
+        result = reconcile_ibkr_positions()
+        return jsonify({"ok": not result.get("error"), **result, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "closed_detected": [], "last_update": now_text()}), 200
+
+
+@app.route("/position-closures/manual-record", methods=["POST"])
+def position_closures_manual_record():
+    """IBKR/Binance'de bot disinda (manuel/TWS/mobil) kapanmis ve
+    reconcile_ibkr_positions/reconcile_spot_positions tarafindan (henuz bir
+    onceki-anlik-goruntu baz alinamadigi icin) YAKALANAMAMIS gecmis bir
+    kapanisi elle (geriye donuk) kaydetmek icindir - kullanicinin bildirdigi
+    'USO pozisyonu kapandi ama dfinansda hic gözükmüyor' sorununda, bu tespit
+    mekanizmasi YENI eklendigi icin ondan ONCE gerceklesen kapanislar icin
+    tek yol budur. entry_price bilinmiyorsa 0 gonderilebilir (bu durumda
+    gerceklesen K/Z hesaplanamaz, sadece kapanis islemi kayit altina alinir)."""
+    try:
+        body = request.get_json(silent=True) or {}
+        broker = str(body.get("broker", "")).upper().strip()
+        symbol = str(body.get("symbol", "")).upper().strip()
+        side = str(body.get("side", "LONG")).upper().strip()
+        qty = safe_float(body.get("qty"))
+        entry_price = safe_float(body.get("entry_price"))
+        exit_price = safe_float(body.get("exit_price"))
+        close_reason = str(body.get("close_reason", "MANUAL")).upper().strip() or "MANUAL"
+        detail = str(body.get("detail", "")).strip()
+        if not broker or not symbol or qty <= 0 or exit_price <= 0:
+            return jsonify({"ok": False, "error": "broker, symbol, qty (>0) ve exit_price (>0) zorunludur."}), 400
+        if entry_price > 0:
+            if side == "SHORT":
+                pnl_amount = (entry_price - exit_price) * qty
+            else:
+                pnl_amount = (exit_price - entry_price) * qty
+            pnl_pct = (pnl_amount / (entry_price * qty)) * 100.0
+        else:
+            pnl_amount = 0.0
+            pnl_pct = 0.0
+            detail = (detail + " (Giriş fiyatı bilinmediği için gerçekleşen K/Z hesaplanamadı.)").strip()
+        db_record_position_closure(
+            broker=broker,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            realized_pnl=pnl_amount,
+            realized_pnl_pct=pnl_pct,
+            close_reason=close_reason,
+            detail=detail or "Manuel (geriye dönük) kayıt.",
+        )
+        db_insert_auto_history(
+            broker=broker,
+            symbol=symbol,
+            action="MANUEL_KAPANIS",
+            confidence=0,
+            price=exit_price,
+            reason=detail or "Manuel (geriye dönük) kayıt.",
+            execution={"simulated": True, "message": "Manuel (geriye dönük) kapanış kaydı."},
+        )
+        return jsonify({"ok": True, "realized_pnl": pnl_amount, "realized_pnl_pct": pnl_pct, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/position-closures/delete-by-symbol", methods=["POST"])
+def position_closures_delete_by_symbol():
+    """position_closures'a yanlislikla (ornegin test amacli) eklenmis bir
+    kaydi temizlemek icindir - bu tablo normalde HICBIR ZAMAN otomatik
+    silinmez, bu yuzden hatali/test kayitlarini duzeltmenin tek yolu budur."""
+    try:
+        body = request.get_json(silent=True) or {}
+        broker = str(body.get("broker", "")).upper().strip()
+        symbol = str(body.get("symbol", "")).upper().strip()
+        if not broker or not symbol:
+            return jsonify({"ok": False, "error": "broker ve symbol zorunludur."}), 400
+        with DB_LOCK:
+            conn = sqlite3.connect(RUNTIME_DB_PATH)
+            try:
+                cur = conn.execute(
+                    "DELETE FROM position_closures WHERE broker = ? AND symbol = ?",
+                    (broker, symbol),
+                )
+                conn.commit()
+                deleted = cur.rowcount
+            finally:
+                conn.close()
+        return jsonify({"ok": True, "deleted": deleted, "last_update": now_text()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/chain-order/status", methods=["GET"])
@@ -14401,9 +15930,17 @@ def market_signals_external():
     except Exception as e:
         macro_regime = {"error": str(e)}
     try:
+        carry_trade_risk = get_carry_trade_risk_bias()
+    except Exception as e:
+        carry_trade_risk = {"error": str(e)}
+    try:
         whale_positioning = get_whale_positioning(symbol)
     except Exception as e:
         whale_positioning = {"error": str(e)}
+    try:
+        whale_vs_retail_divergence = get_whale_vs_retail_divergence(symbol)
+    except Exception as e:
+        whale_vs_retail_divergence = {"error": str(e)}
     try:
         geopolitical_risk = get_geopolitical_risk_signal()
     except Exception as e:
@@ -14425,7 +15962,9 @@ def market_signals_external():
         "funding_rate": funding,
         "fear_greed_index": fear_greed,
         "macro_regime": macro_regime,
+        "carry_trade_risk": carry_trade_risk,
         "whale_positioning": whale_positioning,
+        "whale_vs_retail_divergence": whale_vs_retail_divergence,
         "geopolitical_risk": geopolitical_risk,
         "regulatory_activity": regulatory_activity,
         "news_sentiment": news_sentiment,
@@ -15549,6 +17088,13 @@ def status_alias():
         "status": "online",
         "ibkr_connected": ibkr_connected,
         "auto_trader_enabled": auto_enabled,
+        # Mobil uygulamanin sistem sagligi (DFSystemWatchdog) bu 3 alani
+        # okuyor - eskiden burada hic donmuyorlardi, bu yuzden hepsi eksik
+        # sayilip her zaman 'API key/secret eksik - CRITICAL' gosteriliyordu,
+        # backend aslinda tamamen saglikliyken bile.
+        "api_key": bool(BINANCE_API_KEY),
+        "secret": bool(BINANCE_SECRET_KEY),
+        "real_orders_enabled": LIVE_TRADING,
         "time": now_text(),
     })
 
