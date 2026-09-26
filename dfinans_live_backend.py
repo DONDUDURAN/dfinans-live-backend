@@ -10644,7 +10644,7 @@ _SPOT_RECONCILE_LAST_TS = 0.0
 # Bu katman GUNLUK/HAFTALIK TOPLAM gerceklesen zarara (hesap degerinin bir
 # yuzdesi olarak) bir tavan koyar; asilirsa TUM auto-traderlar durdurulur.
 # Env ile ayarlanabilir; varsayilanlar tutucu (gunluk %3, haftalik %6).
-DAILY_MAX_LOSS_PCT = float(os.getenv("DAILY_MAX_LOSS_PCT", "3.0"))
+DAILY_MAX_LOSS_PCT = float(os.getenv("DAILY_MAX_LOSS_PCT", "10.0"))  # Increased from 3% for more trading room
 WEEKLY_MAX_LOSS_PCT = float(os.getenv("WEEKLY_MAX_LOSS_PCT", "10.0"))  # Increased from 6% to account for manual closes
 _LOSS_BREAKER_CHECK_INTERVAL_SEC = 60
 _LOSS_BREAKER_LAST_TS = 0.0
