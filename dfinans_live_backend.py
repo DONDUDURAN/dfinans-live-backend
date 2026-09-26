@@ -17101,7 +17101,48 @@ def status_alias():
 
 @app.route("/trade-log", methods=["GET"])
 def trade_log():
-    return jsonify({"logs": TRADE_LOG[:100], "last_update": now_text()})
+    logs = TRADE_LOG[:100]
+    
+    # Calculate system performance summary
+    total_pnl = 0
+    win_count = 0
+    loss_count = 0
+    times = []
+    
+    for log in TRADE_LOG:
+        order_info = log.get('order', {})
+        pnl = order_info.get('pnl', 0)
+        time_str = order_info.get('time', '')
+        
+        total_pnl += pnl
+        if time_str:
+            times.append(time_str)
+        if pnl > 0:
+            win_count += 1
+        elif pnl < 0:
+            loss_count += 1
+    
+    first_time = min(times) if times else None
+    last_time = max(times) if times else None
+    total_trades = len(TRADE_LOG)
+    win_rate = (100 * win_count / total_trades) if total_trades > 0 else 0
+    
+    return jsonify({
+        "logs": logs,
+        "last_update": now_text(),
+        "system_performance": {
+            "first_trade_date": first_time,
+            "last_trade_date": last_time,
+            "total_trades": total_trades,
+            "total_net_pnl_usd": round(total_pnl, 2),
+            "winning_trades": win_count,
+            "losing_trades": loss_count,
+            "win_rate_percent": round(win_rate, 1),
+            "auto_trader_enabled": AUTO_TRADER.enabled,
+            "risk_limit_daily_percent": DAILY_MAX_LOSS_PCT,
+            "risk_limit_weekly_percent": WEEKLY_MAX_LOSS_PCT,
+        }
+    })
 
 
 @app.route("/trade-journal", methods=["GET"])
