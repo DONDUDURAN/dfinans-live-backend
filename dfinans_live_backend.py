@@ -17292,3 +17292,186 @@ if __name__ == "__main__":
     print(f"Canlı emir modu: {LIVE_TRADING}")
     print("Railway/Cloud için /health endpointini kontrol et.\n")
     app.run(host=HOST, port=PORT, debug=False)
+
+
+@app.route("/valuation-scan", methods=["GET"])
+def valuation_scan():
+    """Market-wide valuation analysis: check overvalued symbols in trading pool."""
+    
+    # Binance Futures Crypto Valuations
+    crypto_valuations = {
+        "BTCUSDT": {
+            "name": "Bitcoin",
+            "risk_level": "⚠️ VOLATIL",
+            "valuation": "FAIR",
+            "concern": "Market leader, ancak volatilite yüksek",
+            "action": "Careful position sizing"
+        },
+        "ETHUSDT": {
+            "name": "Ethereum",
+            "risk_level": "⚠️ VOLATIL",
+            "valuation": "FAIR",
+            "concern": "Smart contract platform, ecosystem dependent",
+            "action": "Monitor BTC correlation"
+        },
+        "BNBUSDT": {
+            "name": "Binance Coin",
+            "risk_level": "✅ BALANCED",
+            "valuation": "FAIR",
+            "concern": "Exchange token, relatively stable",
+            "action": "OK to trade"
+        },
+        "SOLUSDT": {
+            "name": "Solana",
+            "risk_level": "⚠️ RİSKLİ",
+            "valuation": "FAIR-EXPENSIVE",
+            "concern": "Low liquidity, ecosystem attacks history",
+            "action": "Smaller position size"
+        },
+        "XRPUSDT": {
+            "name": "Ripple",
+            "risk_level": "⚠️ SPEKÜLASYON",
+            "valuation": "SPECULATION",
+            "concern": "Legal uncertainty (SEC lawsuits), price driven by news",
+            "action": "AVOID or micro position"
+        },
+        "DOGEUSDT": {
+            "name": "Dogecoin",
+            "risk_level": "❌ AŞIRI RİSKLİ",
+            "valuation": "OVERVALUED",
+            "concern": "Zero fundamentals, purely meme-driven",
+            "action": "🚫 REMOVE FROM POOL - NO EDGE"
+        },
+        "ADAUSDT": {
+            "name": "Cardano",
+            "risk_level": "⚠️ SPEKÜLASYON",
+            "valuation": "EXPENSIVE",
+            "concern": "Promise-based, delayed delivery, hope-driven",
+            "action": "Reduce size or avoid"
+        },
+        "AVAXUSDT": {
+            "name": "Avalanche",
+            "risk_level": "⚠️ RİSKLİ",
+            "valuation": "FAIR",
+            "concern": "Small cap, pump&dump vulnerability",
+            "action": "Smaller position size"
+        },
+    }
+    
+    # IBKR Stocks Valuations
+    stock_valuations = {
+        "AAPL": {
+            "name": "Apple",
+            "sector": "Technology",
+            "risk_level": "DÜŞÜK",
+            "valuation": "FAIR",
+            "pe_ratio": "~25-30x",
+            "concern": "Growth plateau, mature market",
+            "action": "Safe to trade"
+        },
+        "MSFT": {
+            "name": "Microsoft",
+            "sector": "Technology",
+            "risk_level": "ORTA",
+            "valuation": "FAIR",
+            "pe_ratio": "~30-35x",
+            "concern": "AI hype priced in, competition from OpenAI",
+            "action": "Monitor valuations"
+        },
+        "NVDA": {
+            "name": "Nvidia",
+            "sector": "Semiconductor",
+            "risk_level": "YÜKSEK",
+            "valuation": "⚠️ OVERVALUED",
+            "pe_ratio": "40-50x",
+            "concern": "AI bubble risk, strong competition (AMD/QCOM), margin pressure",
+            "action": "⚠️ REDUCED SIZE or AVOID LONG"
+        },
+        "AMD": {
+            "name": "Advanced Micro Devices",
+            "sector": "Semiconductor",
+            "risk_level": "ORTA",
+            "valuation": "FAIR-CHEAP",
+            "pe_ratio": "~20-25x",
+            "concern": "Gaining share from Intel, execution risk",
+            "action": "OK to trade"
+        },
+        "TSLA": {
+            "name": "Tesla",
+            "sector": "Auto/Energy",
+            "risk_level": "YÜKSEK",
+            "valuation": "⚠️ OVERVALUED",
+            "pe_ratio": "50+x",
+            "concern": "Valuation detached from earnings, Musk legal/political risks, EV competition",
+            "action": "⚠️ REDUCED SIZE or SHORT bias"
+        },
+        "GOOGL": {
+            "name": "Google/Alphabet",
+            "sector": "Technology",
+            "risk_level": "ORTA",
+            "valuation": "FAIR",
+            "pe_ratio": "~20-25x",
+            "concern": "Ad market maturation, AI competition",
+            "action": "OK to trade"
+        },
+        "AMZN": {
+            "name": "Amazon",
+            "sector": "Technology/Retail",
+            "risk_level": "ORTA",
+            "valuation": "FAIR",
+            "pe_ratio": "~35-40x",
+            "concern": "AWS dominance but cloud competition rising",
+            "action": "OK to trade"
+        },
+        "META": {
+            "name": "Meta Platforms",
+            "sector": "Technology/Social",
+            "risk_level": "ORTA",
+            "valuation": "FAIR-CHEAP",
+            "pe_ratio": "~15-20x",
+            "concern": "Rebound play, Reality Labs burns billions",
+            "action": "Rebound opportunity"
+        },
+        "NFLX": {
+            "name": "Netflix",
+            "sector": "Media",
+            "risk_level": "ORTA",
+            "valuation": "FAIR",
+            "pe_ratio": "~20-25x",
+            "concern": "Market saturation, price hike risks, password sharing ended",
+            "action": "Monitor subscriber growth"
+        },
+        "INTC": {
+            "name": "Intel",
+            "sector": "Semiconductor",
+            "risk_level": "YÜKSEK",
+            "valuation": "CHEAP",
+            "pe_ratio": "~5-10x",
+            "concern": "Fundamental decline, turnaround uncertain, margin pressure",
+            "action": "HIGH RISK turnaround"
+        },
+    }
+    
+    # Summary
+    overvalued_cryptos = [k for k, v in crypto_valuations.items() if "OVERVALUED" in v.get("valuation", "") or "RİSKLİ" in v.get("risk_level", "")]
+    overvalued_stocks = [k for k, v in stock_valuations.items() if "OVERVALUED" in v.get("valuation", "")]
+    
+    return jsonify({
+        "ok": True,
+        "timestamp": now_text(),
+        "crypto_valuations": crypto_valuations,
+        "stock_valuations": stock_valuations,
+        "overvalued_cryptos": overvalued_cryptos,
+        "overvalued_stocks": overvalued_stocks,
+        "summary": {
+            "message": f"⚠️ OVERVALUED RISK: {len(overvalued_cryptos)} cryptos + {len(overvalued_stocks)} stocks identified",
+            "recommendations": [
+                "🚫 REMOVE DOGE from pool - zero fundamentals",
+                "⚠️ REDUCE NVDA size - P/E 40-50x, AI bubble",
+                "⚠️ REDUCE TSLA size - Valuation/Earnings detached",
+                "📉 CONSIDER SHORT on overvalued tech stocks",
+                "✅ INCREASE position in undervalued (META, AMD, INTC when appropriate)"
+            ]
+        }
+    })
+
